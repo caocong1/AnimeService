@@ -1,0 +1,2 @@
+'use strict';
+document.querySelector('#login-form').addEventListener('submit',async e=>{e.preventDefault();const b=e.target.querySelector('button'),m=document.querySelector('#login-message');b.disabled=true;m.textContent='正在连接…';try{const r=await fetch('/api/access/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:e.target.code.value})});const d=await r.json();if(!r.ok)throw Error(d.error||d.detail||'连接失败');location.replace('/')}catch(err){m.textContent=err.message}finally{b.disabled=false}});

@@ -1,0 +1,200 @@
+"""Read-only local media streaming and an isolated danmu-api adapter."""
+import hashlib,json,math,subprocess,time,threading,shutil,secrets,re
+from pathlib import Path
+from urllib.parse import urlparse
+import requests
+from fastapi import HTTPException
+from fastapi.responses import FileResponse
+from .db import ROOT
+from .subtitles import Subtitles
+from .auto_danmu import match as match_danmu
+
+
+def maintain_danmu(stop):
+    """The already installed adapter is supervised locally, without a public proxy."""
+    import psutil
+    repo=ROOT/'vendor/danmuapi'
+    node=shutil.which('node')
+    if not node or not (repo/'node_modules').exists():return
+    child=None
+    while not stop.is_set() and not (ROOT/'data/stop.request').exists():
+        try:
+            pidfile=ROOT/'data/danmu.pid'
+            p=psutil.Process(int(pidfile.read_text())) if pidfile.exists() else None
+            alive=bool(p and Path(p.cwd()).resolve()==repo.resolve() and 'danmu_api/server.js' in p.cmdline())
+        except (OSError,ValueError,psutil.Error):alive=False
+        if not alive:
+            try:
+                with (ROOT/'logs/danmu-start.log').open('ab') as log:
+                    child=subprocess.Popen([node,'danmu_api/server.js'],cwd=repo,stdout=log,stderr=log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                pidfile.write_text(str(child.pid))
+            except OSError:pass
+        stop.wait(30)
+    if child and child.poll() is None:child.terminate()
+
+
+class WebPlayer:
+    def __init__(self,db):
+        self.db=db
+        self.lock=threading.Lock()
+        self.sources={}
+        self.subtitles=Subtitles(db)
+        self.auto_lock=threading.Lock()
+        self.auto_cache={}
+        self.inventory=[]
+        self.inventory_mtime=0
+        inventory=db.path.parent/'inventory.json'
+        if inventory.exists():self.inventory=json.loads(inventory.read_text(encoding='utf-8'))
+        with db.connect() as c:
+            c.execute('''CREATE TABLE IF NOT EXISTS web_progress(
+                media_id TEXT PRIMARY KEY,position REAL DEFAULT 0,duration REAL DEFAULT 0,
+                last_played REAL,updated REAL,sources TEXT DEFAULT '[]')''')
+
+    def media(self):
+        inventory=self.db.path.parent/'inventory.json'
+        if inventory.exists() and inventory.stat().st_mtime_ns!=self.inventory_mtime:
+            self.inventory=json.loads(inventory.read_text(encoding='utf-8'));self.inventory_mtime=inventory.stat().st_mtime_ns
+        rows={}
+        for x in self.inventory:
+            if x.get('legacy_active'):continue
+            path=Path(x['path'])
+            key=hashlib.sha256(str(path).lower().encode()).hexdigest()[:32]
+            rows[key]={'id':key,'name':path.name,'folder':path.parent.name,'path':str(path),'size':x['size'],'legacy':True}
+        for x in self.db.rows("SELECT episodes.*,shows.title FROM episodes JOIN shows ON shows.id=episodes.show_id WHERE episodes.status='complete' OR (episodes.status='legacy_unverified' AND episodes.hash IS NULL)"):
+            key=hashlib.sha256(x['path'].lower().encode()).hexdigest()[:32]
+            if x['status']=='legacy_unverified' and key not in rows:continue
+            rows[key]={'id':key,'name':Path(x['path']).name,'folder':x['title'],'path':x['path'],'size':x['size'],'legacy':not bool(x['hash']),'show_id':x['show_id'],'episode':x['episode'],'unverified':x['status']=='legacy_unverified'}
+        return rows
+
+    def item(self,key):
+        row=self.media().get(key)
+        if not row:raise HTTPException(404,'未找到已盘点的媒体')
+        p=Path(row['path'])
+        if not p.is_file() or p.stat().st_size!=row['size']:raise ValueError('文件不存在或大小已变化，请重新核查')
+        return row
+
+    def danmu(self,path,params=None):
+        # This local, separately installed service never receives media bytes or credentials.
+        r=requests.get('http://127.0.0.1:4872/api/v2/'+path,params=params,timeout=(3,90))
+        r.raise_for_status();d=r.json()
+        if d.get('success') is False:raise ValueError('弹幕源未返回结果，请核对标题或稍后重试')
+        return d
+
+    def bind_episodes(self,d):
+        with self.lock:
+            self.sources={k:v for k,v in self.sources.items() if time.time()-v['created']<86400}
+            for ep in d.get('bangumi',{}).get('episodes',[]):
+                ep.pop('source_key',None)
+                url=str(ep.get('url',''))
+                if re.fullmatch(r'[1-9][0-9]{0,11}',url) and str(ep.get('episodeTitle','')).startswith('【bahamut】'):
+                    url='https://ani.gamer.com.tw/animeVideo.php?sn='+url
+                try:
+                    u=urlparse(url)
+                    if u.scheme not in ('http','https') or u.hostname not in ('www.bilibili.com','www.iqiyi.com','v.youku.com','v.qq.com','ani.gamer.com.tw') or u.username or u.password or u.port:continue
+                except ValueError:continue
+                if u.hostname=='ani.gamer.com.tw' and not re.fullmatch(r'https://ani\.gamer\.com\.tw/animeVideo\.php\?sn=[1-9][0-9]{0,11}',url):continue
+                key=secrets.token_urlsafe(18)
+                self.sources[key]={'url':url,'created':time.time()}
+                ep['source_key']=key
+        return d
+
+    def comments(self,ids):
+        with self.lock:
+            if not isinstance(ids,list) or not 1<=len(ids)<=5 or any(not isinstance(i,str) or i not in self.sources or time.time()-self.sources[i]['created']>=86400 for i in ids):
+                raise ValueError('请重新搜索并选择1–5个剧集来源；后台重启后需要重新核对')
+            urls=[self.sources[i]['url'] for i in ids]
+        combined=[];sources=[]
+        for sid,url in zip(ids,urls):
+            try:
+                rows=normalize_comments(self.danmu('comment',{'url':url,'format':'json'}))
+                combined+=rows;sources.append({'id':sid,'count':len(rows)})
+            except Exception:sources.append({'id':sid,'count':0,'error':'来源获取失败或超时，可重试'})
+        seen=set();out=[]
+        for x in combined:
+            k=(round(x['time'],1),x['text'],x['mode'])
+            if k not in seen:seen.add(k);out.append(x)
+        return {'comments':sorted(out,key=lambda x:x['time']),'sources':sources,'fetched_at':time.time()}
+
+    def auto_danmu(self,key):
+        item=self.item(key)
+        show=self.db.one('SELECT title,original,mapping FROM shows WHERE id=?',(item.get('show_id'),))
+        cache_key=(key,item.get('show_id'),item.get('episode'),item.get('unverified'),json.dumps(show,sort_keys=True))
+        with self.auto_lock:
+            cached=self.auto_cache.get(cache_key)
+            if cached and time.time()-cached[0]<600:return cached[1]
+            try:result=match_danmu(self,item)
+            except Exception:return {'status':'error','message':'弹幕自动查找暂时失败，可重试或手动选择来源。','comments':[],'sources':[]}
+            if result['status']=='matched':
+                if len(self.auto_cache)>=100:self.auto_cache.clear()
+                self.auto_cache[cache_key]=(time.time(),result)
+            return result
+
+
+def normalize_comments(data):
+    result=[];seen=set()
+    for c in data.get('comments',[])[:100000]:
+        try:
+            p=c['p'].split(',');t=float(p[0]);mode=int(p[1]);color=int(p[2]);text=str(c['m'])[:300]
+            if not math.isfinite(t) or not 0<=t<=86400 or mode not in (1,4,5) or not text:continue
+            key=(round(t,1),text,mode)
+            if key in seen:continue
+            seen.add(key);result.append({'time':t,'text':text,'mode':{1:0,5:1,4:2}[mode],'color':f'#{color & 0xffffff:06x}'})
+        except (ValueError,KeyError,IndexError,TypeError):continue
+    return sorted(result,key=lambda x:x['time'])
+
+
+def register_webplayer(app,db):
+    player=WebPlayer(db)
+    @app.get('/watch')
+    def page():return FileResponse(ROOT/'static/watch.html')
+    @app.get('/api/web/media')
+    def media(q:str='',show_id:int=0,offset:int=0,limit:int=150):
+        rows=sorted(player.media().values(),key=lambda x:(x['legacy'],x['folder'],x['name']))
+        return [{k:v for k,v in r.items() if k!='path'} for r in rows
+            if (not show_id or r.get('show_id')==show_id) and q.lower() in (r['name']+' '+r['folder']).lower()][max(0,offset):max(0,offset)+min(500,max(1,limit))]
+    @app.get('/api/web/media/{key}')
+    def item(key:str):
+        r=player.item(key)
+        return {**{k:v for k,v in r.items() if k!='path'},'progress':db.one('SELECT * FROM web_progress WHERE media_id=?',(key,))}
+    @app.get('/api/web/media/{key}/stream')
+    def stream(key:str):
+        r=player.item(key)
+        return FileResponse(r['path'],media_type='video/mp4' if Path(r['path']).suffix.lower()=='.mp4' else 'video/x-matroska',headers={'Cross-Origin-Resource-Policy':'same-origin'})
+    @app.post('/api/web/media/{key}/progress')
+    def progress(key:str,p:dict):
+        player.item(key);pos=float(p.get('position',0));duration=float(p.get('duration',0))
+        if not all(math.isfinite(x) and 0<=x<=86400 for x in (pos,duration)) or pos>duration+1:raise ValueError('播放进度无效')
+        now=time.time();played=now if p.get('playing') is True and pos>0 else None
+        db.execute('''INSERT INTO web_progress(media_id,position,duration,last_played,updated) VALUES(?,?,?,?,?)
+          ON CONFLICT(media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,
+          last_played=coalesce(excluded.last_played,web_progress.last_played),updated=excluded.updated''',(key,pos,duration,played,now))
+        return {'ok':True} # Never turn a seek, open, or end event into "finished".
+    @app.post('/api/web/media/{key}/desktop')
+    def desktop(key:str):
+        r=player.item(key);exe=Path(db.get('dandan_exe'))
+        if exe.name.lower()!='dandanplay.exe' or not exe.is_file():raise ValueError('弹弹play路径无效')
+        subprocess.Popen([str(exe),r['path']],cwd=exe.parent,shell=False)
+        return {'ok':True}
+    @app.get('/api/web/danmu/search')
+    def search(q:str):
+        if not 1<=len(q)<=100:raise ValueError('请输入作品名')
+        return player.danmu('search/anime',{'keyword':q})
+    @app.get('/api/web/danmu/show/{sid}')
+    def episodes(sid:int):
+        return player.bind_episodes(player.danmu('bangumi/'+str(sid)))
+    @app.post('/api/web/danmu/comments')
+    def comments(p:dict):
+        return player.comments(p.get('episodes',[]))
+    @app.get('/api/web/media/{key}/danmu')
+    def automatic_danmu(key:str):
+        return player.auto_danmu(key)
+    @app.get('/api/web/media/{key}/subtitles')
+    def subtitles(key:str):
+        tracks=player.subtitles.tracks(player.item(key))
+        supported=[t for t in tracks if t['supported']]
+        return {'tracks':[{**t,'url':f'/api/web/media/{key}/subtitles/{t["index"]}.vtt'} for t in tracks],
+                'default':supported[0]['index'] if supported else None}
+    @app.get('/api/web/media/{key}/subtitles/{index}.vtt')
+    def subtitle_file(key:str,index:int):
+        path=player.subtitles.extract(player.item(key),index)
+        return FileResponse(path,media_type='text/vtt; charset=utf-8',headers={'Cross-Origin-Resource-Policy':'same-origin'})
