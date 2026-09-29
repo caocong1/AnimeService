@@ -1,0 +1,180 @@
+/* 番屿 design tokens. Three families (场次 screen, 线路 line, 格子 grid) x two modes (light, dark).
+   Foundation > family structure ([data-family]) > family x mode colour ([data-family][data-mode]).
+   Source of truth; .design/system/DESIGN.md describes the roles. */
+
+:root {
+  --font: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", system-ui, sans-serif;
+  --num: "Bahnschrift", "DIN Alternate", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px; --s-7: 48px; --s-8: 64px;
+  --control: 44px;
+  --bar-h: 64px;
+  --page-max: 1440px;
+  --gutter: clamp(16px, 3.2vw, 48px);
+  --dur: 180ms;
+  --ease: cubic-bezier(.2, 0, 0, 1);
+  --focus-w: 2px;
+  --z-bar: 30; --z-toast: 50;
+}
+
+/* ---------- Family structure ---------- */
+
+:root, [data-family="screen"] {
+  --text-xs: 13px; --text-s: 14px; --text: 16px; --text-m: 18px; --text-l: 24px; --text-xl: 32px;
+  --num-s: 20px; --num-m: 32px; --num-l: 44px; --num-xl: 80px;
+  --lh: 1.6;
+  --radius: 0px; --radius-s: 0px; --radius-pill: 0px;
+  --row-gap: 2px;
+  --cover-w: 160px; --hero-cover-w: 240px;
+  --ticket-w: 200px;
+  --pad: var(--s-5);
+  --weight-strong: 650;
+}
+[data-family="line"] {
+  --text-xs: 12px; --text-s: 13px; --text: 15px; --text-m: 17px; --text-l: 22px; --text-xl: 28px;
+  --num-s: 16px; --num-m: 24px; --num-l: 32px; --num-xl: 56px;
+  --lh: 1.55;
+  --radius: 12px; --radius-s: 8px; --radius-pill: 999px;
+  --row-gap: 0px;
+  --cover-w: 64px; --hero-cover-w: 200px;
+  --ticket-w: auto;
+  --pad: var(--s-4);
+  --weight-strong: 600;
+}
+[data-family="grid"] {
+  --text-xs: 12px; --text-s: 13px; --text: 14px; --text-m: 16px; --text-l: 20px; --text-xl: 24px;
+  --num-s: 14px; --num-m: 20px; --num-l: 28px; --num-xl: 40px;
+  --lh: 1.5;
+  --radius: 0px; --radius-s: 2px; --radius-pill: 2px;
+  --row-gap: 0px;
+  --cover-w: 40px; --hero-cover-w: 180px;
+  --ticket-w: auto;
+  --pad: var(--s-3);
+  --weight-strong: 600;
+}
+
+@media (max-width: 720px) {
+  :root, [data-family="screen"] { --text-s: 14px; --text: 16px; --text-l: 20px; --text-xl: 22px; --num-m: 26px; --num-l: 30px; --num-xl: 48px; --cover-w: 72px; --hero-cover-w: 112px; --pad: var(--s-4); }
+  [data-family="line"] { --text: 15px; --text-l: 19px; --text-xl: 22px; --num-xl: 40px; --cover-w: 52px; --hero-cover-w: 104px; }
+  [data-family="grid"] { --text: 15px; --text-s: 14px; --text-l: 18px; --text-xl: 20px; --cover-w: 40px; --hero-cover-w: 96px; }
+  :root { --bar-h: 56px; }
+}
+
+/* ---------- Colour: family x mode ---------- */
+/* Roles: bg, layer-1 (rows, panels), layer-2 (raised, hover), line (hairline), line-strong,
+   ink, muted, dim, signal (playable / primary), on-signal, signal-wash, warn (缺集, attention),
+   danger (error, destructive), ok (healthy). Line family adds --l1..--l8 for per-show lines. */
+
+:root, [data-family="screen"][data-mode="dark"], [data-family="screen"]:not([data-mode]) {
+  color-scheme: dark;
+  --bg: oklch(0.228 0.004 60);
+  --layer-1: oklch(0.262 0.005 60);
+  --layer-2: oklch(0.305 0.006 60);
+  --line: oklch(0.37 0.005 60);
+  --line-strong: oklch(0.58 0.006 60);
+  --ink: oklch(0.955 0.004 80);
+  --muted: oklch(0.79 0.006 80);
+  --dim: oklch(0.72 0.006 80);
+  --signal: oklch(0.82 0.115 170);
+  --on-signal: oklch(0.22 0.03 170);
+  --signal-wash: oklch(0.33 0.04 170);
+  --warn: oklch(0.83 0.12 80);
+  --danger: oklch(0.74 0.15 28);
+  --ok: oklch(0.82 0.115 170);
+  --scrim: oklch(0.228 0.004 60 / .88);
+}
+[data-family="screen"][data-mode="light"] {
+  color-scheme: light;
+  --bg: oklch(0.975 0.003 80);
+  --layer-1: oklch(0.945 0.004 80);
+  --layer-2: oklch(0.91 0.005 80);
+  --line: oklch(0.86 0.005 80);
+  --line-strong: oklch(0.59 0.006 80);
+  --ink: oklch(0.22 0.006 60);
+  --muted: oklch(0.44 0.006 60);
+  --dim: oklch(0.50 0.006 60);
+  --signal: oklch(0.49 0.10 170);
+  --on-signal: oklch(0.99 0.005 170);
+  --signal-wash: oklch(0.93 0.035 170);
+  --warn: oklch(0.49 0.12 60);
+  --danger: oklch(0.52 0.18 28);
+  --ok: oklch(0.49 0.10 170);
+  --scrim: oklch(0.975 0.003 80 / .9);
+}
+
+[data-family="line"][data-mode="light"], [data-family="line"]:not([data-mode]) {
+  color-scheme: light;
+  --bg: #F6F5F1;
+  --layer-1: #FFFFFF;
+  --layer-2: #EEEDE8;
+  --line: #DCDAD3;
+  --line-strong: #85837D;
+  --ink: #1A1B1F;
+  --muted: #55565E;
+  --dim: #63646B;
+  --signal: #1A1B1F;
+  --on-signal: #FFFFFF;
+  --signal-wash: #E7E6E0;
+  --warn: #B3261E;
+  --danger: #B3261E;
+  --ok: #2A7A34;
+  --scrim: rgb(246 245 241 / .9);
+  --l1: #1D5FB8; --l2: #B04E00; --l3: #7A3E9D; --l4: #2A7A34;
+  --l5: #A81F5F; --l6: #00766A; --l7: #86590A; --l8: #4A44A6;
+}
+[data-family="line"][data-mode="dark"] {
+  color-scheme: dark;
+  --bg: #15161A;
+  --layer-1: #1E1F24;
+  --layer-2: #292A30;
+  --line: #34353C;
+  --line-strong: #76777F;
+  --ink: #F1F0EB;
+  --muted: #AEAFB7;
+  --dim: #9C9DA5;
+  --signal: #F1F0EB;
+  --on-signal: #15161A;
+  --signal-wash: #2C2D33;
+  --warn: #FF8A80;
+  --danger: #FF8A80;
+  --ok: #7DD08A;
+  --scrim: rgb(21 22 26 / .9);
+  --l1: #6FA8F5; --l2: #F29A55; --l3: #C08BE3; --l4: #7DCB86;
+  --l5: #EE7FAF; --l6: #4FC7B7; --l7: #D9B055; --l8: #A29CF2;
+}
+
+[data-family="grid"][data-mode="light"], [data-family="grid"]:not([data-mode]) {
+  color-scheme: light;
+  --bg: oklch(0.985 0.002 250);
+  --layer-1: oklch(0.985 0.002 250);
+  --layer-2: oklch(0.955 0.004 250);
+  --line: oklch(0.88 0.006 250);
+  --line-strong: oklch(0.62 0.008 250);
+  --ink: oklch(0.22 0.012 258);
+  --muted: oklch(0.46 0.012 258);
+  --dim: oklch(0.52 0.012 258);
+  --signal: oklch(0.44 0.16 264);
+  --on-signal: oklch(0.985 0.002 250);
+  --signal-wash: oklch(0.95 0.022 264);
+  --warn: oklch(0.50 0.15 40);
+  --danger: oklch(0.50 0.19 28);
+  --ok: oklch(0.44 0.16 264);
+  --scrim: oklch(0.985 0.002 250 / .92);
+}
+[data-family="grid"][data-mode="dark"] {
+  color-scheme: dark;
+  --bg: oklch(0.20 0.004 80);
+  --layer-1: oklch(0.235 0.004 80);
+  --layer-2: oklch(0.27 0.005 80);
+  --line: oklch(0.34 0.005 80);
+  --line-strong: oklch(0.55 0.006 80);
+  --ink: oklch(0.94 0.006 80);
+  --muted: oklch(0.76 0.008 80);
+  --dim: oklch(0.72 0.008 80);
+  --signal: oklch(0.74 0.12 264);
+  --on-signal: oklch(0.20 0.03 264);
+  --signal-wash: oklch(0.31 0.04 264);
+  --warn: oklch(0.80 0.12 55);
+  --danger: oklch(0.74 0.15 28);
+  --ok: oklch(0.74 0.12 264);
+  --scrim: oklch(0.20 0.004 80 / .92);
+}

@@ -1,7 +1,33 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>番屿 · 我的追番</title><link rel="stylesheet" href="/static/style.css"><meta name="theme-color" content="#171a18"><link rel="icon" href="/static/icon.svg"><link rel="stylesheet" href="/static/redesign.css"></head>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>追番 · 番屿</title>
+<meta name="theme-color" content="#1f1e1c">
+<link rel="icon" href="/static/icon.svg">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
+</head>
 <body>
-<main><header class="page-heading"><div><p class="eyebrow" id="eyebrow">YOUR NEXT EPISODE</p><h1 id="heading">我的追番</h1><p id="subtitle">把想看的故事，留在这里。</p></div><div class="header-actions"><span id="health" class="pill">正在连接后台</span><button id="check-now" class="outline">检查新集</button></div></header>
-<div class="subnav"><button data-nav="home">我的追番</button><button data-nav="autumn">十月新番</button><button data-nav="summer">七月新番</button><button data-nav="history">观看与历史</button></div><section id="spotlight" aria-label="接着看"></section><div id="notice" class="notice">加载本机数据…</div><section id="toolbar"><div class="search"><input id="search" placeholder="搜索作品中文名 / 日文名" aria-label="搜索作品"></div><select id="kind" aria-label="作品类型"><option value="series">TV / 网络新番</option><option value="all">含电影与短片</option><option value="uncertain">含地区待核实</option></select><select id="filter" aria-label="追番状态"><option value="">全部状态</option><option value="wish">想看</option><option value="trial">试看</option><option value="watching">在追</option><option value="paused">暂搁</option><option value="completed">看完</option><option value="dropped">弃番</option></select><select id="sort" aria-label="作品排序"><option value="unwatched">新集待看优先</option><option value="latest">最近更新优先</option></select><button id="sync-catalog" class="outline">刷新资料</button></section>
-<section id="content"></section><footer>Bangumi 资料 · 蜜柑 / 动漫花园来源<br>追番、下载、观看各自记录。弃番保留历史和文件。</footer></main>
-<dialog id="detail" aria-label="作品详情"><div id="detail-body"></div></dialog><div id="toast" role="status"></div><script src="/static/shell.js"></script><script src="/static/app.js"></script></body></html>
+<main id="main">
+  <header class="page-head"><h1>追番</h1><p class="meta" id="summary"></p></header>
+  <div class="board">
+    <section class="screens" id="screens" aria-label="可以看的"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></section>
+    <aside class="side" id="side" aria-label="其他"></aside>
+  </div>
+  <section id="shelf-section" aria-labelledby="shelf-title">
+    <h2 class="group-head" id="shelf-title" style="margin-top:var(--s-7)"><b>全部追番</b><span class="count" id="shelf-count"></span></h2>
+    <div class="shelf-tools">
+      <div class="seg" id="state-filter" role="group" aria-label="按状态筛选"></div>
+      <label class="search"><span class="sr">搜索追番</span><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input id="q" type="search" placeholder="搜索" autocomplete="off"></label>
+    </div>
+    <div class="shelf" id="shelf"></div>
+  </section>
+</main>
+<script src="/static/core.js"></script>
+<script src="/static/home.js"></script>
+</body>
+</html>

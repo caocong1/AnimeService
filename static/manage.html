@@ -1,1 +1,29 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>番屿 · 季度与空间</title><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="/static/watch.css"><meta name="theme-color" content="#171a18"><link rel="icon" href="/static/icon.svg"><link rel="stylesheet" href="/static/redesign.css"></head><body class="cinema"><a href="/">← 返回番屿</a><h1>季度与空间</h1><a href="/transition">七月接续与原有片库 →</a><p>自动准备新番，你决定看什么、保留什么。</p><section class="panel"><h2>整季自动下载</h2><p id="downloader-note"></p><p id="season-note">读取中…</p><button id="refresh-downloads">立即检查新集与补查</button> <button id="toggle-season" class="outline">读取中…</button><details><summary>收录范围与暂停规则</summary><p class="muted">提前开播不等10月1日；半年番、年番已订阅后持续检查，同一作品不按季度重置集号。真正的新一季条目需重新核验季号和偏移。从2026年10月开始，每季日本TV／网络新番默认准备下载，一集一版。只在来源、季集和已有文件核验通过后启用；没有资源的作品等待重查。有旧文件、映射含糊或错误会列在下面。自动下载不会将作品标为在追。</p><p class="muted">弃番、暂搁、看完及已清理作品不会被季度同步重新启用。关闭此开关只停止收录新作品，已开启的下载可在作品详情暂停。</p></details><div id="season-list"></div></section><section class="panel" id="space"><h2>待清理</h2><p>弃番或180天未播放后列入此处。只有你核对文件并点击确认删除才会腾出空间，历史、评价和观看记录保留。旧动画不参与。</p><p id="cleanup-note"></p><div id="cleanup-list"></div></section><p id="message" role="status"></p><script src="/static/shell.js"></script><script src="/static/manage.js"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>后台 · 番屿</title>
+<meta name="theme-color" content="#1f1e1c">
+<link rel="icon" href="/static/icon.svg">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
+</head>
+<body>
+<main id="main">
+  <header class="page-head"><h1>后台</h1></header>
+  <nav class="tabs-local" aria-label="后台">
+    <a href="#status" data-sec="status">状态</a><a href="#season" data-sec="season">季度收录</a><a href="#cleanup" data-sec="cleanup">清理</a><a href="#legacy" data-sec="legacy">旧片库</a><a href="#settings" data-sec="settings">设置</a>
+  </nav>
+  <section class="m-section" id="sec-status" data-sec="status"><div class="skeleton"></div></section>
+  <section class="m-section" id="sec-season" data-sec="season" hidden></section>
+  <section class="m-section" id="sec-cleanup" data-sec="cleanup" hidden></section>
+  <section class="m-section" id="sec-legacy" data-sec="legacy" hidden></section>
+  <section class="m-section" id="sec-settings" data-sec="settings" hidden></section>
+</main>
+<script src="/static/core.js"></script>
+<script src="/static/manage.js"></script>
+</body>
+</html>

@@ -1,8 +1,48 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>番屿 · 网页放映室</title><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="/static/watch.css"><meta name="theme-color" content="#171a18"><link rel="icon" href="/static/icon.svg"><link rel="stylesheet" href="/static/redesign.css"></head>
-<body class="cinema"><header><div><a href="/">← 返回番屿</a><p class="eyebrow">LOCAL CINEMA</p><h1>网页放映室</h1><p>私人片库 · 多平台弹幕 · 继续上次进度</p></div><a class="outline" href="#episode-library">选择剧集</a></header>
-<div class="cinema-grid"><section><div id="screen"><div class="screen-placeholder">选择一集，开始播放</div></div><h2 id="playing-title">尚未选择视频</h2><p id="play-note" role="status">选择视频后自动查找弹幕，并读取可用的内嵌文字字幕。</p><div class="row"><button id="desktop" class="outline" disabled>本机播放器打开</button><button id="resume" class="outline" disabled>继续上次进度</button></div>
-<div class="playback-tracks"><label>字幕 <select id="subtitle-choice" disabled aria-label="字幕轨道"><option value="">关闭</option></select></label><span id="subtitle-note" role="status"></span></div><div class="auto-danmu-status"><p id="danmu-note" role="status">选择视频后自动查找本集弹幕。</p><button id="retry-danmu" class="outline small" disabled>重新查找</button></div><details class="danmu-options"><summary>弹幕来源与时间轴设置</summary><div class="panel"><h2>弹幕来源</h2><p class="muted">自动匹配有误或未找到时，可在这里核对作品、季和集，再添加来源。可合并多个平台；删减版、配音版可能有不同时间轴。巴哈姆特经本机代理连接，请保持代理运行。</p><form id="danmu-search" class="row"><input name="query" placeholder="搜索作品名，如：葬送的芙莉莲" required maxlength="100"><button>查找弹幕</button></form><div id="danmu-results"></div><div id="danmu-episodes"></div><div id="selected-sources"></div><div class="row"><button id="load-danmu">加载 / 刷新所选弹幕</button><label>时间偏移（秒）<input id="offset" type="number" min="-3600" max="3600" step="0.5" value="0"></label></div><p class="muted">正数使弹幕延后。最多合并5个来源，同内容同时间去重；显示更新时间和失败来源。此页不发送弹幕。</p></div></details></section>
-<section class="panel media-panel" id="episode-library"><h2>本机动画</h2><input id="media-search" placeholder="搜索文件名 / 文件夹" aria-label="搜索本机动画"><p class="muted">已完成下载及旧动画只读盘点，最多显示500条，可输入名称筛选。播放旧文件不会把它纳入自动下载或清理。</p><div id="media-list"></div></section></div>
-<footer>播放器 ArtPlayer · 弹幕聚合 <a href="https://github.com/canmo101/danmuapi" target="_blank" rel="noopener">danmuapi</a> · <a href="https://github.com/zhw2590582/ArtPlayer" target="_blank" rel="noopener">开源信息</a><br>网页只保存实际播放进度；打开、跳转和播放结束不会自动标记整集看完。</footer>
-<script src="/static/shell.js"></script><script src="/static/vendor/artplayer.js"></script><script src="/static/vendor/artplayer-plugin-danmuku.js"></script><script src="/static/watch.js"></script></body></html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>放映室 · 番屿</title>
+<meta name="theme-color" content="#1f1e1c">
+<link rel="icon" href="/static/icon.svg">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
+</head>
+<body class="watch">
+<main id="main">
+  <div class="cinema">
+    <div>
+      <div class="screen-wrap"><div id="screen"></div><div class="screen-state" id="screen-state"><span>正在打开…</span></div></div>
+      <div class="now">
+        <div class="what"><a id="parent" href="/library"></a><h1 id="title">放映室</h1></div>
+        <div class="acts" id="acts"></div>
+      </div>
+      <div class="tracks">
+        <label>字幕 <select id="subtitle" disabled><option value="">关闭</option></select></label>
+        <span id="sub-note"></span>
+        <span>弹幕 <b id="danmu-note">—</b></span>
+        <button class="btn small quiet" type="button" id="retry-danmu" disabled>重新匹配</button>
+      </div>
+      <details class="more watch-extra" id="danmu-more">
+        <summary>弹幕来源与时间轴<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5.5 6.5 6.5L9 18.5"/></svg></summary>
+        <div class="body danmu-panel">
+          <form id="danmu-search" class="row"><label class="sr" for="danmu-q">作品名</label><input id="danmu-q" name="query" required maxlength="100" placeholder="作品名"><button class="btn" type="submit">搜索</button></form>
+          <div id="danmu-results" class="links"></div>
+          <div id="danmu-episodes" class="row"></div>
+          <div id="danmu-selected" class="list-rows"></div>
+          <div class="row"><button class="btn" type="button" id="load-danmu">加载所选来源</button><label class="field" style="grid-auto-flow:column;align-items:center">偏移（秒）<input id="offset" type="number" min="-3600" max="3600" step="0.5" value="0"></label></div>
+        </div>
+      </details>
+    </div>
+    <aside class="playlist" id="playlist" aria-label="分集"></aside>
+  </div>
+</main>
+<script src="/static/core.js"></script>
+<script src="/static/vendor/artplayer.js"></script>
+<script src="/static/vendor/artplayer-plugin-danmuku.js"></script>
+<script src="/static/watch.js"></script>
+</body>
+</html>

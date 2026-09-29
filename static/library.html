@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>片库 · 番屿</title>
+<meta name="theme-color" content="#1f1e1c">
+<link rel="icon" href="/static/icon.svg">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
+</head>
+<body>
+<main id="main">
+  <header class="page-head"><h1>片库</h1><p class="meta" id="summary"></p></header>
+  <nav class="tabs-local" role="tablist" aria-label="片库">
+    <button type="button" role="tab" id="tab-files" data-tab="files" aria-controls="files">文件</button>
+    <button type="button" role="tab" id="tab-history" data-tab="history" aria-controls="history">观看记录</button>
+  </nav>
+  <section id="files" role="tabpanel" aria-labelledby="tab-files">
+    <div class="hist-bar"><label class="search"><span class="sr">搜索文件</span><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input id="fq" type="search" placeholder="文件名或文件夹" autocomplete="off"></label></div>
+    <div id="file-list"><div class="skeleton"></div></div>
+  </section>
+  <section id="history" role="tabpanel" aria-labelledby="tab-history" hidden>
+    <div class="hist-bar">
+      <label class="search"><span class="sr">搜索记录</span><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input id="hq" type="search" placeholder="作品或文件名" autocomplete="off"></label>
+      <div class="seg" role="group" aria-label="范围"><button type="button" data-pending="1">待确认</button><button type="button" data-pending="0">全部</button></div>
+      <span class="status" id="sync-status"></span>
+      <span style="margin-left:auto;display:flex;gap:var(--s-2)"><button class="btn" type="button" id="sync">同步弹弹play</button><button class="btn primary" type="button" id="confirm" disabled>确认看完</button></span>
+    </div>
+    <div class="table-wrap"><table class="hist-table"><thead><tr><th><label class="hit"><span class="sr">全选</span><input type="checkbox" id="all"></label></th><th>作品</th><th>最近播放</th><th>状态</th><th></th></tr></thead><tbody id="records"></tbody></table></div>
+    <div class="pager"><span id="page"></span><button class="btn small" type="button" id="prev">上一页</button><button class="btn small" type="button" id="next">下一页</button></div>
+  </section>
+</main>
+<script src="/static/core.js"></script>
+<script src="/static/library.js"></script>
+</body>
+</html>

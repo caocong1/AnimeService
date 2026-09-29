@@ -12,6 +12,14 @@ from .download_policy import status as downloader_status
 from .sources import Catalog,parse_rss
 from .releases import episodes_of,Rejected,season_of,validate_title
 from .deployment import load as load_deployment
+from .board import episode_board
+
+def catalog_quarters(today=None):
+    """The quarter that opens within three weeks and the one before it, oldest first."""
+    horizon=(today or datetime.date.today())+datetime.timedelta(days=21)
+    y,m=horizon.year,((horizon.month-1)//3)*3+1
+    py,pm=(y,m-3) if m>1 else (y-1,10)
+    return [f'{py}-{pm:02}',f'{y}-{m:02}']
 
 def create_app(db=None,engine=None,start_worker=True):
     db=db or Store();engine=engine or Engine(db);token=secrets.token_urlsafe(32);jobs=threading.Lock()
@@ -47,7 +55,7 @@ def create_app(db=None,engine=None,start_worker=True):
         public=authority in deployment.get('public_authorities',[]) and request.url.scheme=='https'
         if not local and not public and not lan:return JSONResponse({'error':'访问地址不受信任'},status_code=403)
         path=request.url.path
-        public_asset=path in ('/login','/static/login.js','/static/style.css','/static/redesign.css','/static/themes.css','/static/shell.js','/static/icon.svg','/static/manifest.webmanifest')
+        public_asset=path in ('/login','/static/login.js','/static/tokens.css','/static/app.css','/static/theme.js','/static/icon.svg','/static/manifest.webmanifest')
         login=path=='/api/access/login'
         if lan and path=='/login':return RedirectResponse('/',status_code=303)
         if not (local or lan) and not (public_asset or login) and not access.valid(request):
@@ -93,9 +101,15 @@ def create_app(db=None,engine=None,start_worker=True):
     def index():return FileResponse(ROOT/'static/index.html')
     @app.get('/manage')
     def manage_page():return FileResponse(ROOT/'static/manage.html')
+    @app.get('/show/{sid}')
+    def show_page(sid:int):return FileResponse(ROOT/'static/show.html')
+    @app.get('/season')
+    def season_page():return FileResponse(ROOT/'static/season.html')
+    @app.get('/library')
+    def library_page():return FileResponse(ROOT/'static/library.html')
     app.mount('/static',StaticFiles(directory=ROOT/'static'),name='static')
     @app.get('/api/bootstrap')
-    def bootstrap(request:Request):return {'token':token,'settings':{k:db.get(k,v) for k,v in DEFAULTS.items()},'version':'1.0-ui','local':request.state.local}
+    def bootstrap(request:Request):return {'token':token,'settings':{k:db.get(k,v) for k,v in DEFAULTS.items()},'version':'2.0-ui','local':request.state.local,'quarters':catalog_quarters()}
     @app.get('/api/home')
     def home_summary():
         import hashlib
@@ -124,7 +138,7 @@ def create_app(db=None,engine=None,start_worker=True):
     @app.get('/api/status')
     def status():
         return {'service':'AnimeService','heartbeat':db.get('heartbeat'),'qbit':db.get('qbit_health'),'downloader':downloader_status(db),'catalog_job':db.get('catalog_job'),
-            'catalogs':{q:db.get('catalog_'+q) for q in ('2026-07','2026-10')},
+            'catalogs':{q:db.get('catalog_'+q) for q in catalog_quarters()},
             'sources':db.rows('SELECT sources.*,shows.title FROM sources JOIN shows ON shows.id=sources.show_id'),
             'tasks':db.rows('SELECT * FROM tasks ORDER BY created DESC LIMIT 100'),
             'events':db.rows('SELECT * FROM events ORDER BY id DESC LIMIT 60'),'player':db.get('player_health'),'dandan_history':db.get('dandan_history_health'),
@@ -173,19 +187,26 @@ def create_app(db=None,engine=None,start_worker=True):
                     except OSError:pass
             s['download_updated']=max(times,default=0)
             s['unwatched']=sum(e['status']=='complete' and not db.one('SELECT 1 FROM watches WHERE show_id=? AND episode=? AND finished=1',(s['id'],e['episode'])) for e in eps)
+            if scope in ('home','history'):s.update(episode_board(db,engine,s))
         data.sort(key=lambda s:(0 if s['downloaded'] else 1,-s['download_updated'] if s['downloaded'] else 0,s['air_date'] or '9999',s['id']))
         return data
     @app.get('/api/shows/{sid}')
     def details(sid:int):
+        import hashlib
         s=show(sid);s['mapping']=json.loads(s['mapping']);s['tags']=json.loads(s['tags']);s['metadata']=json.loads(s['metadata'])
-        return {'show':s,'episodes':db.rows('SELECT episodes.*,coalesce(watches.finished,0) finished,watches.method watch_method FROM episodes LEFT JOIN watches ON episodes.show_id=watches.show_id AND episodes.episode=watches.episode WHERE episodes.show_id=? ORDER BY episode',(sid,)),
+        episodes=db.rows('SELECT episodes.*,coalesce(watches.finished,0) finished,watches.method watch_method FROM episodes LEFT JOIN watches ON episodes.show_id=watches.show_id AND episodes.episode=watches.episode WHERE episodes.show_id=? ORDER BY episode',(sid,))
+        for e in episodes:
+            # The web player's media key, so an episode row can link straight to /watch.
+            e['media_id']=hashlib.sha256(e['path'].lower().encode()).hexdigest()[:32] if e['path'] else None
+            e['progress']=db.one('SELECT position,duration FROM web_progress WHERE media_id=?',(e['media_id'],)) if e['media_id'] else None
+        return {'show':s,'episodes':episodes,
             'watches':db.rows('SELECT * FROM watches WHERE show_id=? ORDER BY episode',(sid,)),
             'sources':db.rows('SELECT * FROM sources WHERE show_id=?',(sid,)),
             'candidates':db.rows('SELECT * FROM candidates WHERE show_id=? ORDER BY id DESC LIMIT 100',(sid,)),
-            'gaps':engine.gaps(sid),'airings':db.rows('SELECT * FROM airings WHERE show_id=? ORDER BY episode',(sid,))}
+            'gaps':engine.gaps(sid),'board':episode_board(db,engine,s),'airings':db.rows('SELECT * FROM airings WHERE show_id=? ORDER BY episode',(sid,))}
     @app.post('/api/catalog/sync')
     def sync(payload:dict):
-        quarters=payload.get('quarters',['2026-07','2026-10'])
+        quarters=payload.get('quarters',catalog_quarters())
         if not isinstance(quarters,list) or len(quarters)>4:raise ValueError('最多同步四个季度')
         parsed=[]
         for q in quarters:
@@ -197,6 +218,15 @@ def create_app(db=None,engine=None,start_worker=True):
     def refresh(sid:int):show(sid);return background(lambda:engine.catalog.details(sid))
     @app.post('/api/shows/{sid}/state')
     def set_state(sid:int,payload:dict):engine.state(sid,payload['state']);return {'ok':True}
+    @app.post('/api/shows/{sid}/unselect')
+    def unselect(sid:int):
+        # Undo for a fresh "想看": only a wish with no downloads, sources or authorization leaves the list.
+        with db.gate:
+            s=show(sid)
+            if s['state']!='wish' or s['authorized'] or db.one('SELECT 1 FROM tasks WHERE show_id=?',(sid,)) or db.one('SELECT 1 FROM watches WHERE show_id=?',(sid,)):
+                raise ValueError('这部作品已有记录，只能改状态')
+            db.execute('UPDATE shows SET selected=0 WHERE id=?',(sid,))
+        return {'ok':True}
     @app.post('/api/shows/{sid}/feedback')
     def feedback(sid:int,payload:dict):
         show(sid);rating=payload.get('rating')

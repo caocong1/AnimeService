@@ -1,11 +1,11 @@
 import json
 from pathlib import Path
-from fastapi.responses import FileResponse
+from fastapi.responses import RedirectResponse
 from .db import ROOT
 
 def register_transition(app,db,engine):
     @app.get('/transition')
-    def page():return FileResponse(ROOT/'static/transition.html')
+    def page():return RedirectResponse('/manage#legacy',status_code=308)
     @app.get('/api/transition')
     def status():
         report=db.get('transition',{'shows':[]})

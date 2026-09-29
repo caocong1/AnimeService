@@ -4,17 +4,20 @@
 
 | 目录 / 文件 | 内容 |
 | --- | --- |
-| static/index.html、app.js | 首页、作品详情、筛选和偏好 |
-| static/watch.* | 网页播放器、轨道和弹幕 |
-| static/style.css、redesign.css、refinement.css、themes.css | 现有样式与主题，修改前检查覆盖关系 |
-| static/manage.*、transition.*、history-sync.* | 季度与清理、旧片库关联、观看历史 |
+| static/tokens.css、app.css、theme.js | 设计令牌（三个主题族 × 亮/暗）与全部组件样式；`theme.js` 在首帧前应用主题 |
+| static/core.js | 共享：API、页头与底栏、格式化、封面、分集条与"票" |
+| static/index.html、home.js | 追番：可以看的下一集、下载与首播、全部追番 |
+| static/show.*、season.*、library.* | 作品页、新番（季度目录）、片库（文件与观看记录） |
+| static/watch.* | 放映室：播放、标记看完与下一集、字幕与弹幕 |
+| static/manage.* | 后台：状态、季度收录、清理、旧片库、设置（主题、下载偏好、设备） |
+| anime/board.py | 首页与作品页的逐集状态（只读） |
 | anime/app.py | HTTP 路由及 Host / Origin / 会话检查 |
 | anime/db.py、engine.py | SQLite 状态、来源轮询、持久意图与对账 |
 | anime/download_policy.py、thunder_bridge.py、qbit.py | 下载门禁与适配 |
 | anime/webplayer.py、subtitles.py、dandan_history.py | 媒体、字幕、观看同步 |
 | tests/ | 隔离测试 |
 
-前端没有构建框架，编辑 static 文件后刷新即可。不要只打开 file:// HTML，页面依赖同源 API。播放器第三方文件通过 setup_web.py 安装。
+前端没有构建框架，编辑 static 文件后刷新即可。设计说明见 `.design/`（本地文件，不提交）。不要只打开 file:// HTML，页面依赖同源 API。播放器第三方文件通过 setup_web.py 安装。
 
 ## 开发配置
 
@@ -24,7 +27,7 @@
 - `ANIMESERVICE_START_WORKER=0`：关闭 ASGI 应用的后台线程；不等于禁用所有手动 API 操作。
 - `ANIMESERVICE_DEPLOYMENT`：默认 `data/deployment.json`；开发时指向独立文件或不存在的路径，避免读取生产访问设置。
 
-测试 conftest 会在导入应用前设置独立临时数据库和配置路径。运行 `python -m pytest -q`。需要检查 JavaScript 时使用 `node --check static/app.js` 等；安装网页依赖后可运行 Node 代理范围测试。
+测试 conftest 会在导入应用前设置独立临时数据库和配置路径。运行 `python -m pytest -q`。需要检查 JavaScript 时使用 `node --check static/core.js` 等；安装网页依赖后可运行 Node 代理范围测试。
 
 ## 部署与本机配置
 

@@ -1,7 +1,7 @@
 """One-way local history import. No credentials, remote server, or player writes."""
 import datetime, hashlib, json, math, ntpath, shutil, subprocess, tempfile, threading, time
 from pathlib import Path
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse,RedirectResponse
 from .db import ROOT
 from .webplayer import WebPlayer
 
@@ -157,12 +157,16 @@ class DandanHistory:
 def register_history(app,db):
     history=DandanHistory(db);app.state.dandan_history=history
     @app.get('/history-sync')
-    def page():return FileResponse(ROOT/'static/history-sync.html')
+    def page(show:int=0):
+        # The history view moved into 片库; keep old links working.
+        return RedirectResponse('/library?tab=history'+(f'&show={show}' if show else ''),status_code=308)
     @app.get('/api/history/dandan')
-    def records(q:str='',show_id:int=0,offset:int=0,limit:int=100):
+    def records(q:str='',show_id:int=0,offset:int=0,limit:int=100,pending:int=0):
         clause="(h.name LIKE ? OR h.title LIKE ?) AND (h.last_played IS NOT NULL OR h.source_watched IS NOT NULL)";args=['%'+q+'%']*2
         if show_id:clause+=' AND h.show_id=?';args.append(show_id)
-        total=db.one('SELECT count(*) n FROM dandan_history h WHERE '+clause,args)['n']
+        # Pending: linked to an episode that is not marked watched yet, i.e. what the confirm button acts on.
+        if pending:clause+=' AND h.show_id IS NOT NULL AND coalesce(w.finished,0)=0'
+        total=db.one('SELECT count(*) n FROM dandan_history h LEFT JOIN watches w ON h.show_id=w.show_id AND h.episode=w.episode WHERE '+clause,args)['n']
         rows=db.rows('''SELECT h.*,coalesce(w.finished,0) finished,w.method FROM dandan_history h
             LEFT JOIN watches w ON h.show_id=w.show_id AND h.episode=w.episode WHERE '''+clause+
             ' ORDER BY max(coalesce(h.last_played,0),coalesce(h.source_watched,0)) DESC LIMIT ? OFFSET ?',

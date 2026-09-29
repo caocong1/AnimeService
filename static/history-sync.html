@@ -1,9 +1,0 @@
-<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>番屿 · 观看记录</title><link rel="stylesheet" href="/static/style.css"><meta name="theme-color" content="#171a18"><link rel="icon" href="/static/icon.svg"><link rel="stylesheet" href="/static/redesign.css"></head>
-<body><main ><header><div><a href="/">← 返回番屿</a><p class="eyebrow">YOUR WATCH HISTORY</p><h1>观看记录</h1><p>保留以前看到哪里，也接住以后的观看记录。</p></div><button id="sync">立即同步</button></header>
-<div class="notice" id="status" role="status">正在读取…</div>
-<details class="history-help"><summary>同步规则与手动修正</summary><p>后台每分钟从本机弹弹play读取一次，播放器保存后即可同步，不需要打开聊天。播放位置可用于网页续播。</p>
-<p class="muted">弹弹play已有的“已看”记录会自动计入首页看完集数，无需重新勾选。仅有打开时间或播放位置的记录不会算作看完。你可以在作品详情中改回未看，手动修正优先；同步不会改变追番或下载状态。</p></details>
-<section class="panel"><div class="row"><input id="query" placeholder="搜索作品或文件名" aria-label="搜索历史"><label><input id="select-all" type="checkbox">选择本页可确认项</label><button id="confirm">所选集数确认看完</button></div><p id="message" role="status"></p><div style="overflow:auto" id="records"></div><div class="row"><button id="prev" class="outline">上一页</button><span id="page"></span><button id="next" class="outline">下一页</button></div></section>
-<footer>按已有文件路径、大小及核验过的季集关联。未匹配的历史保存在本机快照，不猜测同名作品或跨季集数。网页记录暂不反向写入弹弹play。</footer>
-</main><script src="/static/shell.js"></script><script src="/static/history-sync.js"></script></body></html>
