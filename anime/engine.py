@@ -276,8 +276,9 @@ class Engine:
         airing_offset=m.get('airing_offset',0)
         observed=[]
         limit=m.get('end',s['total'] or 999)
+        settings=self.settings() # Once per call: candidates can number in the hundreds per show.
         for r in self.db.rows('SELECT title FROM candidates WHERE show_id=?',(sid,)):
-            try:observed.extend(ep for ep in validate_title(r['title'],m,self.settings(),False) if m.get('start',1)<=ep<=limit)
+            try:observed.extend(ep for ep in validate_title(r['title'],m,settings,False) if m.get('start',1)<=ep<=limit)
             except Rejected:pass
         expected=set(e['episode']-airing_offset for e in air)|set(range(m.get('start',1),min(max(observed,default=0),m.get('end',s['total'] or 999))+1))
         existing=self.db.rows('SELECT episode,status FROM episodes WHERE show_id=?',(sid,));reserved={e['episode'] for e in existing}

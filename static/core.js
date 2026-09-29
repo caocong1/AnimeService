@@ -198,10 +198,13 @@ function epStrip(show) {
   const next = show.next?.n;
   let run = 0;
   while (run < eps.length && eps[run].s === 'watched') run++;
-  let after = 0, future = 0;
+  let after = 0, future = 0, shown = 0;
+  const long = eps.length > 16, budget = 14;
   const items = eps.map((e, i) => {
     const rel = next == null ? '' : e.n < next ? 'before' : e.n === next ? 'next' : 'after';
-    const cls = [i < run && run > 3 ? 'in-run' : '', rel === 'after' && ++after <= 4 ? 'soon' : '', e.s === 'future' && ++future > 2 ? 'far' : ''].join(' ').trim();
+    const inRun = i < run && run > 3;
+    const far = (e.s === 'future' && ++future > 2) || (long && !inRun && ++shown > budget);
+    const cls = [inRun ? 'in-run' : '', rel === 'after' && ++after <= 4 ? 'soon' : '', far ? 'far' : ''].join(' ').trim();
     const extra = e.s === 'downloading' ? ` ${e.progress}%` : e.s === 'future' && e.date ? ' ' + airDate(e.date, false) : '';
     const label = `第 ${e.n} 集 ${EP_LABEL[e.s]}${extra}`;
     const style = e.s === 'downloading' ? ` style="--p:${e.progress}%"` : e.s === 'resume' && e.duration ? ` style="--p:${Math.round(e.position / e.duration * 100)}%"` : '';
@@ -212,8 +215,9 @@ function epStrip(show) {
     return `<li class="ep ${cls}" data-s="${e.s}" data-rel="${rel}"${style}>${hit}</li>`;
   });
   const runItem = run > 3 ? `<li class="ep run" data-s="watched"><span class="ep-hit" role="img" aria-label="第 1 至 ${run} 集 已看"><span class="ep-n">1–${run}</span></span></li>` : '';
-  const long = eps.length > 16 ? ' data-long' : '';
-  return `<ol class="eps"${long} aria-label="分集">${runItem}${items.join('')}</ol>`;
+  const hidden = long ? eps.length - (run > 3 ? run : 0) - Math.min(budget, eps.length - (run > 3 ? run : 0)) : 0;
+  const more = hidden > 0 ? `<li class="ep more"><span class="ep-hit" role="img" aria-label="另有 ${hidden} 集"><span class="ep-n">+${hidden}</span></span></li>` : '';
+  return `<ol class="eps"${long ? ' data-long' : ''} aria-label="分集">${runItem}${items.join('')}${more}</ol>`;
 }
 
 /* [1,2,3,5] -> "1–3、5" */

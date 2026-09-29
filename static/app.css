@@ -179,7 +179,10 @@ tr.is-error td { color: var(--danger); }
 .ep { display: flex; }
 .ep-hit { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 4px; font-family: var(--num); font-variant-numeric: tabular-nums; }
 .ep-note:empty { display: none; }
-.ep.run { display: none; }
+.ep.run, .ep.more { display: none; }
+:is([data-family="line"], [data-family="grid"]) .eps[data-long] .ep.more { display: flex; }
+:is([data-family="line"], [data-family="grid"]) .ep.more .ep-hit { width: auto; padding: 0 8px; border-style: dashed; color: var(--dim); }
+[data-family="line"] .ep.more .ep-hit { border-radius: 999px; }
 
 /* 场次 screen: only the next four after the ticket, as quiet chips. */
 [data-family="screen"] .eps .ep:not(.soon) { display: none; }
@@ -215,6 +218,7 @@ tr.is-error td { color: var(--danger); }
 [data-family="line"] .ep.run .ep-hit { width: auto; padding: 0 8px; border-radius: 999px; background: var(--lc, var(--ink)); color: var(--layer-1); }
 [data-family="line"] .eps[data-long] .in-run, [data-family="line"] .eps[data-long] .far { display: none; }
 [data-family="line"] .eps[data-long] .run { display: flex; }
+[data-family="line"] .ep.more .ep-hit { border-radius: 999px; }
 @container (max-width: 520px) {
   [data-family="line"] .eps .in-run, [data-family="line"] .eps .far, [data-family="line"] .eps .ep[data-s="future"] ~ .ep[data-s="future"] { display: none; }
   [data-family="line"] .eps .run { display: flex; }

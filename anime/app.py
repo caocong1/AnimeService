@@ -186,7 +186,8 @@ def create_app(db=None,engine=None,start_worker=True):
                     try:times.append(Path(e['path']).stat().st_mtime)
                     except OSError:pass
             s['download_updated']=max(times,default=0)
-            s['unwatched']=sum(e['status']=='complete' and not db.one('SELECT 1 FROM watches WHERE show_id=? AND episode=? AND finished=1',(s['id'],e['episode'])) for e in eps)
+            seen={w['episode'] for w in db.rows('SELECT episode FROM watches WHERE show_id=? AND finished=1',(s['id'],))}
+            s['unwatched']=sum(e['status']=='complete' and e['episode'] not in seen for e in eps)
             if scope in ('home','history'):s.update(episode_board(db,engine,s))
         data.sort(key=lambda s:(0 if s['downloaded'] else 1,-s['download_updated'] if s['downloaded'] else 0,s['air_date'] or '9999',s['id']))
         return data

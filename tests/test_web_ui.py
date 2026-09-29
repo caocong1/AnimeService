@@ -84,3 +84,23 @@ def test_history_pending_lists_only_linked_unwatched(tmp_path):
     d=client.get('/api/history/dandan?pending=1').json()
     assert d['total']==1 and [r['media_id'] for r in d['items']]==['b']
     assert client.get('/api/history/dandan').json()['total']==3
+
+
+def test_home_board_cost_does_not_grow_with_candidates(tmp_path,monkeypatch):
+    import contextlib,json
+    from anime.engine import Engine
+    db=Store(tmp_path/'data/test.db');engine=Engine(db,Mock(),Mock(),tmp_path/'library')
+    db.upsert_subject({'id':42,'name':'Example','total_episodes':12})
+    db.execute("UPDATE shows SET selected=1,state='watching',mapping=? WHERE id=42",(json.dumps({'aliases':['Example'],'confirmed':True,'inventory_checked':True}),))
+    for i in range(300):
+        db.execute("INSERT INTO candidates(show_id,source_id,title,url) VALUES(42,1,?,?)",(f'[Group] Example - {i%12+1:02d} [1080p]',f'u{i}'))
+    client=TestClient(create_app(db,engine,start_worker=False),base_url='http://127.0.0.1:4871')
+    opened=[0];original=Store.connect
+    @contextlib.contextmanager
+    def counted(self):
+        opened[0]+=1
+        with original(self) as c:yield c
+    monkeypatch.setattr(Store,'connect',counted)
+    assert client.get('/api/shows?scope=home').status_code==200
+    # One show: a fixed number of queries, never one per candidate or per episode.
+    assert opened[0]<40,opened[0]
