@@ -127,7 +127,7 @@
       container: '#screen',
       url: `/api/web/media/${id}/stream`,
       type: media.name.toLowerCase().endsWith('.mp4') ? 'mp4' : 'mkv',
-      volume: 0.7, theme: accent, lang: 'zh-cn', setting: true, playbackRate: true, fullscreen: true, fullscreenWeb: true, hotkey: false,
+      volume: 0.7, theme: accent, lang: 'zh-cn', setting: true, playbackRate: true, fullscreen: true, fullscreenWeb: true, hotkey: false, gesture: false,
       subtitle: { escape: true, style: { color: '#fff', fontSize: 'clamp(16px, 2.2vw, 28px)', textShadow: '0 1px 3px #000, 1px 0 2px #000' } },
       plugins: [artplayerPluginDanmuku({ danmuku: [], emitter: false, ...DISPLAY_DEFAULTS, antiOverlap: true, margin: [10, '25%'], ...pluginDisplay(), beforeEmit: () => false, beforeVisible: showDanmu })],
     });
@@ -140,13 +140,38 @@
     }, true);
     renderDisplay();
     $('#screen').tabIndex=0;
-    $('#screen').setAttribute('aria-label','视频播放器；空格播放或暂停，左右方向键快退或快进');
-    $('#screen').addEventListener('keydown', e => {
-      if(e.target!==$('#screen') && e.target!==art.video) return;
-      if(e.isComposing || e.ctrlKey || e.altKey || e.metaKey) return;
-      if(e.code==='Space') { e.preventDefault(); art.toggle(); }
+    $('#screen').setAttribute('aria-label','视频播放器；空格播放或暂停，左右方向键或左右滑动快退快进，回车切换全屏');
+    // Page-wide hotkeys, unless focus sits in a control that owns these keys (buttons, fields, the danmu list, dialogs).
+    document.addEventListener('keydown', e => {
+      const t = e.target;
+      if(t!==document.body && !$('#screen').contains(t)) return;
+      if(t.closest('input, textarea, select, button, [contenteditable], #danmu-menu')) return;
+      if(e.isComposing || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+      if(e.code==='Space') { e.preventDefault(); if(!e.repeat) art.toggle(); }
+      if(e.key==='Enter') { e.preventDefault(); if(!e.repeat) art.fullscreen=!art.fullscreen; }
       if(e.key==='ArrowLeft' || e.key==='ArrowRight') { e.preventDefault(); art.currentTime=Math.max(0,Math.min(art.duration,art.currentTime+(e.key==='ArrowRight'?5:-5))); }
     });
+    // Horizontal swipe on the video seeks in the arrow keys' 5 s steps; a full player width is 60 s. Seeks once, on release.
+    let swipe = null;
+    const $video = art.template.$video, clock = Artplayer.utils.secondToTime;
+    $video.addEventListener('touchstart', e => {
+      const t = e.touches[0];
+      swipe = e.touches.length===1 && art.duration ? { x: t.pageX, y: t.pageY, from: art.currentTime, on: false } : null;
+    }, {passive: true});
+    $video.addEventListener('touchmove', e => {
+      if(!swipe || e.touches.length!==1) { swipe = null; return; }
+      const t = e.touches[0], dx = t.pageX-swipe.x, dy = t.pageY-swipe.y;
+      if(!swipe.on) {
+        if(Math.hypot(dx, dy) < 12) return;
+        if(Math.abs(dx) < Math.abs(dy)) { swipe = null; return; }
+        swipe.on = true;
+      }
+      const step = Math.round(dx/art.width*12)*5;
+      swipe.to = Math.max(0, Math.min(art.duration, swipe.from+step));
+      art.notice.show = `${step>0?'+':''}${step} 秒　${clock(swipe.to)} / ${clock(art.duration)}`;
+    }, {passive: true});
+    $video.addEventListener('touchend', () => { if(swipe?.on) art.currentTime = swipe.to; swipe = null; });
+    $video.addEventListener('touchcancel', () => { swipe = null; });
     art.on('video:loadedmetadata', () => {
       applyDanmu().catch(() => {});
       if (resumable()) { art.currentTime = media.progress.position; lastPosition = art.currentTime; }
