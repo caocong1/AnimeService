@@ -220,7 +220,7 @@
       const status = x.loading ? '加载中…' : x.error ? '获取失败' : x.count > 0 ? `已加载 ${x.count} 条` : x.count === 0 ? '暂无弹幕' : '尚未加载';
       return `<article class="dm-source"><div class="dm-source-main"><div class="dm-identity"><span class="dm-mark" aria-hidden="true">${p.mark}</span><div><div class="dm-name">${p.name}</div><div class="dm-meta" data-state="${x.error ? 'error' : x.count > 0 ? 'ok' : ''}">${esc(episode)}${duration ? ` · ${duration}` : ''} · ${status}${!x.loading && (x.error || !x.count) ? `<button class="dm-source-retry" data-reload-source="${i}" type="button">${x.error ? '重试' : '刷新'}</button>` : ''}</div></div></div>
       <div class="dm-stepper"><button type="button" data-nudge="${i}" data-delta="-1" aria-label="${p.name} 提前1秒">− 提前</button><label class="dm-value"><input type="number" min="-3600" max="3600" step="0.5" data-timing="${i}" data-field="offset" value="${x.offset || 0}" aria-label="${p.name} 偏移秒数"><span>秒</span></label><button type="button" data-nudge="${i}" data-delta="1" aria-label="${p.name} 延后1秒">延后 ＋</button></div></div>
-      <details class="dm-more" data-source-more="${i}"${open.includes(String(i)) ? ' open' : ''}><summary>更多设置${x.end ? ' · 已截尾' : ''}</summary><div class="dm-more-body"><p>${esc(cleanTitle(x.title))}</p><label>来源正片结束 <input type="number" min="0.5" max="86400" step="0.5" data-timing="${i}" data-field="end" value="${x.end ?? ''}" placeholder="不限制" aria-label="${p.name} 正片结束秒数"> 秒</label><p>填来源视频的结束位置，忽略其后拼接部分的弹幕。正数偏移延后，负数提前。</p><div class="dm-more-actions"><button class="btn quiet" type="button" data-reset-timing="${i}">偏移归零</button><button class="btn quiet" type="button" data-remove="${i}">移除此来源</button></div></div></details></article>`;
+      <details class="dm-more" data-source-more="${i}"${open.includes(String(i)) ? ' open' : ''}><summary>更多设置</summary><div class="dm-more-body"><p>${esc(cleanTitle(x.title))}</p><div class="dm-more-actions"><button class="btn quiet" type="button" data-remove="${i}">移除此来源</button></div></div></details></article>`;
     }).join('') || '<p class="dm-empty">还没有可用来源。添加本集的弹幕，或在高级设置中重新匹配。</p>';
   }
   function sourceLabel(title = '') {
@@ -283,10 +283,10 @@
     if (b.dataset.ep) return act(b, () => mark(Number(b.dataset.ep), b.dataset.finished === 'true'));
     if (b.dataset.endNext) return act(b, async () => { await api(`/shows/${show.show.id}/watch`, { episode: current().n, finished: true }); location.assign('/watch?media=' + b.dataset.endNext); });
     if (b.dataset.remove) { ++danmuRev; const i=Number(b.dataset.remove); removedSources.add(selected[i].source_identity); saveRemoved(); selected.splice(i, 1); saveSources(); renderSelected(); applyDanmu().catch(e => toast(e.message)); (document.querySelector(`[data-timing="${Math.min(i,selected.length-1)}"][data-field="offset"]`) || $('#open-danmu-search')).focus(); return; }
-    if (b.dataset.nudge !== undefined || b.dataset.resetTiming !== undefined) {
-      const x = selected[Number(b.dataset.nudge ?? b.dataset.resetTiming)];
-      x.offset = b.dataset.resetTiming !== undefined ? 0 : Math.max(-3600, Math.min(3600, (x.offset || 0) + Number(b.dataset.delta)));
-      saveTiming(x); const selector=b.dataset.nudge!==undefined ? `[data-nudge="${b.dataset.nudge}"][data-delta="${b.dataset.delta}"]` : `[data-reset-timing="${b.dataset.resetTiming}"]`; renderSelected(); document.querySelector(selector)?.focus(); applyDanmu().catch(e => toast(e.message)); return;
+    if (b.dataset.nudge !== undefined) {
+      const x = selected[Number(b.dataset.nudge)];
+      x.offset = Math.max(-3600, Math.min(3600, (x.offset || 0) + Number(b.dataset.delta)));
+      saveTiming(x); renderSelected(); document.querySelector(`[data-nudge="${b.dataset.nudge}"][data-delta="${b.dataset.delta}"]`)?.focus(); applyDanmu().catch(e => toast(e.message)); return;
     }
     if (b.dataset.reloadSource !== undefined) return loadSource(selected[Number(b.dataset.reloadSource)]);
     if (b.dataset.anime) return act(b, async () => {

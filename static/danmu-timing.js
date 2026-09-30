@@ -3,18 +3,15 @@
   'use strict';
   function settings(value = {}) {
     const offset = Number(value.offset ?? 0);
-    const end = value.end === '' || value.end == null ? null : Number(value.end);
-    return {offset: Number.isFinite(offset) && Math.abs(offset) <= 3600 ? offset : 0,
-      end: end !== null && Number.isFinite(end) && end > 0 && end <= 86400 ? end : null};
+    return {offset: Number.isFinite(offset) && Math.abs(offset) <= 3600 ? offset : 0};
   }
   function mix(sources, globalOffset = 0, duration = Infinity) {
     const out = [], seen = new Set();
     if (!Number.isFinite(globalOffset) || Math.abs(globalOffset) > 3600) globalOffset = 0;
     if (!Number.isFinite(duration) || duration <= 0) duration = Infinity;
     for (const source of sources) {
-      const {offset, end} = settings(source);
+      const {offset} = settings(source);
       for (const c of source.comments || []) {
-        if (end !== null && c.time >= end) continue;
         const time = c.time + offset + globalOffset;
         if (!Number.isFinite(time) || time < 0 || time >= duration) continue;
         const key = JSON.stringify([Math.round(time * 10), c.text, c.mode]);
