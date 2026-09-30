@@ -29,4 +29,17 @@ test('saved source list keeps settings and empty selections, strips transient da
   assert.equal(savedSources(null),null);
   assert.deepEqual(playerSettings({visible:false,opacity:0.5,fontSize:24,speed:6,danmuku:['large']}),{opacity:0.5,fontSize:24,speed:6,visible:false});
   assert.deepEqual(playerSettings({fontSize:NaN,speed:99,margin:['bad',-1]}),{});
+  assert.deepEqual(playerSettings({fontFamily:'serif'}),{fontFamily:'serif'});
+  assert.deepEqual(playerSettings({fontFamily:'toString'}),{});
+});
+
+test('blocked users are deduplicated, bounded and stripped of junk', () => {
+  const {blockedUsers} = require('../static/danmu-timing.js');
+  assert.deepEqual(blockedUsers(null),[]);
+  assert.deepEqual(blockedUsers([{id:'a1',text:'x'.repeat(80),site:'bilibili'},{id:'a1',text:'dup'},{id:''},{id:7},null,{id:'b2',site:'evil'}]),
+    [{id:'a1',text:'x'.repeat(60),site:'bilibili'},{id:'b2',text:''}]);
+});
+
+test('mixed comments remember which site their sender id belongs to', () => {
+  assert.deepEqual(mix([{site:'bilibili',comments:[comment(1)]},{comments:[comment(2,'other')]}]).map(c=>c.site),['bilibili',undefined]);
 });

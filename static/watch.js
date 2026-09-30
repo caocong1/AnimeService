@@ -13,6 +13,10 @@
   const removedSources = new Set(Array.isArray(readSaved(removedStorageKey)) ? readSaved(removedStorageKey) : []);
   function saveRemoved() { try { localStorage.setItem(removedStorageKey, JSON.stringify([...removedSources])); } catch (_) {} }
   const playerStorageKey = `fanyu-danmu-player:${id}`;
+  const blockedStorageKey = 'fanyu-danmu-blocked-users';
+  const blocked = new Map(DanmuTiming.blockedUsers(readSaved(blockedStorageKey)).map(({id, ...u}) => [id, u]));
+  const onScreen = new Set();
+  let display = DanmuTiming.playerSettings(readSaved(playerStorageKey) || {}), listRows = [], followUntil = 0, menuTarget = null;
   function readSaved(key) {
     try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (_) { return null; }
   }
@@ -46,7 +50,8 @@
   }
 
   function renderList(items) {
-    $('#playlist').innerHTML = `<h2>${show ? '分集' : '同一文件夹'}</h2>` + items;
+    $('#tab-playlist').textContent = show ? '分集' : '同一文件夹';
+    $('#playlist').innerHTML = items;
     const list = $('#playlist'), here = $('#playlist [aria-current]');
     if (here && list.scrollHeight > list.clientHeight) list.scrollTop = here.offsetTop - list.clientHeight / 2;
   }
@@ -124,16 +129,16 @@
       type: media.name.toLowerCase().endsWith('.mp4') ? 'mp4' : 'mkv',
       volume: 0.7, theme: accent, lang: 'zh-cn', setting: true, playbackRate: true, fullscreen: true, fullscreenWeb: true, hotkey: false,
       subtitle: { escape: true, style: { color: '#fff', fontSize: 'clamp(16px, 2.2vw, 28px)', textShadow: '0 1px 3px #000, 1px 0 2px #000' } },
-      plugins: [artplayerPluginDanmuku({ danmuku: [], emitter: false, fontSize: 22, opacity: 0.85, antiOverlap: true, margin: [10, '25%'], ...DanmuTiming.playerSettings(readSaved(playerStorageKey) || {}), beforeEmit: () => false })],
+      plugins: [artplayerPluginDanmuku({ danmuku: [], emitter: false, ...DISPLAY_DEFAULTS, antiOverlap: true, margin: [10, '25%'], ...pluginDisplay(), beforeEmit: () => false, beforeVisible: showDanmu })],
     });
-    art.on('artplayerPluginDanmuku:config', options => {
-      try { localStorage.setItem(playerStorageKey, JSON.stringify(DanmuTiming.playerSettings(options))); }
-      catch (_) { toast('浏览器未能保存弹幕显示设置'); }
-    });
-    for (const [event, visible] of [['show',true],['hide',false]]) art.on(`artplayerPluginDanmuku:${event}`, () => {
-      try { localStorage.setItem(playerStorageKey, JSON.stringify({...DanmuTiming.playerSettings(readSaved(playerStorageKey) || {}), visible})); }
-      catch (_) { toast('浏览器未能保存弹幕开关'); }
-    });
+    art.on('artplayerPluginDanmuku:config', options => { saveDisplay(options); renderDisplay(); });
+    for (const [event, visible] of [['show',true],['hide',false]]) art.on(`artplayerPluginDanmuku:${event}`, () => saveDisplay({visible}));
+    art.template.$player.addEventListener('contextmenu', e => {
+      const hit = danmuAt(e.clientX, e.clientY);
+      if (!hit) return closeMenu();
+      e.preventDefault(); e.stopPropagation(); openMenu(hit, e.clientX, e.clientY);
+    }, true);
+    renderDisplay();
     $('#screen').tabIndex=0;
     $('#screen').setAttribute('aria-label','视频播放器；空格播放或暂停，左右方向键快退或快进');
     $('#screen').addEventListener('keydown', e => {
@@ -154,7 +159,7 @@
     });
     art.on('video:playing', () => { played = true; });
     art.on('video:error', () => screenState(`<b>浏览器无法播放这个文件</b>${desktopButton()}`));
-    art.on('video:timeupdate', () => { if (Date.now() - lastSave > 15000) { lastSave = Date.now(); saveProgress().catch(() => {}); } });
+    art.on('video:timeupdate', () => { followList(); if (Date.now() - lastSave > 15000) { lastSave = Date.now(); saveProgress().catch(() => {}); } });
     art.on('video:pause', () => saveProgress().catch(() => {}));
     art.on('video:ended', () => {
       saveProgress().catch(() => {});
@@ -197,9 +202,133 @@
     const shift = Number($('#offset').value) || 0;
     comments = DanmuTiming.mix(selected, shift, art.duration);
     replaceDanmu ||= DanmuTiming.createReplacer(art.plugins.artplayerPluginDanmuku);
+    onScreen.clear(); refreshDanmuList();
     await replaceDanmu(comments);
-    const failures=selected.filter(s=>s.error).length;
-    $('#danmu-note').textContent = failures ? (comments.length ? `${comments.length} 条 · 有失败` : '来源失败') : `${comments.length} 条`;
+    renderNote();
+  }
+  function renderNote() {
+    const failures=selected.filter(s=>s.error).length, n=listRows.length;
+    $('#danmu-note').textContent = failures ? (n ? `${n} 条 · 有失败` : '来源失败') : `${n} 条`;
+  }
+
+  /* ---------- display settings ---------- */
+
+  const DISPLAY_DEFAULTS = {speed: 5, fontSize: 22, opacity: 0.85};
+  const pluginDisplay = () => { const {fontFamily, ...rest} = display; return rest; };
+  function saveDisplay(patch) {
+    display = DanmuTiming.playerSettings({...display, ...patch});
+    try { localStorage.setItem(playerStorageKey, JSON.stringify(display)); }
+    catch (_) { toast('浏览器未能保存弹幕显示设置'); }
+  }
+  const speedLabel = v => v <= 2 ? '极快' : v <= 4 ? '快' : v <= 6 ? '标准' : v <= 8 ? '慢' : '极慢';
+  function renderDisplay() {
+    const o = art?.plugins.artplayerPluginDanmuku.option || {};
+    const speed = typeof o.speed === 'number' ? o.speed : DISPLAY_DEFAULTS.speed, opacity = typeof o.opacity === 'number' ? o.opacity : DISPLAY_DEFAULTS.opacity;
+    const size = typeof o.fontSize === 'number' ? o.fontSize : DISPLAY_DEFAULTS.fontSize;
+    $('#dm-speed').value = 11 - speed; $('#dm-speed-out').textContent = speedLabel(speed);
+    $('#dm-font-size').value = size; $('#dm-font-size-out').textContent = typeof o.fontSize === 'string' ? o.fontSize : `${size}px`;
+    $('#dm-opacity').value = opacity; $('#dm-opacity-out').textContent = `${Math.round(opacity * 100)}%`;
+    $('#dm-font').value = display.fontFamily || 'default';
+    const font = DanmuTiming.FONTS[display.fontFamily] || '', layer = art?.template.$danmuku;
+    if (layer) { layer.style.setProperty('--dm-font', font); layer.toggleAttribute('data-font', !!font); }
+  }
+  const configDisplay = patch => art?.plugins.artplayerPluginDanmuku.config(patch);
+
+  /* ---------- danmu list and blocking ---------- */
+
+  const ROW = 32;
+  const isBlocked = c => !!c.user && blocked.has(c.user);
+  function showDanmu(d) {
+    if (isBlocked(d)) return false;
+    if (onScreen.size > 300) for (const x of onScreen) if (!x.$ref) onScreen.delete(x);
+    onScreen.add(d);
+    return true;
+  }
+  function danmuAt(x, y) {
+    if (art.plugins.artplayerPluginDanmuku.isHide) return null;
+    for (const d of onScreen) {
+      if (!d.$ref) { onScreen.delete(d); continue; }
+      if (d.$ref.style.visibility !== 'visible' || !d.$ref.textContent) continue;
+      const r = d.$ref.getBoundingClientRect();
+      if (x >= r.left - 4 && x <= r.right + 4 && y >= r.top - 4 && y <= r.bottom + 4) return d;
+    }
+    return null;
+  }
+  function refreshDanmuList() {
+    listRows = comments.filter(c => !isBlocked(c));
+    $('#danmu-list-space').style.height = `${listRows.length * ROW}px`;
+    $('#danmu-list-count').textContent = listRows.length || '';
+    renderRows();
+  }
+  function renderRows() {
+    if ($('#danmu-list').hidden) return;
+    const box = $('#danmu-list-scroll'), first = Math.max(0, Math.floor(box.scrollTop / ROW) - 5);
+    const last = Math.min(listRows.length, first + Math.ceil(box.clientHeight / ROW) + 10);
+    $('#danmu-list-space').innerHTML = listRows.slice(first, last).map((c, k) =>
+      `<div class="dm-row" data-row="${first + k}" style="top:${(first + k) * ROW}px"><time>${clock(c.time)}</time><span title="${esc(c.text)}">${esc(c.text)}</span></div>`).join('');
+  }
+  /* Keep the latest comment at the bottom, chat-style, unless the viewer is scrolling. */
+  function followList() {
+    if (!art || $('#danmu-list').hidden || Date.now() < followUntil) return;
+    const box = $('#danmu-list-scroll'), t = art.currentTime;
+    let lo = 0, hi = listRows.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (listRows[mid].time <= t) lo = mid + 1; else hi = mid; }
+    const top = Math.max(0, lo * ROW - box.clientHeight);
+    if (Math.abs(box.scrollTop - top) > 1) box.scrollTop = top;
+  }
+  function selectTab(tab) {
+    const list = tab === 'danmu-list';
+    $('#tab-playlist').setAttribute('aria-selected', String(!list)); $('#tab-playlist').tabIndex = list ? -1 : 0;
+    $('#tab-danmu-list').setAttribute('aria-selected', String(list)); $('#tab-danmu-list').tabIndex = list ? 0 : -1;
+    $('#playlist').hidden = list; $('#danmu-list').hidden = !list;
+    if (list) { followUntil = 0; renderRows(); followList(); }
+  }
+  function openMenu(c, x, y) {
+    const menu = $('#danmu-menu'), b = $('#danmu-block-user');
+    menuTarget = c;
+    (document.fullscreenElement || document.body).append(menu);
+    $('#danmu-menu-text').textContent = c.text;
+    b.disabled = !c.user; b.textContent = c.user ? '屏蔽此用户' : '此来源不提供发送者，无法屏蔽';
+    $('#danmu-find-user').hidden = !(c.user && c.site === 'bilibili');
+    $('#danmu-menu-uids').hidden = true;
+    menu.hidden = false;
+    menu.style.left = `${Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(y, innerHeight - menu.offsetHeight - 8))}px`;
+    followUntil = Infinity;
+    (b.disabled ? menu : b).focus();
+  }
+  function closeMenu() {
+    if ($('#danmu-menu').hidden) return;
+    $('#danmu-menu').hidden = true; menuTarget = null; followUntil = Date.now() + 3000;
+  }
+  function saveBlocked() {
+    try { localStorage.setItem(blockedStorageKey, JSON.stringify([...blocked].map(([id, u]) => ({id, ...u})))); }
+    catch (_) { toast('本次屏蔽已生效，但浏览器未能保存'); }
+  }
+  function blockUser(c) {
+    blocked.set(c.user, {text: c.text.slice(0, 60), site: c.site}); saveBlocked();
+    for (const d of onScreen) if (d.user === c.user && d.$ref) d.$ref.textContent = '';
+    refreshDanmuList(); renderNote(); renderBlocked();
+    toast('已屏蔽该用户的弹幕', {label: '撤销', run: () => unblockUser(c.user)});
+  }
+  function unblockUser(user) {
+    blocked.delete(user); saveBlocked();
+    refreshDanmuList(); renderNote(); renderBlocked();
+  }
+  const SITE_NAMES = {bilibili: 'B站', bahamut: '巴哈'};
+  /* Candidates only: several UIDs can share one hash, and 16-digit UIDs cannot be recovered. */
+  function renderUids(box, hash) {
+    const uids = BiliUid.uidCandidates(hash);
+    box.innerHTML = uids.length
+      ? `<p>可能是${uids.length > 1 ? `以下 ${uids.length} 个之一` : ''}：</p>${uids.map(uid => `<a href="https://space.bilibili.com/${uid}" target="_blank" rel="noopener noreferrer">UID ${uid}</a>`).join('')}`
+      : '<p>没有 10 位以内的 UID 匹配，可能是新注册的 16 位 UID，无法反查。</p>';
+    box.hidden = false;
+  }
+  function renderBlocked() {
+    $('#dm-blocked-count').textContent = blocked.size;
+    $('#dm-blocked-list').innerHTML = blocked.size ? [...blocked].reverse().map(([user, u]) =>
+      `<div class="dm-blocked-row"><span><b>${esc(u.text || '（无示例弹幕）')}</b><small>${SITE_NAMES[u.site] || '用户'} ${esc(user)}</small></span><span class="dm-blocked-acts">${u.site === 'bilibili' ? `<button class="btn quiet" type="button" data-find-uid="${esc(user)}">查找 UID</button>` : ''}<button class="btn quiet" type="button" data-unblock="${esc(user)}">解除屏蔽</button></span></div>${u.site === 'bilibili' ? `<div class="dm-uids" data-uids="${esc(user)}" hidden></div>` : ''}`).join('')
+      : '<p>在播放器或弹幕列表中右键一条弹幕，即可屏蔽发送者。</p>';
   }
   function restoreTiming(source) {
     let saved = {};
@@ -288,6 +417,8 @@
       x.offset = Math.max(-3600, Math.min(3600, (x.offset || 0) + Number(b.dataset.delta)));
       saveTiming(x); renderSelected(); document.querySelector(`[data-nudge="${b.dataset.nudge}"][data-delta="${b.dataset.delta}"]`)?.focus(); applyDanmu().catch(e => toast(e.message)); return;
     }
+    if (b.dataset.findUid !== undefined) { const box = document.querySelector(`[data-uids="${CSS.escape(b.dataset.findUid)}"]`); if (box.hidden) renderUids(box, b.dataset.findUid); else box.hidden = true; return; }
+    if (b.dataset.unblock !== undefined) { unblockUser(b.dataset.unblock); ($('#dm-blocked-list button') || $('#dm-blocked > summary')).focus(); return; }
     if (b.dataset.reloadSource !== undefined) return loadSource(selected[Number(b.dataset.reloadSource)]);
     if (b.dataset.anime) return act(b, async () => {
       ++danmuRev;
@@ -311,6 +442,8 @@
       case 'unmute': if (art) { art.muted = false; b.remove(); } return;
       case 'desktop': return act(b, async () => { await web(`/media/${id}/desktop`, {}); toast('已在本机播放器打开'); });
       case 'retry-danmu': return autoDanmu();
+      case 'danmu-display-reset': saveDisplay({fontFamily: 'default'}); configDisplay(DISPLAY_DEFAULTS); renderDisplay(); return;
+      case 'tab-playlist': case 'tab-danmu-list': return selectTab(b.getAttribute('aria-controls'));
       case 'toggle-danmu': { const expanded=b.getAttribute('aria-expanded')==='true'; b.setAttribute('aria-expanded',String(!expanded)); $('#danmu-panel').hidden=expanded; return; }
       case 'open-danmu-search': $('#danmu-search-view').hidden=false; $('#danmu-detail-view').hidden=true; $('#danmu-dialog').showModal(); $('#danmu-q').focus(); return;
       case 'close-danmu-search': return closeSourceDialog();
@@ -370,6 +503,40 @@
     });
   });
   $('#danmu-search').addEventListener('keydown', e => { if(e.key==='Enter' && (e.isComposing || e.keyCode===229)) e.preventDefault(); });
+  $('#dm-speed').addEventListener('input', e => configDisplay({speed: 11 - Number(e.target.value)}));
+  $('#dm-font-size').addEventListener('input', e => configDisplay({fontSize: Number(e.target.value)}));
+  $('#dm-opacity').addEventListener('input', e => configDisplay({opacity: Number(e.target.value)}));
+  $('#dm-font').addEventListener('change', e => { saveDisplay({fontFamily: e.target.value}); renderDisplay(); });
+  const listBox = $('#danmu-list-scroll');
+  let rowsFrame = 0;
+  listBox.addEventListener('scroll', () => { cancelAnimationFrame(rowsFrame); rowsFrame = requestAnimationFrame(renderRows); });
+  for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) listBox.addEventListener(type, () => { if (followUntil !== Infinity) followUntil = Date.now() + 5000; }, {passive: true});
+  listBox.addEventListener('contextmenu', e => {
+    const row = e.target.closest('[data-row]');
+    if (!row) return;
+    e.preventDefault(); openMenu(listRows[Number(row.dataset.row)], e.clientX, e.clientY);
+  });
+  $('.side-tabs').addEventListener('keydown', e => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    const next = $('#tab-playlist').getAttribute('aria-selected') === 'true' ? 'tab-danmu-list' : 'tab-playlist';
+    selectTab($('#' + next).getAttribute('aria-controls')); $('#' + next).focus();
+  });
+  // In fullscreen the menu lives inside the player; keep its clicks from toggling playback.
+  for (const type of ['click', 'dblclick', 'pointerdown', 'mousedown', 'contextmenu']) $('#danmu-menu').addEventListener(type, e => { e.stopPropagation(); if (type === 'contextmenu') e.preventDefault(); });
+  $('#danmu-block-user').addEventListener('click', () => { const c = menuTarget; closeMenu(); if (c?.user) blockUser(c); });
+  $('#danmu-find-user').addEventListener('click', () => {
+    if (!menuTarget?.user) return;
+    const menu = $('#danmu-menu');
+    renderUids($('#danmu-menu-uids'), menuTarget.user);
+    menu.style.left = `${Math.max(8, Math.min(parseFloat(menu.style.left), innerWidth - menu.offsetWidth - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(parseFloat(menu.style.top), innerHeight - menu.offsetHeight - 8))}px`;
+  });
+  document.addEventListener('pointerdown', e => { if (!e.target.closest('#danmu-menu')) closeMenu(); }, true);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#danmu-menu').hidden) { e.preventDefault(); closeMenu(); } });
+  for (const type of ['resize', 'blur']) addEventListener(type, closeMenu);
+  document.addEventListener('fullscreenchange', closeMenu);
+  addEventListener('resize', renderRows);
+  renderDisplay(); renderBlocked();
 
   (async () => {
     try {

@@ -16,7 +16,7 @@
         if (!Number.isFinite(time) || time < 0 || time >= duration) continue;
         const key = JSON.stringify([Math.round(time * 10), c.text, c.mode]);
         if (seen.has(key)) continue;
-        seen.add(key); out.push({...c, time});
+        seen.add(key); out.push(source.site ? {...c, time, site:source.site} : {...c, time});
       }
     }
     return out.sort((a,b) => a.time - b.time);
@@ -43,18 +43,34 @@
       && !seen.has(s.source_identity) && seen.add(s.source_identity)).slice(0,5)
       .map(s => ({id:s.id, source_identity:s.source_identity, title:s.title.slice(0,1000), ...settings(s)}));
   }
+  const FONTS = {
+    default: '',
+    sans: 'system-ui, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif',
+    serif: '"Songti SC", SimSun, "Noto Serif CJK SC", serif',
+    kai: '"Kaiti SC", KaiTi, STKaiti, serif',
+  };
   function playerSettings(value = {}) {
     const out = {};
     for (const [key,min,max] of [['opacity',0,1],['fontSize',12,50],['speed',1,10]])
       if (typeof value[key] === 'number' && Number.isFinite(value[key]) && value[key]>=min && value[key]<=max) out[key]=value[key];
     for (const key of ['visible','antiOverlap','synchronousPlayback'])
       if (typeof value[key] === 'boolean') out[key]=value[key];
+    if (Object.hasOwn(FONTS, value.fontFamily)) out.fontFamily=value.fontFamily;
     if (Array.isArray(value.modes)) out.modes=[...new Set(value.modes.filter(v=>[0,1,2].includes(v)))];
     if (Array.isArray(value.margin) && value.margin.length===2 && value.margin.every(v =>
       (typeof v==='number' && Number.isFinite(v) && v>=0 && v<=2000) || (typeof v==='string' && /^(?:100|\d{1,2})(?:\.\d+)?%$/.test(v)))) out.margin=[...value.margin];
     return out;
   }
-  const api = {settings, mix, createReplacer, savedSources, playerSettings};
+  // Sender hashes are the same across videos, so one list serves every episode.
+  function blockedUsers(value) {
+    if (!Array.isArray(value)) return [];
+    const seen = new Set();
+    return value.filter(u => u && typeof u.id === 'string' && u.id.length > 0 && u.id.length <= 64
+      && !seen.has(u.id) && seen.add(u.id)).slice(-1000)
+      .map(u => ({id:u.id, text:typeof u.text === 'string' ? u.text.slice(0,60) : '',
+        ...(['bilibili','bahamut'].includes(u.site) ? {site:u.site} : {})}));
+  }
+  const api = {settings, mix, createReplacer, savedSources, playerSettings, blockedUsers, FONTS};
   if (typeof module !== 'undefined') module.exports = api;
   else root.DanmuTiming = api;
 })(globalThis);
