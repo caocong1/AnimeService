@@ -23,8 +23,12 @@ if not npm:raise RuntimeError('Node.js/npm is required')
 run([npm,'ci','--ignore-scripts','--no-audit','--no-fund'],repo)
 from patch_danmu_proxy import patch
 patch()
+from patch_danmu_bilibili import patch as patch_bilibili
+patch_bilibili()
 run([npm,'ci','--ignore-scripts','--no-audit','--no-fund'])
 target=ROOT/'static/vendor';target.mkdir(exist_ok=True)
 for package in ('artplayer','artplayer-plugin-danmuku'):
     shutil.copyfile(ROOT/f'node_modules/{package}/dist/{package}.js',target/f'{package}.js')
+from setup_subtitles import install as install_subtitles
+install_subtitles()
 print('Web dependencies ready; no new subscription or download enabled.')

@@ -9,6 +9,7 @@
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="stylesheet" href="/static/tokens.css">
 <link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/watch-controls.css?v=3">
 <script src="/static/theme.js"></script>
 </head>
 <body class="watch">
@@ -20,29 +21,35 @@
         <div class="what"><a id="parent" href="/library"></a><h1 id="title">放映室</h1></div>
         <div class="acts" id="acts"></div>
       </div>
-      <div class="tracks">
+      <div class="playback-controls">
+      <div class="watch-tools">
         <label>字幕 <select id="subtitle" disabled><option value="">关闭</option></select></label>
-        <span id="sub-note"></span>
-        <span>弹幕 <b id="danmu-note">—</b></span>
-        <button class="btn small quiet" type="button" id="retry-danmu" disabled>重新匹配</button>
+        <button class="dm-toggle" id="toggle-danmu" type="button" aria-expanded="false" aria-controls="danmu-panel" aria-label="弹幕设置">弹幕 <b id="danmu-note" aria-live="polite">—</b><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><path d="m5 9 7 7 7-7"/></svg></button>
       </div>
-      <details class="more watch-extra" id="danmu-more">
-        <summary>弹幕来源与时间轴<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5.5 6.5 6.5L9 18.5"/></svg></summary>
-        <div class="body danmu-panel">
-          <form id="danmu-search" class="row"><label class="sr" for="danmu-q">作品名</label><input id="danmu-q" name="query" required maxlength="100" placeholder="作品名"><button class="btn" type="submit">搜索</button></form>
-          <div id="danmu-results" class="links"></div>
-          <div id="danmu-episodes" class="row"></div>
-          <div id="danmu-selected" class="list-rows"></div>
-          <div class="row"><button class="btn" type="button" id="load-danmu">加载所选来源</button><label class="field" style="grid-auto-flow:column;align-items:center">偏移（秒）<input id="offset" type="number" min="-3600" max="3600" step="0.5" value="0"></label></div>
-        </div>
-      </details>
+      <p id="sub-note" class="dm-tools-note"></p>
+      <section class="dm-panel" id="danmu-panel" aria-label="弹幕设置" hidden>
+        <div class="dm-heading"><div><h2>正在使用</h2><p>各来源可独立调时</p></div><button class="btn primary" id="open-danmu-search" type="button">＋ 添加来源</button></div>
+        <div id="danmu-selected" class="dm-sources"><p class="dm-empty">正在匹配本集弹幕…</p></div>
+        <details class="dm-more dm-global"><summary>高级设置</summary><div class="dm-more-body"><label>全部来源微调 <input id="offset" type="number" min="-3600" max="3600" step="0.5" value="0"> 秒</label><p>正数延后，负数提前。调时保存在此浏览器，自动恢复。</p><div><button class="btn" id="retry-danmu" type="button" disabled>重新匹配本集</button></div></div></details>
+      </section>
+      </div>
     </div>
     <aside class="playlist" id="playlist" aria-label="分集"></aside>
   </div>
 </main>
+<dialog class="dm-dialog" id="danmu-dialog" aria-labelledby="danmu-dialog-title">
+  <header class="dm-dialog-head"><h2 id="danmu-dialog-title">添加弹幕来源</h2><button class="icon-btn" id="close-danmu-search" type="button" aria-label="关闭添加来源">×</button></header>
+  <div class="dm-dialog-body">
+    <div id="danmu-search-view"><form id="danmu-search" class="dm-search"><label class="sr" for="danmu-q">作品名或视频链接</label><input id="danmu-q" type="search" name="query" required maxlength="100" placeholder="作品名、集数或视频链接"><button class="btn" type="submit">搜索</button></form><p class="dm-dialog-hint" id="danmu-results-note">本集相关视频 · 选择后核对分集</p><div id="danmu-results" class="dm-results" aria-live="polite"></div></div>
+    <div id="danmu-detail-view" hidden><button class="btn quiet" id="danmu-back" type="button">‹ 返回搜索结果</button><div id="danmu-episodes" class="dm-detail"></div></div>
+  </div>
+</dialog>
 <script src="/static/core.js"></script>
 <script src="/static/vendor/artplayer.js"></script>
 <script src="/static/vendor/artplayer-plugin-danmuku.js"></script>
-<script src="/static/watch.js"></script>
+<script src="/static/vendor/libass/subtitles-octopus.js"></script>
+<script src="/static/subtitle-renderer.js?v=1"></script>
+<script src="/static/danmu-timing.js?v=3"></script>
+<script src="/static/watch.js?v=7"></script>
 </body>
 </html>

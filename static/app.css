@@ -640,5 +640,11 @@ td a { display: inline-block; min-height: 24px; padding: 2px 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  /* Danmuku transitions are playback timing, controlled by the player's toggle/pause.
+     Collapsing them makes comments jump to the edge and linger there. */
+  *:not(.art-danmuku, .art-danmuku *),
+  *:not(.art-danmuku, .art-danmuku *)::before,
+  *:not(.art-danmuku, .art-danmuku *)::after {
+    animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important;
+  }
 }

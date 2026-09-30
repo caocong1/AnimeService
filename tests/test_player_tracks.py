@@ -52,8 +52,9 @@ def test_automatic_match_fallback_exact_title_and_stable_episode_url(library):
     before = db.show(1)
     result = player.auto_danmu(key)
     assert result['status'] == 'matched' and len(result['comments']) == 1
-    assert len(calls) == 4
-    assert player.auto_danmu(key) == result and len(calls) == 4
+    count = len(calls)
+    assert count >= 4
+    assert player.auto_danmu(key) == result and len(calls) == count
     assert db.show(1) == before
     assert db.rows('SELECT * FROM watches') == []
     assert db.rows('SELECT * FROM web_progress') == []
@@ -89,7 +90,7 @@ def test_multiple_exact_candidates_require_manual_selection(library):
     title = player.db.show(1)['title']
     player.danmu = Mock(return_value={'animes': [{'animeId': i, 'animeTitle': title} for i in (1, 2)]})
     assert player.auto_danmu(key)['status'] == 'needs_selection'
-    assert player.danmu.call_count == 1
+    assert player.danmu.call_count >= 1
 
 
 def test_failed_source_is_retryable(library):
@@ -104,6 +105,33 @@ def test_failed_source_is_retryable(library):
     assert player.auto_danmu(key)['status'] == 'error'
     player.danmu = original
     assert player.auto_danmu(key)['status'] == 'matched'
+
+
+def test_ugc_never_auto_matches_even_with_exact_title(library):
+    _, player, key, _ = library
+    title = player.db.show(1)['title']
+    player.danmu = Mock(return_value={'animes': [
+        {'animeId': 1, 'bangumiId': 'bvBV123', 'animeTitle': title},
+        {'animeId': 2, 'type': 'B站视频·需核对版本', 'animeTitle': title},
+    ]})
+    assert player.auto_danmu(key)['status'] == 'needs_selection'
+    assert all(call.args[0] == 'search/anime' for call in player.danmu.call_args_list)
+
+
+def test_comments_preserve_independent_source_clocks_and_stable_identity(library):
+    _, player, _, _ = library
+    urls = ['https://www.bilibili.com/video/BV123?p=1', 'https://ani.gamer.com.tw/animeVideo.php?sn=51081']
+    def bind():
+        return player.bind_episodes({'bangumi': {'episodes': [{'url': u} for u in urls]}})['bangumi']['episodes']
+    first, second = bind(), bind()
+    assert first[0]['source_key'] == second[0]['source_key']
+    assert first[0]['source_identity'] == second[0]['source_identity']
+    player.danmu = lambda *args: {'comments': [{'p':'10,1,16777215','m':'same'}]}
+    result = player.comments([x['source_key'] for x in first])
+    assert len(result['comments']) == 1  # Legacy combined response remains compatible.
+    assert len(result['sources']) == 2
+    assert all(s['comments'][0]['time'] == 10 for s in result['sources'])
+    assert result['sources'][0]['source_identity'] != result['sources'][1]['source_identity']
 
 
 def fake_tools(monkeypatch):
@@ -154,3 +182,78 @@ def test_track_routes_only_expose_registered_media_and_never_write_progress(libr
     assert client.get('/api/web/media/not-registered/subtitles').status_code == 404
     assert not engine.mock_calls
     assert not db.rows('SELECT * FROM watches') and not db.rows('SELECT * FROM web_progress')
+
+def test_saved_danmu_source_survives_restart_and_rejects_unbound_urls(library):
+    db, player, _, _ = library
+    before = db.show(1)
+    source = player.bind_episodes({'bangumi': {'episodes': [
+        {'url': 'https://www.bilibili.com/video/BV1234567890/?p=2'},
+        {'url': 'http://127.0.0.1:4870/'},
+    ]}})['bangumi']['episodes']
+    assert 'source_key' not in source[1]
+    restored = WebPlayer(db)
+    calls = []
+    def upstream(path, params):
+        calls.append(params['url'])
+        return {'comments': [{'p': '495,1,16777215', 'm': 'saved'}]}
+    restored.danmu = upstream
+    result = restored.comments([source[0]['source_key']])
+    assert result['sources'][0]['source_identity'] == source[0]['source_identity']
+    assert result['comments'][0]['text'] == 'saved'
+    assert calls == ['https://www.bilibili.com/video/BV1234567890/?p=2']
+    for invalid in ['unknown', 'http://127.0.0.1:4870/']:
+        with pytest.raises(ValueError):
+            restored.comments([invalid])
+    assert len(calls) == 1
+    assert db.show(1) == before
+    assert db.rows('SELECT * FROM watches') == []
+    assert db.rows('SELECT * FROM web_progress') == []
+
+
+def test_auto_merges_providers_ugc_uses_title_not_part_index(library):
+    _, player, key, _ = library
+    title = player.db.show(1)['title']
+    catalog = {'animeId': 1, 'animeTitle': title + '(2026)【动漫】from bahamut'}
+    ugc = {'animeId': 2, 'bangumiId': 'bvBV123', 'animeTitle': title + ' 第13集(2026)【B站视频·需核对版本】from bilibili'}
+    wrong = {**ugc, 'animeId': 3, 'animeTitle': title + ' 第12集'}
+    seen = []
+    def upstream(path, params=None):
+        if path == 'search/anime':
+            # Simulate a failed original-language search and a short-query-only catalogue.
+            if params['keyword'] == 'Original Title':
+                raise TimeoutError()
+            return {'animes': [catalog] if params['keyword'] == title[:8] else [ugc, wrong]}
+        if path == 'bangumi/1':
+            return {'bangumi': {**catalog, 'episodes': [{'episodeNumber':'13', 'episodeTitle':'【bahamut】 第13集', 'url':'51081'}]}}
+        if path == 'bangumi/2':
+            return {'bangumi': {**ugc, 'episodes': [{'episodeNumber':'1', 'episodeTitle':title+' 第13集 · 43:59', 'url':'https://www.bilibili.com/video/BV123?p=1'}]}}
+        assert path == 'comment'
+        seen.append(params['url'])
+        return {'comments':[{'p':'20,1,16777215','m':'test'}]}
+    player.danmu = upstream
+    result = player.auto_danmu(key)
+    assert result['status'] == 'matched'
+    assert len(result['selected']) == len(seen) == 2
+    assert 'bahamut' in result['selected'][0]['title']
+    assert len(result['comments']) == 1
+
+
+@pytest.mark.parametrize('suffix', [' 第12集', ' 第13集 解说', ' 第1-13集', ' 第13集 PV', ''])
+def test_ugc_rejects_wrong_episode_and_commentary(library, suffix):
+    from anime.auto_danmu import ugc_episode, title_key
+    title = library[1].db.show(1)['title']
+    assert not ugc_episode(title + suffix, {title_key(title)}, 13)
+
+
+def test_ugc_quoted_alias_and_duration_independent():
+    from anime.auto_danmu import ugc_episode, title_key
+    names = {title_key('被追放的转生重骑士用游戏知识开无双')}
+    assert ugc_episode('七月新番：《转生重骑士用游戏知识开无双》13集 · 43:59', names, 13)
+    assert not ugc_episode('【重骑士】第13话', names, 13)
+
+def test_ugc_does_not_confuse_seasons():
+    from anime.auto_danmu import ugc_episode, title_key
+    names = {title_key('测试动画作品')}
+    assert not ugc_episode('测试动画作品 第二季 第13集', names, 13)
+    assert not ugc_episode('测试动画作品 Season 2 第13集', names, 13)
+    assert ugc_episode('测试动画作品 第二季 第13集', names, 13, 2)

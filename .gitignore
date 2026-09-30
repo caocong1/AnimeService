@@ -25,7 +25,9 @@
 !/.github/
 /scripts/*
 !/scripts/setup_web.py
+!/scripts/setup_subtitles.py
 !/scripts/patch_danmu_proxy.py
+!/scripts/patch_danmu_bilibili.py
 !/scripts/Read-DandanHistory.ps1
 !/scripts/supervisor.py
 !/scripts/stop_danmu.py

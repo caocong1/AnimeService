@@ -3,6 +3,7 @@
   "private": true,
   "dependencies": {
     "artplayer": "5.4.0",
-    "artplayer-plugin-danmuku": "5.3.0"
+    "artplayer-plugin-danmuku": "5.3.0",
+    "libass-wasm": "4.1.0"
   }
 }

@@ -79,6 +79,9 @@ def create_app(db=None,engine=None,start_worker=True):
         if path.startswith('/api/') or path=='/login':response.headers['Cache-Control']='no-store'
         response.headers['X-Content-Type-Options']='nosniff';response.headers['Referrer-Policy']='no-referrer'
         response.headers['Content-Security-Policy']="default-src 'self'; img-src 'self' https: data:; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'"
+        if path.startswith('/static/vendor/libass/'):
+            # Only the local subtitle worker needs WebAssembly compilation, not JS eval.
+            response.headers['Content-Security-Policy']=response.headers['Content-Security-Policy'].replace("script-src 'self'", "script-src 'self' 'wasm-unsafe-eval'")
         return response
     @app.exception_handler(ValueError)
     async def value_error(request,e):return JSONResponse({'error':str(e)[:400]},status_code=400)

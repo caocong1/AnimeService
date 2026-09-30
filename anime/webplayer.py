@@ -46,6 +46,8 @@ class WebPlayer:
         inventory=db.path.parent/'inventory.json'
         if inventory.exists():self.inventory=json.loads(inventory.read_text(encoding='utf-8'))
         with db.connect() as c:
+            c.execute('''CREATE TABLE IF NOT EXISTS web_danmu_sources(
+                source_key TEXT PRIMARY KEY,url TEXT NOT NULL UNIQUE)''')
             c.execute('''CREATE TABLE IF NOT EXISTS web_progress(
                 media_id TEXT PRIMARY KEY,position REAL DEFAULT 0,duration REAL DEFAULT 0,
                 last_played REAL,updated REAL,sources TEXT DEFAULT '[]')''')
@@ -93,22 +95,32 @@ class WebPlayer:
                     if u.scheme not in ('http','https') or u.hostname not in ('www.bilibili.com','www.iqiyi.com','v.youku.com','v.qq.com','ani.gamer.com.tw') or u.username or u.password or u.port:continue
                 except ValueError:continue
                 if u.hostname=='ani.gamer.com.tw' and not re.fullmatch(r'https://ani\.gamer\.com\.tw/animeVideo\.php\?sn=[1-9][0-9]{0,11}',url):continue
-                key=secrets.token_urlsafe(18)
+                with self.db.connect() as c:
+                    c.execute('INSERT OR IGNORE INTO web_danmu_sources(source_key,url) VALUES(?,?)',
+                              (secrets.token_urlsafe(18),url))
+                    key=c.execute('SELECT source_key FROM web_danmu_sources WHERE url=?',(url,)).fetchone()[0]
                 self.sources[key]={'url':url,'created':time.time()}
                 ep['source_key']=key
+                ep['source_identity']=hashlib.sha256(url.encode()).hexdigest()
         return d
 
     def comments(self,ids):
         with self.lock:
-            if not isinstance(ids,list) or not 1<=len(ids)<=5 or any(not isinstance(i,str) or i not in self.sources or time.time()-self.sources[i]['created']>=86400 for i in ids):
-                raise ValueError('请重新搜索并选择1–5个剧集来源；后台重启后需要重新核对')
-            urls=[self.sources[i]['url'] for i in ids]
+            if not isinstance(ids,list) or not 1<=len(ids)<=5 or any(not isinstance(i,str) or len(i)>100 for i in ids):
+                raise ValueError('请重新搜索并选择1–5个剧集来源')
+            urls=[]
+            for sid in ids:
+                source=self.db.one('SELECT url FROM web_danmu_sources WHERE source_key=?',(sid,))
+                if source is None:
+                    raise ValueError('保存的来源已失效，请移除后重新添加')
+                urls.append(source['url'])
         combined=[];sources=[]
         for sid,url in zip(ids,urls):
+            identity=hashlib.sha256(url.encode()).hexdigest()
             try:
                 rows=normalize_comments(self.danmu('comment',{'url':url,'format':'json'}))
-                combined+=rows;sources.append({'id':sid,'count':len(rows)})
-            except Exception:sources.append({'id':sid,'count':0,'error':'来源获取失败或超时，可重试'})
+                combined+=rows;sources.append({'id':sid,'source_identity':identity,'count':len(rows),'comments':rows})
+            except Exception:sources.append({'id':sid,'source_identity':identity,'count':0,'comments':[],'error':'来源获取失败或超时，可重试'})
         seen=set();out=[]
         for x in combined:
             k=(round(x['time'],1),x['text'],x['mode'])
@@ -192,8 +204,20 @@ def register_webplayer(app,db):
     def subtitles(key:str):
         tracks=player.subtitles.tracks(player.item(key))
         supported=[t for t in tracks if t['supported']]
-        return {'tracks':[{**t,'url':f'/api/web/media/{key}/subtitles/{t["index"]}.vtt'} for t in tracks],
+        return {'tracks':[{**t,'url':f'/api/web/media/{key}/subtitles/{t["index"]}.vtt',
+                           'ass_url':f'/api/web/media/{key}/subtitles/{t["index"]}.ass' if t['codec'] in ('ass','ssa') else None} for t in tracks],
                 'default':supported[0]['index'] if supported else None}
+    @app.get('/api/web/media/{key}/subtitles/{index}.ass')
+    def subtitle_ass(key:str,index:int):
+        path=player.subtitles.extract(player.item(key),index,'ass')
+        return FileResponse(path,media_type='text/plain; charset=utf-8')
+    @app.get('/api/web/media/{key}/subtitle-fonts')
+    def subtitle_fonts(key:str):
+        fonts=player.subtitles.fonts(player.item(key))
+        return {'fonts':[f'/api/web/media/{key}/subtitle-fonts/{f["index"]}' for f in fonts]}
+    @app.get('/api/web/media/{key}/subtitle-fonts/{index}')
+    def subtitle_font(key:str,index:int):
+        return FileResponse(player.subtitles.extract_font(player.item(key),index),media_type='application/octet-stream')
     @app.get('/api/web/media/{key}/subtitles/{index}.vtt')
     def subtitle_file(key:str,index:int):
         path=player.subtitles.extract(player.item(key),index)
