@@ -65,7 +65,7 @@ class SubtitleRenderer {
         if (rev !== this.revision) return;
         this.art.subtitle.show = true;
         this.art.subtitle.update();
-        this.note.textContent = track.ass_url ? '原样式加载失败，已用基础样式显示；可重新选择字幕重试' : '';
+        this.note.textContent = '';
       });
       try { await this.pending; } catch (e) {
         if (rev === this.revision) this.note.textContent = e.message;

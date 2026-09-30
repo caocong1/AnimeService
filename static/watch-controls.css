@@ -10,6 +10,7 @@
 .dm-toggle b { font-weight:500; }
 .dm-toggle .i { width:16px; }
 .dm-tools-note { color:var(--muted); font-size:var(--text-s); }
+.dm-tools-note:empty { display:none; }
 .dm-source-retry { min-width:var(--control); min-height:var(--control); margin-left:var(--s-2); border:0; background:transparent; color:var(--ink); text-decoration:underline; }
 .dm-state-note { color:var(--muted); font-size:var(--text-s); }
 .dm-heading .btn { flex-shrink:0; }
