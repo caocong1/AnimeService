@@ -132,6 +132,7 @@ def test_comments_preserve_independent_source_clocks_and_stable_identity(library
     assert len(result['sources']) == 2
     assert all(s['comments'][0]['time'] == 10 for s in result['sources'])
     assert result['sources'][0]['source_identity'] != result['sources'][1]['source_identity']
+    assert [s['site'] for s in result['sources']] == ['bilibili', 'bahamut']
 
 
 def fake_tools(monkeypatch):

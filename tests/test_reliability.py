@@ -251,6 +251,13 @@ def test_danmu_normalization_dedup_and_invalid_times():
     assert len(d)==2 and d[1]['mode']==1 and d[1]['color']=='#0000ff'
 
 
+def test_danmu_normalization_keeps_only_valid_sender():
+    from anime.webplayer import normalize_comments
+    d=normalize_comments({'comments':[{'p':'1,1,1,x','m':'a','sender':'9f3a1c2b'},{'p':'2,1,1,x','m':'b','sender':''},
+        {'p':'3,1,1,x','m':'c','sender':{'x':1}},{'p':'4,1,1,x','m':'d','sender':'x'*65},{'p':'5,1,1,x','m':'e'}]})
+    assert [x.get('user') for x in d]==['9f3a1c2b',None,None,None,None]
+
+
 def test_season_checks_early_october_without_marking_watching(setup):
     import datetime
     from anime.season import install_season

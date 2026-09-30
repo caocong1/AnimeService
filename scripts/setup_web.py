@@ -25,6 +25,8 @@ from patch_danmu_proxy import patch
 patch()
 from patch_danmu_bilibili import patch as patch_bilibili
 patch_bilibili()
+from patch_danmu_sender import patch as patch_sender
+patch_sender()
 run([npm,'ci','--ignore-scripts','--no-audit','--no-fund'])
 target=ROOT/'static/vendor';target.mkdir(exist_ok=True)
 for package in ('artplayer','artplayer-plugin-danmuku'):

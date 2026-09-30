@@ -28,6 +28,7 @@
 !/scripts/setup_subtitles.py
 !/scripts/patch_danmu_proxy.py
 !/scripts/patch_danmu_bilibili.py
+!/scripts/patch_danmu_sender.py
 !/scripts/Read-DandanHistory.ps1
 !/scripts/supervisor.py
 !/scripts/stop_danmu.py

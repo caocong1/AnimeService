@@ -117,10 +117,12 @@ class WebPlayer:
         combined=[];sources=[]
         for sid,url in zip(ids,urls):
             identity=hashlib.sha256(url.encode()).hexdigest()
+            # Sender ids are only meaningful together with the site that issued them.
+            site=SITES.get(urlparse(url).hostname,'')
             try:
                 rows=normalize_comments(self.danmu('comment',{'url':url,'format':'json'}))
-                combined+=rows;sources.append({'id':sid,'source_identity':identity,'count':len(rows),'comments':rows})
-            except Exception:sources.append({'id':sid,'source_identity':identity,'count':0,'comments':[],'error':'来源获取失败或超时，可重试'})
+                combined+=rows;sources.append({'id':sid,'source_identity':identity,'site':site,'count':len(rows),'comments':rows})
+            except Exception:sources.append({'id':sid,'source_identity':identity,'site':site,'count':0,'comments':[],'error':'来源获取失败或超时，可重试'})
         seen=set();out=[]
         for x in combined:
             k=(round(x['time'],1),x['text'],x['mode'])
@@ -142,6 +144,9 @@ class WebPlayer:
             return result
 
 
+SITES={'www.bilibili.com':'bilibili','ani.gamer.com.tw':'bahamut','www.iqiyi.com':'iqiyi','v.youku.com':'youku','v.qq.com':'tencent'}
+
+
 def normalize_comments(data):
     result=[];seen=set()
     for c in data.get('comments',[])[:100000]:
@@ -150,7 +155,10 @@ def normalize_comments(data):
             if not math.isfinite(t) or not 0<=t<=86400 or mode not in (1,4,5) or not text:continue
             key=(round(t,1),text,mode)
             if key in seen:continue
-            seen.add(key);result.append({'time':t,'text':text,'mode':{1:0,5:1,4:2}[mode],'color':f'#{color & 0xffffff:06x}'})
+            row={'time':t,'text':text,'mode':{1:0,5:1,4:2}[mode],'color':f'#{color & 0xffffff:06x}'}
+            sender=c.get('sender')
+            if isinstance(sender,(str,int)) and not isinstance(sender,bool) and 0<len(str(sender))<=64:row['user']=str(sender)
+            seen.add(key);result.append(row)
         except (ValueError,KeyError,IndexError,TypeError):continue
     return sorted(result,key=lambda x:x['time'])
 
