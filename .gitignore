@@ -51,3 +51,4 @@
 **/*.torrent
 **/*.log
 **/*credential*
+**/.DS_Store
