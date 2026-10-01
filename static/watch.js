@@ -149,7 +149,7 @@
     }, true);
     renderDisplay();
     $('#screen').tabIndex=0;
-    $('#screen').setAttribute('aria-label','视频播放器；空格播放或暂停，左右方向键或左右滑动快退快进，回车切换全屏');
+    $('#screen').setAttribute('aria-label','视频播放器；空格播放或暂停，左右方向键或左右滑动快退快进，上下方向键增减音量，每次5%，回车切换全屏');
     // Page-wide hotkeys, unless focus sits in a control that owns these keys (buttons, fields, the danmu list, dialogs).
     document.addEventListener('keydown', e => {
       const t = e.target;
@@ -159,6 +159,7 @@
       if(e.code==='Space') { e.preventDefault(); if(!e.repeat) art.toggle(); }
       if(e.key==='Enter') { e.preventDefault(); if(!e.repeat) art.fullscreen=!art.fullscreen; }
       if(e.key==='ArrowLeft' || e.key==='ArrowRight') { e.preventDefault(); art.currentTime=Math.max(0,Math.min(art.duration,art.currentTime+(e.key==='ArrowRight'?5:-5))); }
+      if(e.key==='ArrowUp' || e.key==='ArrowDown') { e.preventDefault(); art.volume=Math.max(0,Math.min(1,Math.round((art.volume+(e.key==='ArrowUp'?0.05:-0.05))*100)/100)); }
     });
     // Horizontal swipe on the video seeks in the arrow keys' 5 s steps; a full player width is 60 s. Seeks once, on release.
     let swipe = null;
