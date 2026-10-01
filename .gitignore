@@ -26,6 +26,7 @@
 /scripts/*
 !/scripts/setup_web.py
 !/scripts/setup_subtitles.py
+!/scripts/setup_audio_alignment.py
 !/scripts/patch_danmu_proxy.py
 !/scripts/patch_danmu_bilibili.py
 !/scripts/patch_danmu_sender.py

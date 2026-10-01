@@ -41,7 +41,8 @@
 .dm-more-body p { margin:0; color:var(--muted); overflow-wrap:anywhere; }
 .dm-more-body label { display:flex; flex-wrap:wrap; align-items:center; gap:var(--s-3); }
 .dm-more-body input { width:120px; }
-.dm-more-actions { display:flex; justify-content:flex-end; gap:var(--s-3); }
+.dm-more-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:var(--s-3); }
+.dm-alignment { overflow-wrap:anywhere; }
 .dm-global { margin-top:var(--s-3); margin-left:0; }
 .dm-empty { padding:var(--s-5); background:var(--layer-1); color:var(--muted); font-size:var(--text-s); }
 .dm-dialog { padding:0; width:min(640px,calc(100vw - 32px)); max-height:calc(100dvh - 48px); border:1px solid var(--line-strong); background:var(--bg); color:var(--ink); border-radius:var(--radius-s); }

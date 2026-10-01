@@ -25,6 +25,15 @@
     catch (_) { toast('本次来源已生效，但浏览器未能保存，刷新后可能丢失'); }
   }
   const web = (path, body) => api('/web' + path, body);
+  const alignment = DanmuAlignment.create({
+    request: (path, body) => web(`/media/${id}/alignment${path}`, body),
+    present: source => selected.includes(source), save: saveTiming,
+    render: () => { if (!document.activeElement?.matches('#danmu-selected input')) renderSelected(); }, apply: applyDanmu,
+  });
+  function alignSource(source, options) {
+    if (/bilibili|B站/i.test(source.title) && source.count > 0) alignment.start(source, options);
+  }
+  window.addEventListener('pagehide', () => selected.forEach(source => alignment.cancel(source)));
 
   function screenState(html) {
     $('#screen-state').innerHTML = html;
@@ -356,25 +365,29 @@
       : '<p>在播放器或弹幕列表中右键一条弹幕，即可屏蔽发送者。</p>';
   }
   function restoreTiming(source) {
-    let saved = {};
-    try { saved = JSON.parse(localStorage.getItem(`fanyu-danmu:${id}:${source.source_identity}`) || '{}') || {}; } catch (_) {}
-    return {...source, ...DanmuTiming.settings(saved)};
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(`fanyu-danmu:${id}:${source.source_identity}`) || 'null'); } catch (_) {}
+    const timing = saved || source;
+    return {...source, ...DanmuTiming.settings(timing), ...DanmuAlignment.preferences(timing),
+      alignmentManual: timing.alignmentManual ?? (!!saved || !!timing.offset)};
   }
     function saveTiming(source) {
     if (!source.source_identity) return;
-    try { localStorage.setItem(`fanyu-danmu:${id}:${source.source_identity}`, JSON.stringify(DanmuTiming.settings(source))); }
+    try { localStorage.setItem(`fanyu-danmu:${id}:${source.source_identity}`, JSON.stringify({...DanmuTiming.settings(source), ...DanmuAlignment.preferences(source)})); }
       catch (_) { toast('本次调整已生效，但浏览器未能保存设置'); }
       saveSources();
     }
   function renderSelected() {
+    if (document.activeElement?.matches('#danmu-selected input')) return;
     const open = [...document.querySelectorAll('#danmu-selected details[open]')].map(x => x.dataset.sourceMore);
     $('#danmu-selected').innerHTML = selected.map((x, i) => {
       const p = sourceLabel(x.title), episode = (x.title.match(/第\s*\d+\s*[集话話]/g) || []).at(-1) || '已选剧集';
       const duration = (x.title.match(/\d+:\d{2}(?::\d{2})?/g) || []).at(-1);
       const status = x.loading ? '加载中…' : x.error ? '获取失败' : x.count > 0 ? `已加载 ${x.count} 条` : x.count === 0 ? '暂无弹幕' : '尚未加载';
-      return `<article class="dm-source"><div class="dm-source-main"><div class="dm-identity"><span class="dm-mark" aria-hidden="true">${p.mark}</span><div><div class="dm-name">${p.name}</div><div class="dm-meta" data-state="${x.error ? 'error' : x.count > 0 ? 'ok' : ''}">${esc(episode)}${duration ? ` · ${duration}` : ''} · ${status}${!x.loading && (x.error || !x.count) ? `<button class="dm-source-retry" data-reload-source="${i}" type="button">${x.error ? '重试' : '刷新'}</button>` : ''}</div></div></div>
-      <div class="dm-stepper"><button type="button" data-nudge="${i}" data-delta="-1" aria-label="${p.name} 提前1秒">− 提前</button><label class="dm-value"><input type="number" min="-3600" max="3600" step="0.5" data-timing="${i}" data-field="offset" value="${x.offset || 0}" aria-label="${p.name} 偏移秒数"><span>秒</span></label><button type="button" data-nudge="${i}" data-delta="1" aria-label="${p.name} 延后1秒">延后 ＋</button></div></div>
-      <details class="dm-more" data-source-more="${i}"${open.includes(String(i)) ? ' open' : ''}><summary>更多设置</summary><div class="dm-more-body"><p>${esc(cleanTitle(x.title))}</p><div class="dm-more-actions"><button class="btn quiet" type="button" data-remove="${i}">移除此来源</button></div></div></details></article>`;
+      const alignStatus = x.alignmentEnabled === false ? '自动对齐已关闭' : x.alignmentManual ? '使用手动偏移' : ({queued:'等待音频对齐…', running:'正在音频对齐…', matched:`已自动对齐 ${x.offset > 0 ? '+' : ''}${x.offset || 0} 秒`, unreliable:'音频未能可靠匹配 · 可手动调时', unavailable:x.alignmentMessage || '自动对齐暂不可用 · 可手动调时'}[x.alignmentStatus] || '');
+      return `<article class="dm-source"><div class="dm-source-main"><div class="dm-identity"><span class="dm-mark" aria-hidden="true">${p.mark}</span><div><div class="dm-name">${p.name}</div><div class="dm-meta" data-state="${x.error ? 'error' : x.count > 0 ? 'ok' : ''}">${esc(episode)}${duration ? ` · ${duration}` : ''} · ${status}${!x.loading && (x.error || !x.count) ? `<button class="dm-source-retry" data-reload-source="${i}" type="button">${x.error ? '重试' : '刷新'}</button>` : ''}</div>${alignStatus ? `<div class="dm-meta dm-alignment" role="status">${esc(alignStatus)}</div>` : ''}</div></div>
+      <div class="dm-stepper"><button type="button" data-nudge="${i}" data-delta="-1" aria-label="${p.name} 提前1秒">− 提前</button><label class="dm-value"><input type="number" min="-3600" max="3600" step="0.1" data-timing="${i}" data-field="offset" value="${x.offset || 0}" aria-label="${p.name} 偏移秒数"><span>秒</span></label><button type="button" data-nudge="${i}" data-delta="1" aria-label="${p.name} 延后1秒">延后 ＋</button></div></div>
+      <details class="dm-more" data-source-more="${i}"${open.includes(String(i)) ? ' open' : ''}><summary>更多设置</summary><div class="dm-more-body"><p>${esc(cleanTitle(x.title))}</p><div class="dm-more-actions">${p.name === 'Bilibili' ? `<button class="btn quiet" type="button" data-align-source="${i}"${['queued','running'].includes(x.alignmentStatus) ? ' disabled' : ''}>${x.alignmentManual || x.alignmentEnabled === false ? '改用自动对齐' : '重新自动对齐'}</button>${x.alignmentEnabled !== false ? `<button class="btn quiet" type="button" data-disable-alignment="${i}">关闭自动对齐</button>` : ''}` : ''}<button class="btn quiet" type="button" data-remove="${i}">移除此来源</button></div></div></details></article>`;
     }).join('') || '<p class="dm-empty">还没有可用来源。添加本集的弹幕，或在高级设置中重新匹配。</p>';
   }
   function sourceLabel(title = '') {
@@ -398,13 +411,13 @@
       if (!selected.includes(source)) return;
       Object.assign(source, d.sources[0]);
     } catch(e) { if (selected.includes(source)) { source.error=e.message; source.comments=[]; } }
-    finally { source.loading=false; if (selected.includes(source)) { renderSelected(); await applyDanmu(); } }
+    finally { source.loading=false; if (selected.includes(source)) { renderSelected(); await applyDanmu(); alignSource(source,{confirmed:source.alignmentConfirmed === true}); } }
   }
   function closeSourceDialog() { ++detailRev; $('#danmu-dialog').close(); }
   async function restoreDanmu() {
     const saved = DanmuTiming.savedSources(readSaved(sourceStorageKey));
     if (saved === null) return autoDanmu();
-    selected = saved;
+    selected = saved.map(restoreTiming);
     renderSelected();
     await applyDanmu();
     // An explicitly empty list stays empty; removed automatic sources stay removed.
@@ -424,6 +437,7 @@
         const matched=d.selected.map(x => restoreTiming({...x, ...d.sources.find(s => s.id === x.id)}));
         for (const s of matched) { if (removedSources.has(s.source_identity)) continue; const old=selected.find(x=>x.source_identity===s.source_identity); if(old) Object.assign(old,{id:s.id,comments:s.comments,count:s.count,error:s.error}); else if(selected.length<5) selected.push(s); }
         saveSources(); renderSelected(); await applyDanmu(); note.title = d.title || '';
+        selected.forEach(source => alignSource(source));
       } else { if (!selected.length) { note.textContent = '未匹配'; renderSelected(); } note.title = d.message || ''; }
     } catch (e) { if (rev === danmuRev) { note.textContent = '未连接'; note.title = e.message; if(!selected.length) $('#danmu-selected').innerHTML='<p class="dm-empty">自动匹配暂时失败。可以添加来源，或在高级设置中重试。</p>'; } }
   }
@@ -436,15 +450,25 @@
     if (b.dataset.mark) return act(b, async () => { screenState(''); await mark(current().n, b.dataset.mark === 'true'); });
     if (b.dataset.ep) return act(b, () => mark(Number(b.dataset.ep), b.dataset.finished === 'true'));
     if (b.dataset.endNext) return act(b, async () => { await api(`/shows/${show.show.id}/watch`, { episode: current().n, finished: true }); location.assign('/watch?media=' + b.dataset.endNext); });
-    if (b.dataset.remove) { ++danmuRev; const i=Number(b.dataset.remove); removedSources.add(selected[i].source_identity); saveRemoved(); selected.splice(i, 1); saveSources(); renderSelected(); applyDanmu().catch(e => toast(e.message)); (document.querySelector(`[data-timing="${Math.min(i,selected.length-1)}"][data-field="offset"]`) || $('#open-danmu-search')).focus(); return; }
+    if (b.dataset.remove) { ++danmuRev; const i=Number(b.dataset.remove); alignment.cancel(selected[i]); removedSources.add(selected[i].source_identity); saveRemoved(); selected.splice(i, 1); saveSources(); renderSelected(); applyDanmu().catch(e => toast(e.message)); (document.querySelector(`[data-timing="${Math.min(i,selected.length-1)}"][data-field="offset"]`) || $('#open-danmu-search')).focus(); return; }
     if (b.dataset.nudge !== undefined) {
       const x = selected[Number(b.dataset.nudge)];
+      alignment.manual(x);
       x.offset = Math.max(-3600, Math.min(3600, (x.offset || 0) + Number(b.dataset.delta)));
-      saveTiming(x); renderSelected(); document.querySelector(`[data-nudge="${b.dataset.nudge}"][data-delta="${b.dataset.delta}"]`)?.focus(); applyDanmu().catch(e => toast(e.message)); return;
+      saveTiming(x); const selector=`[data-nudge="${b.dataset.nudge}"][data-delta="${b.dataset.delta}"]`; renderSelected(); document.querySelector(selector)?.focus(); applyDanmu().catch(e => toast(e.message)); return;
     }
     if (b.dataset.findUid !== undefined) { const box = document.querySelector(`[data-uids="${CSS.escape(b.dataset.findUid)}"]`); if (box.hidden) renderUids(box, b.dataset.findUid); else box.hidden = true; return; }
     if (b.dataset.unblock !== undefined) { unblockUser(b.dataset.unblock); ($('#dm-blocked-list button') || $('#dm-blocked > summary')).focus(); return; }
     if (b.dataset.reloadSource !== undefined) return loadSource(selected[Number(b.dataset.reloadSource)]);
+    if (b.dataset.alignSource !== undefined) {
+      const source=selected[Number(b.dataset.alignSource)];
+      source.alignmentEnabled=true; source.alignmentManual=false; saveTiming(source);
+      return alignment.start(source,{force:true,confirmed:true});
+    }
+    if (b.dataset.disableAlignment !== undefined) {
+      const source=selected[Number(b.dataset.disableAlignment)];
+      alignment.cancel(source); source.alignmentEnabled=false; source.alignmentStatus='disabled'; saveTiming(source); renderSelected(); return;
+    }
     if (b.dataset.anime) return act(b, async () => {
       ++danmuRev;
       const rev=++detailRev;
@@ -481,7 +505,7 @@
         if (selected.length >= 5) return toast('最多使用 5 个来源，先移除一个再添加');
         ++danmuRev;
         const source=restoreTiming({ id: ep.source_key, source_identity: ep.source_identity, title: activeDanmu.animeTitle + ' · ' + ep.episodeTitle });
-        removedSources.delete(source.source_identity); saveRemoved(); selected.push(source); saveSources(); closeSourceDialog(); return loadSource(source);
+        removedSources.delete(source.source_identity); saveRemoved(); source.alignmentConfirmed=true; selected.push(source); saveSources(); closeSourceDialog(); return loadSource(source);
       }
       case 'load-danmu': return act(b, async () => {
         const rev = ++danmuRev, sources = [...selected];
@@ -505,10 +529,19 @@
     if (input.dataset.timing === undefined) return;
     if (!input.checkValidity()) { input.reportValidity(); return; }
     const source = selected[Number(input.dataset.timing)];
+    if (input.dataset.field === 'offset') alignment.manual(source);
     source[input.dataset.field] = input.value === '' ? null : Number(input.value);
     Object.assign(source, DanmuTiming.settings(source));
     saveTiming(source); applyDanmu().catch(e => toast(e.message));
   });
+  document.addEventListener('input', e => {
+    if (e.target.dataset.field === 'offset' && e.target.dataset.timing !== undefined) {
+      alignment.manual(selected[Number(e.target.dataset.timing)]);
+    }
+  });
+  $('#danmu-selected').addEventListener('focusout', () => setTimeout(() => {
+    if (!document.activeElement?.matches('#danmu-selected input')) renderSelected();
+  },0));
   try { $('#offset').value = DanmuTiming.settings({offset: localStorage.getItem(`fanyu-danmu-global:${id}`) || 0}).offset; } catch (_) {}
   $('#offset').addEventListener('change', () => {
     if (!$('#offset').checkValidity()) { $('#offset').reportValidity(); return; }

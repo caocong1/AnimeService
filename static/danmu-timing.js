@@ -41,7 +41,8 @@
     return value.filter(s => s && typeof s.id === 'string' && s.id.length <= 100
       && typeof s.source_identity === 'string' && typeof s.title === 'string'
       && !seen.has(s.source_identity) && seen.add(s.source_identity)).slice(0,5)
-      .map(s => ({id:s.id, source_identity:s.source_identity, title:s.title.slice(0,1000), ...settings(s)}));
+      .map(s => ({id:s.id, source_identity:s.source_identity, title:s.title.slice(0,1000), ...settings(s),
+        ...Object.fromEntries(['alignmentManual','alignmentEnabled'].filter(k => typeof s[k] === 'boolean').map(k => [k,s[k]]))}));
   }
   const FONTS = {
     default: '',

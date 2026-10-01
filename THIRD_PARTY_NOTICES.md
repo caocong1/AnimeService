@@ -9,6 +9,9 @@
 | libass-wasm / SubtitlesOctopus | https://github.com/libass/JavascriptSubtitlesOctopus · 4.1.0 | libass LGPL-2.1-or-later 等组合许可；完整清单位于安装目录 COPYRIGHT |
 | Noto Sans CJK SC | https://github.com/notofonts/noto-cjk · Sans2.004 | SIL Open Font License 1.1 |
 | danmuapi | https://github.com/canmo101/danmuapi · 28673ac764485b0f37966779bc3b14e2b97d31aa | AGPL-3.0，见上游 LICENSE |
+| Chromaprint / fpcalc | https://github.com/acoustid/chromaprint · 1.6.1 | LGPL-2.1-or-later；官方 Windows 二进制及其依赖许可随工具保留 |
+| yt-dlp | https://github.com/yt-dlp/yt-dlp · 2026.08.19 | Unlicense，依赖保留各自许可 |
+| NumPy | https://github.com/numpy/numpy · 2.4.3 | BSD-3-Clause，二进制依赖许可见安装包 |
 
 播放器构建产物和 danmuapi checkout 不随仓库提交。`scripts/setup_web.py` 下载它们，并对独立弹幕服务应用仓库内可见的回环监听、关闭通用代理和巴哈姆特代理补丁。上游 LICENSE 保留在 checkout；分发或部署修改后的上游组件时须遵守其许可证，不得把它标为本项目 MIT 代码。
 

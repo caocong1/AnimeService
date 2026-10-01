@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from .db import ROOT
 from .subtitles import Subtitles
 from .auto_danmu import match as match_danmu
+from .audio_alignment import AlignmentService
 
 
 def maintain_danmu(stop):
@@ -41,6 +42,9 @@ class WebPlayer:
         self.subtitles=Subtitles(db)
         self.auto_lock=threading.Lock()
         self.auto_cache={}
+        self.alignment=None
+        self.alignment_jobs={}
+        self.alignment_lock=threading.Lock()
         self.inventory=[]
         self.inventory_mtime=0
         inventory=db.path.parent/'inventory.json'
@@ -51,6 +55,10 @@ class WebPlayer:
             c.execute('''CREATE TABLE IF NOT EXISTS web_progress(
                 media_id TEXT PRIMARY KEY,position REAL DEFAULT 0,duration REAL DEFAULT 0,
                 last_played REAL,updated REAL,sources TEXT DEFAULT '[]')''')
+            c.execute('''CREATE TABLE IF NOT EXISTS web_danmu_matches(
+                media_id TEXT NOT NULL,source_key TEXT NOT NULL,
+                episode_identity TEXT NOT NULL,
+                PRIMARY KEY(media_id,source_key))''')
 
     def media(self):
         inventory=self.db.path.parent/'inventory.json'
@@ -139,9 +147,52 @@ class WebPlayer:
             try:result=match_danmu(self,item)
             except Exception:return {'status':'error','message':'弹幕自动查找暂时失败，可重试或手动选择来源。','comments':[],'sources':[]}
             if result['status']=='matched':
+                with self.db.connect() as c:
+                    c.executemany('INSERT INTO web_danmu_matches(media_id,source_key,episode_identity) VALUES(?,?,?) '
+                                  'ON CONFLICT(media_id,source_key) DO UPDATE SET episode_identity=excluded.episode_identity',
+                                  [(key,s['id'],self.episode_identity(item)) for s in result.get('selected',[])])
                 if len(self.auto_cache)>=100:self.auto_cache.clear()
                 self.auto_cache[cache_key]=(time.time(),result)
             return result
+
+    def episode_identity(self,item):
+        show=self.db.one('SELECT mapping FROM shows WHERE id=?',(item.get('show_id'),))
+        return json.dumps([item.get('show_id'),item.get('episode'),show.get('mapping') if show else None])
+
+    def start_alignment(self,key,p):
+        item=self.item(key)
+        if not item.get('show_id') or not item.get('episode') or item.get('unverified'):
+            return {'status':'unavailable','message':'请先核对本地文件的作品与集数，再自动对齐'}
+        sid=p.get('source_id')
+        if not isinstance(sid,str) or len(sid)>100:raise ValueError('来源无效')
+        source=self.db.one('SELECT url FROM web_danmu_sources WHERE source_key=?',(sid,))
+        if not source:raise ValueError('请重新搜索并选择本集来源')
+        identity=self.episode_identity(item)
+        if p.get('confirmed') is True:
+            self.db.execute('INSERT INTO web_danmu_matches(media_id,source_key,episode_identity) VALUES(?,?,?) '
+                            'ON CONFLICT(media_id,source_key) DO UPDATE SET episode_identity=excluded.episode_identity',(key,sid,identity))
+        if not self.db.one('SELECT 1 FROM web_danmu_matches WHERE media_id=? AND source_key=? AND episode_identity=?',(key,sid,identity)):
+            return {'status':'unavailable','message':'请确认此来源是当前这一集，再点击自动对齐'}
+        with self.alignment_lock:
+            if self.alignment is None:
+                try:ffmpeg=self.subtitles.tool('ffmpeg');ffprobe=self.subtitles.tool('ffprobe')
+                except ValueError:return {'status':'unavailable','message':'未安装音频读取工具，仍可手动调时'}
+                fpcalc=ROOT/'tools/chromaprint/fpcalc.exe'
+                self.alignment=AlignmentService(self.db.path.parent/'cache/audio-alignment',ffmpeg,ffprobe,str(fpcalc))
+            result=self.alignment.start(item,source['url'],hashlib.sha256(source['url'].encode()).hexdigest(),force=p.get('force') is True)
+            if result.get('job_id'):
+                if len(self.alignment_jobs)>=200:
+                    self.alignment_jobs={j:v for j,v in self.alignment_jobs.items() if self.alignment.status(j).get('status') in ('queued','running')}
+                self.alignment_jobs[result['job_id']]=(key,Path(item['path']).stat().st_mtime_ns,identity)
+            return result
+
+    def alignment_status(self,key,job,cancel=False):
+        item=self.item(key)
+        with self.alignment_lock:
+            if not self.alignment or self.alignment_jobs.get(job)!=(key,Path(item['path']).stat().st_mtime_ns,self.episode_identity(item)):
+                raise HTTPException(404,'对齐任务已失效')
+            if cancel:self.alignment.cancel(job)
+            return self.alignment.status(job)
 
 
 SITES={'www.bilibili.com':'bilibili','ani.gamer.com.tw':'bahamut','www.iqiyi.com':'iqiyi','v.youku.com':'youku','v.qq.com':'tencent'}
@@ -208,6 +259,12 @@ def register_webplayer(app,db):
     @app.get('/api/web/media/{key}/danmu')
     def automatic_danmu(key:str):
         return player.auto_danmu(key)
+    @app.post('/api/web/media/{key}/alignment')
+    def alignment(key:str,p:dict):return player.start_alignment(key,p)
+    @app.get('/api/web/media/{key}/alignment/{job}')
+    def alignment_status(key:str,job:str):return player.alignment_status(key,job)
+    @app.post('/api/web/media/{key}/alignment/{job}/cancel')
+    def alignment_cancel(key:str,job:str):return player.alignment_status(key,job,cancel=True)
     @app.get('/api/web/media/{key}/subtitles')
     def subtitles(key:str):
         tracks=player.subtitles.tracks(player.item(key))

@@ -33,4 +33,6 @@ for package in ('artplayer','artplayer-plugin-danmuku'):
     shutil.copyfile(ROOT/f'node_modules/{package}/dist/{package}.js',target/f'{package}.js')
 from setup_subtitles import install as install_subtitles
 install_subtitles()
+from setup_audio_alignment import install as install_audio_alignment
+install_audio_alignment()
 print('Web dependencies ready; no new subscription or download enabled.')
