@@ -273,15 +273,14 @@ class Engine:
             force=False;self.wake.wait(30);self.wake.clear()
     def gaps(self,sid):
         s=self.db.show(sid);m=json.loads(s['mapping']);today=datetime.date.today().isoformat()
-        air=self.db.rows("SELECT episode FROM airings WHERE show_id=? AND airdate<>'' AND airdate<=?",(sid,today))
-        airing_offset=m.get('airing_offset',0)
+        air=[a for a in self.db.local_airings(sid) if a['airdate'] and a['airdate']<=today]
         observed=[]
         limit=m.get('end',s['total'] or 999)
         settings=self.settings() # Once per call: candidates can number in the hundreds per show.
         for r in self.db.rows('SELECT title FROM candidates WHERE show_id=?',(sid,)):
             try:observed.extend(ep for ep in validate_title(r['title'],m,settings,False) if m.get('start',1)<=ep<=limit)
             except Rejected:pass
-        expected=set(e['episode']-airing_offset for e in air)|set(range(m.get('start',1),min(max(observed,default=0),m.get('end',s['total'] or 999))+1))
+        expected=set(e['episode'] for e in air)|set(range(m.get('start',1),min(max(observed,default=0),m.get('end',s['total'] or 999))+1))
         existing=self.db.rows('SELECT episode,status FROM episodes WHERE show_id=?',(sid,));reserved={e['episode'] for e in existing}
         limit=m.get('end',s['total'] or 999)
         return {'missing':sorted(e for e in expected-reserved if m.get('start',1)<=e<=limit),

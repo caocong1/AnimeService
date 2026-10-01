@@ -76,6 +76,13 @@ class Store:
         self.execute('INSERT INTO events(time,level,scope,message) VALUES(?,?,?,?)',(time.time(),level,scope,message[:1000]))
     def show(self,sid):return self.one('SELECT * FROM shows WHERE id=?',(sid,))
     def mapping(self,sid):return json.loads(self.show(sid)['mapping'])
+    def local_airings(self,sid):
+        # Catalog rows retain Bangumi numbering; consumers use the separately verified
+        # airing offset, never the release/file offset or a guessed previous-season total.
+        offset=self.mapping(sid).get('airing_offset',0)
+        return [{**a,'source_episode':a['episode'],'episode':a['episode']-offset}
+            for a in self.rows('SELECT * FROM airings WHERE show_id=? ORDER BY episode',(sid,))
+            if a['episode']-offset>0]
     def eligible(self,sid):
         s=self.show(sid);m=json.loads(s['mapping']) if s else {}
         return bool(s and s['authorized'] and not s['cleanup_hold'] and

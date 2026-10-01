@@ -1,4 +1,4 @@
-import datetime
+import datetime,json
 import pytest
 from unittest.mock import Mock
 from fastapi.testclient import TestClient
@@ -42,6 +42,50 @@ def test_episode_board_states_without_mutation(tmp_path):
     detail=client.get('/api/shows/42').json()
     assert detail['board']['next']['n']==2 and detail['episodes'][1]['media_id']==row['next']['media']
     assert db.show(42)==before and len(db.rows('SELECT * FROM watches'))==1
+
+
+def test_cumulative_airings_do_not_expand_season_or_overwrite_watches(tmp_path):
+    client,db,_=client_at(tmp_path)
+    client.app.state.engine.gaps.return_value={'missing':[]}
+    db.upsert_subject({'id':42,'name':'Season 4','total_episodes':24})
+    db.execute("UPDATE shows SET selected=1,mapping=? WHERE id=42",
+        (json.dumps({'airing_offset':72,'offset':72}),))
+    for n in range(1,25):
+        db.execute('INSERT INTO airings VALUES(42,?,?,?)',(n+72,'2026-01-01',f'Title {n}'))
+        db.execute("INSERT INTO watches(show_id,episode,finished,method) VALUES(42,?,1,?)",
+            (n,'manual' if n==13 else 'dandan'))
+    before=db.show(42);watches=db.rows('SELECT * FROM watches')
+    detail=client.get('/api/shows/42').json()
+    assert [e['n'] for e in detail['board']['eps']]==list(range(1,25))
+    assert all(e['s']=='watched' for e in detail['board']['eps'])
+    assert [a['episode'] for a in detail['airings']]==list(range(1,25))
+    assert [a['source_episode'] for a in detail['airings']]==list(range(73,97))
+    assert detail['airings'][0]['title']=='Title 1'
+    assert len(client.get('/api/shows?scope=home').json()[0]['eps'])==24
+    assert db.show(42)==before and db.rows('SELECT * FROM watches')==watches
+    assert db.rows('SELECT episode FROM airings ORDER BY episode')[0]['episode']==73
+
+
+@pytest.mark.parametrize('mapping,source_start',[
+    ({'airing_offset':12,'offset':0},13),
+    ({'airing_offset':77,'offset':11},78),
+    ({'offset':72},1),
+    ({},1),
+])
+def test_airing_dates_and_gaps_share_only_explicit_airing_offset(tmp_path,mapping,source_start):
+    from anime.engine import Engine
+    from anime.board import episode_board
+    db=Store(tmp_path/'test.db');db.upsert_subject({'id':42,'name':'Example','total_episodes':2})
+    db.execute('UPDATE shows SET mapping=? WHERE id=42',(json.dumps(mapping),))
+    db.execute("INSERT INTO airings VALUES(42,?,'2000-01-01','Aired')",(source_start,))
+    db.execute("INSERT INTO airings VALUES(42,?,'2999-01-01','Future')",(source_start+1,))
+    qb=Mock();engine=Engine(db,qbit=qb,library=tmp_path/'library')
+    assert engine.gaps(42)['missing']==[1]
+    board=episode_board(db,engine,db.show(42))
+    assert board['eps']==[{'n':1,'s':'missing'},{'n':2,'s':'future','date':'2999-01-01'}]
+    db.execute("INSERT INTO episodes(show_id,episode,status) VALUES(42,1,'held')")
+    assert episode_board(db,engine,db.show(42))['eps'][0]['s']=='aired'
+    assert not qb.mock_calls
 
 
 def test_unselect_only_undoes_a_fresh_wish(tmp_path):

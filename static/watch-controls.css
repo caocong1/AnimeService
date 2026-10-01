@@ -54,6 +54,12 @@
 .dm-search { display:flex; gap:var(--s-2); margin-bottom:var(--s-5); }
 .dm-search input { min-width:0; flex:1; }
 .dm-results { display:grid; }
+.dm-filter { display:flex; align-items:center; gap:var(--s-3); margin-bottom:var(--s-4); color:var(--muted); font-size:var(--text-s); white-space:nowrap; }
+.dm-filter select { min-height:var(--control); min-width:140px; width:auto; flex:1; }
+.dm-result-row { display:flex; align-items:center; gap:var(--s-2); border-bottom:1px solid var(--line); }
+.dm-result-row .dm-result { flex:1; min-width:0; border-bottom:0; }
+.dm-source-link { display:inline-flex; align-items:center; min-height:var(--control); padding:var(--s-2); flex-shrink:0; color:var(--ink); text-decoration:underline; font-size:var(--text-s); }
+.dm-detail footer { align-items:center; flex-wrap:wrap; gap:var(--s-3); }
 .dm-result { display:flex; align-items:center; gap:var(--s-3); width:100%; padding:var(--s-4) 0; border:0; border-bottom:1px solid var(--line); background:transparent; text-align:left; color:var(--ink); min-height:var(--control); }
 .dm-result:hover { background:var(--layer-1); }
 .dm-result > span:nth-child(2) { flex:1; min-width:0; }

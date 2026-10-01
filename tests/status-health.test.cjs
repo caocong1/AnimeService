@@ -33,3 +33,10 @@ test('active task and service failures still show errors alongside reviews', () 
   assert.equal(problems([{ hash: 'abc', status: 'review' }], [error, serviceError]).error, serviceError);
   assert.equal(problems([], [error]).error, error);
 });
+
+test('foreground API errors remain in history without changing worker health', () => {
+  const requestError = { ...error, scope: 'api' };
+  assert.equal(problems([], [requestError]).error, undefined);
+  const serviceError = { ...error, scope: 'service' };
+  assert.equal(problems([], [requestError, serviceError]).error, serviceError);
+});

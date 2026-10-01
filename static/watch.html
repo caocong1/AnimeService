@@ -9,7 +9,7 @@
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="stylesheet" href="/static/tokens.css">
 <link rel="stylesheet" href="/static/app.css">
-<link rel="stylesheet" href="/static/watch-controls.css?v=6">
+<link rel="stylesheet" href="/static/watch-controls.css?v=7">
 <script src="/static/theme.js"></script>
 </head>
 <body class="watch">
@@ -59,7 +59,7 @@
 <dialog class="dm-dialog" id="danmu-dialog" aria-labelledby="danmu-dialog-title">
   <header class="dm-dialog-head"><h2 id="danmu-dialog-title">添加弹幕来源</h2><button class="icon-btn" id="close-danmu-search" type="button" aria-label="关闭添加来源">×</button></header>
   <div class="dm-dialog-body">
-    <div id="danmu-search-view"><form id="danmu-search" class="dm-search"><label class="sr" for="danmu-q">作品名或视频链接</label><input id="danmu-q" type="search" name="query" required maxlength="100" placeholder="作品名、集数或视频链接"><button class="btn" type="submit">搜索</button></form><p class="dm-dialog-hint" id="danmu-results-note">本集相关视频 · 选择后核对分集</p><div id="danmu-results" class="dm-results" aria-live="polite"></div></div>
+    <div id="danmu-search-view"><form id="danmu-search" class="dm-search"><label class="sr" for="danmu-q">作品名或视频链接</label><input id="danmu-q" type="search" name="query" required maxlength="100" placeholder="作品名、集数或视频链接"><button class="btn" type="submit">搜索</button></form><label class="dm-filter">来源类型 <select id="danmu-site"><option value="">全部来源</option><option value="bilibili">Bilibili</option><option value="bahamut">巴哈姆特</option><option value="iqiyi">爱奇艺</option><option value="youku">优酷</option><option value="tencent">腾讯视频</option></select></label><p class="dm-dialog-hint" id="danmu-results-note">本集相关视频 · 选择后核对分集</p><div id="danmu-results" class="dm-results" aria-live="polite"></div></div>
     <div id="danmu-detail-view" hidden><button class="btn quiet" id="danmu-back" type="button">‹ 返回搜索结果</button><div id="danmu-episodes" class="dm-detail"></div></div>
   </div>
 </dialog>
@@ -72,6 +72,7 @@
 <script src="/static/danmu-timing.js?v=6"></script>
 <script src="/static/bili-uid.js?v=1"></script>
 <script src="/static/danmu-alignment.js?v=2"></script>
-<script src="/static/watch.js?v=12"></script>
+<script src="/static/danmu-retry.js?v=1"></script>
+<script src="/static/watch.js?v=16"></script>
 </body>
 </html>

@@ -41,7 +41,7 @@
       <h3 class="m-sub">下载任务 <span class="muted num">${openTasks.length} 进行中</span></h3>
       ${s.tasks.length ? table('', ['资源', '状态', '更新'], more('task', tasks, 10).map(t => `<tr${t.status === 'error' ? ' class="is-error"' : ''}><td style="overflow-wrap:anywhere">${esc(t.title)}${t.error ? `<div class="error-line">${esc(t.error)}</div>` : ''}</td><td class="nowrap">${TASKS[t.status] || esc(t.status)}</td><td class="nowrap">${ago(t.updated)}</td></tr>`)) + moreBtn('task', tasks, 10) : '<p class="muted">没有下载任务</p>'}
       <h3 class="m-sub">事件</h3>
-      ${table('', ['时间', '范围', '记录'], more('ev', s.events, 12).map(e => `<tr${e.level === 'error' ? ' class="is-error"' : ''}><td class="nowrap">${ago(e.time)}</td><td class="nowrap">${esc(e.scope)}</td><td>${e.historical ? '<span class="muted">历史错误 · </span>' : ''}${esc(e.message)}</td></tr>`))}${moreBtn('ev', s.events, 12)}
+      ${table('', ['时间', '范围', '记录'], more('ev', s.events, 12).map(e => `<tr${e.level === 'error' ? ' class="is-error"' : ''}><td class="nowrap">${ago(e.time)}</td><td class="nowrap">${esc(e.scope)}</td><td>${e.historical ? '<span class="muted">历史错误 · </span>' : e.request_failure ? '<span class="muted">接口请求失败 · </span>' : ''}${esc(e.message)}</td></tr>`))}${moreBtn('ev', s.events, 12)}
       <h3 class="m-sub">季度目录</h3>
       <div class="list-rows">${Object.entries(s.catalogs).map(([q, v]) => `<div class="list-row"><span><span class="t">${quarterName(q)}</span><div class="d">${v ? `${v.count} 部 · ${ago(v.success)}` : '未同步'}${v?.error ? ` · <span class="error-line">${esc(v.error)}</span>` : ''}</div></span><button class="btn small" type="button" data-sync="${q}">刷新</button></div>`).join('')}</div>`;
   }

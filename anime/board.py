@@ -7,7 +7,7 @@ def episode_board(db,engine,s):
     sid=s['id'];today=datetime.date.today().isoformat()
     eps={e['episode']:e for e in db.rows('SELECT episode,status,progress,path,size FROM episodes WHERE show_id=?',(sid,))}
     watched={w['episode'] for w in db.rows('SELECT episode FROM watches WHERE show_id=? AND finished=1',(sid,))}
-    airings={a['episode']:a['airdate'] for a in db.rows('SELECT episode,airdate FROM airings WHERE show_id=?',(sid,))}
+    airings={a['episode']:a['airdate'] for a in db.local_airings(sid)}
     keys={n:hashlib.sha256(e['path'].lower().encode()).hexdigest()[:32] for n,e in eps.items() if e['status']=='complete' and e['path']}
     progress={}
     if keys:

@@ -33,7 +33,7 @@ async function api(path, body) {
   const res = await fetch('/api' + path, init);
   let data = {};
   try { data = await res.json(); } catch {}
-  if (!res.ok) throw Error(data.error || data.detail || '操作失败（' + res.status + '）');
+  if (!res.ok) throw Object.assign(Error(data.error || data.detail || '操作失败（' + res.status + '）'), {status: res.status});
   return data;
 }
 
@@ -136,7 +136,7 @@ function shell(active) {
 function statusProblems(s, now = Date.now() / 1000) {
   const tasks = new Map((s.tasks || []).map(t => [t.hash, t]));
   const error = (s.events || []).find(e => {
-    if (e.level !== 'error' || now - e.time >= 3600) return false;
+    if (e.level !== 'error' || e.scope === 'api' || now - e.time >= 3600) return false;
     if (!e.scope?.startsWith('task:')) return true;
     const task = tasks.get(e.scope.slice(5));
     // Keep historical events visible, but use the task's current result for

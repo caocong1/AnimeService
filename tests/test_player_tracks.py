@@ -60,7 +60,7 @@ def test_automatic_match_fallback_exact_title_and_stable_episode_url(library):
     assert db.rows('SELECT * FROM web_progress') == []
 
 
-@pytest.mark.parametrize('failure', ['wrong_season', 'wrong_episode', 'duplicate_episode', 'special', 'unsafe_url', 'unverified', 'offset'])
+@pytest.mark.parametrize('failure', ['wrong_season', 'wrong_episode', 'duplicate_episode', 'special', 'unsafe_url', 'unverified'])
 def test_ambiguous_or_unverified_media_never_loads_comments(library, failure):
     db, player, key, _ = library
     candidate, detail, calls = upstream_for(player)
@@ -79,8 +79,6 @@ def test_ambiguous_or_unverified_media_never_loads_comments(library, failure):
         item = player.item(key)
         item['unverified'] = True
         player.item = lambda _: item
-    if failure == 'offset':
-        db.execute('UPDATE shows SET mapping=?', (json.dumps({'offset': 12}),))
     assert player.auto_danmu(key)['status'] == 'needs_selection'
     assert not any(path == 'comment' for path, _ in calls)
 
@@ -107,7 +105,35 @@ def test_failed_source_is_retryable(library):
     assert player.auto_danmu(key)['status'] == 'matched'
 
 
-def test_ugc_never_auto_matches_even_with_exact_title(library):
+@pytest.mark.parametrize('stage', ['search/anime', 'bangumi/'])
+def test_lookup_transport_failure_is_retryable_but_wrong_identity_is_not(library, stage):
+    _, player, key, _ = library
+    _, _, _ = upstream_for(player)
+    original = player.danmu
+    def unavailable(path, params=None):
+        if path.startswith(stage):raise TimeoutError()
+        return original(path, params)
+    player.danmu = unavailable
+    result = player.auto_danmu(key)
+    assert result['status'] == 'error' and result['retryable']
+    player.danmu = original
+    assert player.auto_danmu(key)['status'] == 'matched'
+
+
+def test_partially_failed_automatic_result_does_not_freeze_retries(library, monkeypatch):
+    _, player, key, _ = library
+    source = {'id':'source','comments':[],'error':'temporary failure'}
+    result = {'status':'matched','selected':[],'sources':[source],'comments':[]}
+    matcher = Mock(return_value=result)
+    monkeypatch.setattr('anime.webplayer.match_danmu', matcher)
+    player.auto_danmu(key)
+    source.pop('error');source['count']=0
+    player.auto_danmu(key)
+    player.auto_danmu(key)
+    assert matcher.call_count == 2
+
+
+def test_ugc_title_without_episode_evidence_never_loads_comments(library):
     _, player, key, _ = library
     title = player.db.show(1)['title']
     player.danmu = Mock(return_value={'animes': [
@@ -115,7 +141,7 @@ def test_ugc_never_auto_matches_even_with_exact_title(library):
         {'animeId': 2, 'type': 'B站视频·需核对版本', 'animeTitle': title},
     ]})
     assert player.auto_danmu(key)['status'] == 'needs_selection'
-    assert all(call.args[0] == 'search/anime' for call in player.danmu.call_args_list)
+    assert all(call.args[0] != 'comment' for call in player.danmu.call_args_list)
 
 
 def test_comments_preserve_independent_source_clocks_and_stable_identity(library):
@@ -258,3 +284,108 @@ def test_ugc_does_not_confuse_seasons():
     assert not ugc_episode('测试动画作品 第二季 第13集', names, 13)
     assert not ugc_episode('测试动画作品 Season 2 第13集', names, 13)
     assert ugc_episode('测试动画作品 第二季 第13集', names, 13, 2)
+
+
+def test_bookworm_short_discovery_keeps_verified_sequel_and_episode_gates(library):
+    db, player, key, _ = library
+    title = '小书痴的下克上 〜为了成为图书管理员而不择手段〜 领主的养女'
+    alias = '小书痴的下克上：为了成为图书管理员不择手段！领主的养女'
+    db.execute('UPDATE shows SET title=?,mapping=? WHERE id=1',
+               (title, json.dumps({'season': 4, 'aliases': [alias]})))
+    candidate = {'animeId': 48642, 'bangumiId': '48642', 'source': 'bahamut',
+                 'animeTitle': '小书痴的下克上  为了成为图书管理员不择手段！领主的养女(2026)【动漫】from bahamut'}
+    old_season = {**candidate, 'animeId': 28805,
+                  'animeTitle': '小书痴的下克上：为了成为图书管理员不择手段！第三季(2022)【动漫】from bahamut'}
+    calls = []
+    def upstream(path, params=None):
+        calls.append((path, params))
+        if path == 'search/anime':
+            assert params['keyword'] == params['keyword'].strip()
+            return {'animes': [copy.deepcopy(candidate), old_season] if params['keyword'] == title[:4] else []}
+        assert path != 'bangumi/28805'
+        if path == 'bangumi/48642':
+            return {'bangumi': {**candidate, 'seasons': [{'id': 'season-48642', 'name': 'Season 1'}],
+                    'episodes': [{'episodeNumber': '13', 'episodeTitle': '【bahamut】 第13集', 'url': '51081'},
+                                 {'episodeNumber': '12', 'episodeTitle': '【bahamut】 第12集', 'url': '51080'}]}}
+        assert params['url'] == 'https://ani.gamer.com.tw/animeVideo.php?sn=51081'
+        return {'comments': [{'p': '20,1,16777215', 'm': 'test'}]}
+    player.danmu = upstream
+    before = db.show(1)
+    result = player.auto_danmu(key)
+    assert result['status'] == 'matched'
+    assert len(result['selected']) == len(result['candidates']) == 1
+    assert result['selected'][0]['source_url'].endswith('sn=51081')
+    assert result['sources'][0]['source_url'].endswith('sn=51081')
+    assert result['candidates'][0]['source_url'].endswith('sn=48642')
+    assert db.show(1) == before
+    assert not db.rows('SELECT * FROM watches') and not db.rows('SELECT * FROM web_progress')
+
+
+def test_source_page_links_use_verified_provider_ids_and_strip_private_query(library):
+    from anime.webplayer import source_page_url
+    _, player, _, _ = library
+    rows = player.describe_candidates({'animes': [
+        {'source': 'bilibili', 'bangumiId': 'bvBV123', 'source_url': 'javascript:alert(1)'},
+        {'source': 'bilibili', 'bangumiId': 'ss33050'},
+        {'source': 'bahamut', 'bangumiId': '48642'},
+        {'source': 'bahamut', 'bangumiId': 'https://evil.test/'},
+    ]})['animes']
+    assert [r['site'] for r in rows] == ['bilibili', 'bilibili', 'bahamut', 'bahamut']
+    assert rows[0]['source_url'] == 'https://www.bilibili.com/video/BV123'
+    assert rows[1]['source_url'] == 'https://www.bilibili.com/bangumi/play/ss33050'
+    assert rows[2]['source_url'] == 'https://ani.gamer.com.tw/animeVideo.php?sn=48642'
+    assert rows[3]['source_url'] is None
+    assert source_page_url('https://www.bilibili.com/video/BV123?p=2&token=private#secret') == 'https://www.bilibili.com/video/BV123?p=2'
+    for url in ['javascript:alert(1)', 'https://www.bilibili.com.evil.test/video/BV123',
+                'https://user:secret@www.bilibili.com/video/BV123', 'https://www.bilibili.com:8443/video/BV123',
+                'https://ani.gamer.com.tw/other?sn=48642']:
+        assert source_page_url(url) is None
+
+
+def test_missing_year_metadata_does_not_break_verified_title():
+    from anime.auto_danmu import title_key
+    assert title_key('测试番剧(N/A)【动漫】from bahamut') == title_key('测试番剧')
+
+
+@pytest.mark.parametrize('variant',['correct','duplicate','missing_label','wrong_season','commentary'])
+def test_season_collection_matches_part_title_not_p_order(library,variant):
+    db,player,key,_=library
+    db.execute('UPDATE shows SET title=?,mapping=? WHERE id=1',('无职转生 第三季 ～到了异世界就拿出真本事～',json.dumps({'season':3,'aliases':['无职转生 3期']})))
+    candidate={'animeId':7,'bangumiId':'bvBV123','animeTitle':'【无职转生 第三季】全14话 超清中字(2026)【B站视频·需核对版本】from bilibili'}
+    label={'correct':'13','duplicate':'13','missing_label':'P13','wrong_season':'无职转生 第二季 第13话','commentary':'13集 reaction'}[variant]
+    eps=[{'episodeNumber':'1','episodeTitle':'【bilibili1】 '+label+' · 32:38','url':'https://www.bilibili.com/video/BV123?p=1'},
+         {'episodeNumber':'13','episodeTitle':'【bilibili1】 12 · 32:38','url':'https://www.bilibili.com/video/BV123?p=13'}]
+    if variant=='duplicate':eps.append({**eps[0],'url':'https://www.bilibili.com/video/BV123?p=3'})
+    calls=[]
+    def upstream(path,params=None):
+        calls.append((path,params))
+        if path=='search/anime':return {'animes':[copy.deepcopy(candidate)]}
+        if path=='bangumi/7':return {'bangumi':{**candidate,'episodes':copy.deepcopy(eps)}}
+        assert params['url']=='https://www.bilibili.com/video/BV123?p=1'
+        return {'comments':[{'p':'20,1,16777215','m':'episode13'}]}
+    player.danmu=upstream;before=db.show(1);result=player.auto_danmu(key)
+    assert result['status']==('matched' if variant=='correct' else 'needs_selection')
+    assert any(p=='comment' for p,_ in calls)==(variant=='correct')
+    assert db.show(1)==before and not db.rows('select * from watches')
+
+
+def test_download_offset_is_not_applied_to_danmu_episode_labels(library):
+    db,player,key,_=library
+    db.execute('UPDATE shows SET mapping=?',(json.dumps({'season':1,'offset':12}),))
+    _,detail,_=upstream_for(player)
+    assert player.auto_danmu(key)['status']=='matched'  # Both local and source say 13.
+    player.auto_cache.clear();detail['bangumi']['episodes'][0]['episodeNumber']='25'
+    assert player.auto_danmu(key)['status']=='needs_selection'  # Never add download offset.
+
+
+def test_empty_source_does_not_crowd_out_later_nonempty_source(library):
+    _,player,key,_=library
+    title=player.db.show(1)['title'];candidates=[{'animeId':i,'animeTitle':title} for i in range(1,7)]
+    def upstream(path,params=None):
+        if path=='search/anime':return {'animes':copy.deepcopy(candidates)}
+        if path.startswith('bangumi/'):
+            i=path.split('/')[1];return {'bangumi':{'animeTitle':title,'episodes':[{'episodeNumber':'13','episodeTitle':'第13集','url':'https://www.bilibili.com/bangumi/play/ep'+i}]}}
+        return {'comments':[{'p':'20,1,16777215','m':'available'}] if params['url'].endswith('ep6') else []}
+    player.danmu=upstream;result=player.auto_danmu(key)
+    assert result['status']=='matched' and len(result['selected'])==5
+    assert result['sources'][0]['source_url'].endswith('ep6') and result['sources'][0]['count']==1

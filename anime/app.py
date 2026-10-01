@@ -22,11 +22,17 @@ def catalog_quarters(today=None):
     return [f'{py}-{pm:02}',f'{y}-{m:02}']
 
 def status_events(db):
-    """Present historical task failures without reporting them as live errors."""
+    """Separate request failures and historical tasks from worker failures."""
     events=db.rows('''SELECT e.*,t.status task_status,t.error task_error FROM events e
         LEFT JOIN tasks t ON e.scope='task:'||t.hash ORDER BY e.id DESC LIMIT 60''')
     for event in events:
         task_status=event.pop('task_status');task_error=event.pop('task_error')
+        if event['level']=='error' and event['scope']=='api':
+            # A failed foreground request does not establish a failed worker.
+            # Retain its original severity and show the warning in event history;
+            # no successful heartbeat is used to erase real service failures.
+            event['original_level']='error';event['request_failure']=True
+            event['level']='warning'
         if event['level']=='error' and task_status is not None and (task_status in ('review','complete','cleaned') or not task_error):
             # Original records remain unchanged. Older cached UI scripts also
             # receive the current severity, while history keeps its original one.
@@ -228,7 +234,7 @@ def create_app(db=None,engine=None,start_worker=True):
             'watches':db.rows('SELECT * FROM watches WHERE show_id=? ORDER BY episode',(sid,)),
             'sources':db.rows('SELECT * FROM sources WHERE show_id=?',(sid,)),
             'candidates':db.rows('SELECT * FROM candidates WHERE show_id=? ORDER BY id DESC LIMIT 100',(sid,)),
-            'gaps':engine.gaps(sid),'board':episode_board(db,engine,s),'airings':db.rows('SELECT * FROM airings WHERE show_id=? ORDER BY episode',(sid,))}
+            'gaps':engine.gaps(sid),'board':episode_board(db,engine,s),'airings':db.local_airings(sid)}
     @app.post('/api/catalog/sync')
     def sync(payload:dict):
         quarters=payload.get('quarters',catalog_quarters())

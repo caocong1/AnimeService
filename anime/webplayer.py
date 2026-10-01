@@ -1,7 +1,7 @@
 """Read-only local media streaming and an isolated danmu-api adapter."""
 import hashlib,json,math,subprocess,time,threading,shutil,secrets,re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 import requests
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
@@ -85,8 +85,20 @@ class WebPlayer:
 
     def danmu(self,path,params=None):
         # This local, separately installed service never receives media bytes or credentials.
-        r=requests.get('http://127.0.0.1:4872/api/v2/'+path,params=params,timeout=(3,90))
-        r.raise_for_status();d=r.json()
+        try:
+            r=requests.get('http://127.0.0.1:4872/api/v2/'+path,params=params,timeout=(3,90))
+        except requests.Timeout:
+            raise HTTPException(504,'弹幕来源请求超时，请稍后重试或选择其他来源') from None
+        except requests.RequestException:
+            raise HTTPException(503,'本机弹幕接口暂时不可达，请稍后重试') from None
+        if r.status_code==404:
+            raise HTTPException(404,'该弹幕来源暂无可用结果或已失效，请重新搜索或选择其他来源')
+        if not r.ok:
+            raise HTTPException(502,f'弹幕来源暂时不可用（HTTP {r.status_code}），请稍后重试或选择其他来源')
+        try:d=r.json()
+        except ValueError:
+            raise HTTPException(502,'弹幕接口返回格式异常，请稍后重试') from None
+        if not isinstance(d,dict):raise HTTPException(502,'弹幕接口返回格式异常，请稍后重试')
         if d.get('success') is False:raise ValueError('弹幕源未返回结果，请核对标题或稍后重试')
         return d
 
@@ -95,6 +107,8 @@ class WebPlayer:
             self.sources={k:v for k,v in self.sources.items() if time.time()-v['created']<86400}
             for ep in d.get('bangumi',{}).get('episodes',[]):
                 ep.pop('source_key',None)
+                ep.pop('source_url',None)
+                ep.pop('site',None)
                 url=str(ep.get('url',''))
                 if re.fullmatch(r'[1-9][0-9]{0,11}',url) and str(ep.get('episodeTitle','')).startswith('【bahamut】'):
                     url='https://ani.gamer.com.tw/animeVideo.php?sn='+url
@@ -110,6 +124,27 @@ class WebPlayer:
                 self.sources[key]={'url':url,'created':time.time()}
                 ep['source_key']=key
                 ep['source_identity']=hashlib.sha256(url.encode()).hexdigest()
+                ep['site']=SITES.get(u.hostname,'')
+                ep['source_url']=source_page_url(url)
+        return d
+
+    def describe_candidates(self,d):
+        for row in d.get('animes',[]):
+            row.pop('source_url',None)
+            site=str(row.get('source','')).lower()
+            if site not in SITES.values():
+                marker=re.search(r'from (bilibili|bahamut|iqiyi|youku|tencent)$',str(row.get('animeTitle','')),re.I)
+                site=marker[1].lower() if marker else ''
+            row['site']=site
+            sid=str(row.get('bangumiId',''))
+            url=''
+            if site=='bilibili':
+                if re.fullmatch(r'bvBV[0-9A-Za-z]+',sid):url='https://www.bilibili.com/video/'+sid[2:]
+                elif re.fullmatch(r'(?:ss|md|ep)[1-9][0-9]*',sid):
+                    url='https://www.bilibili.com/bangumi/'+('media/' if sid.startswith('md') else 'play/')+sid
+            elif site=='bahamut' and re.fullmatch(r'[1-9][0-9]{0,11}',sid):
+                url='https://ani.gamer.com.tw/animeVideo.php?sn='+sid
+            row['source_url']=source_page_url(url)
         return d
 
     def comments(self,ids):
@@ -129,8 +164,8 @@ class WebPlayer:
             site=SITES.get(urlparse(url).hostname,'')
             try:
                 rows=normalize_comments(self.danmu('comment',{'url':url,'format':'json'}))
-                combined+=rows;sources.append({'id':sid,'source_identity':identity,'site':site,'count':len(rows),'comments':rows})
-            except Exception:sources.append({'id':sid,'source_identity':identity,'site':site,'count':0,'comments':[],'error':'来源获取失败或超时，可重试'})
+                combined+=rows;sources.append({'id':sid,'source_identity':identity,'site':site,'source_url':source_page_url(url),'count':len(rows),'comments':rows})
+            except Exception:sources.append({'id':sid,'source_identity':identity,'site':site,'source_url':source_page_url(url),'count':0,'comments':[],'error':'来源获取失败或超时，可重试'})
         seen=set();out=[]
         for x in combined:
             k=(round(x['time'],1),x['text'],x['mode'])
@@ -139,20 +174,22 @@ class WebPlayer:
 
     def auto_danmu(self,key):
         item=self.item(key)
-        show=self.db.one('SELECT title,original,mapping FROM shows WHERE id=?',(item.get('show_id'),))
+        show=self.db.one('SELECT title,original,mapping,metadata FROM shows WHERE id=?',(item.get('show_id'),))
         cache_key=(key,item.get('show_id'),item.get('episode'),item.get('unverified'),json.dumps(show,sort_keys=True))
         with self.auto_lock:
             cached=self.auto_cache.get(cache_key)
             if cached and time.time()-cached[0]<600:return cached[1]
             try:result=match_danmu(self,item)
-            except Exception:return {'status':'error','message':'弹幕自动查找暂时失败，可重试或手动选择来源。','comments':[],'sources':[]}
+            except Exception:return {'status':'error','retryable':True,'message':'弹幕自动查找暂时失败，可重试或手动选择来源。','comments':[],'sources':[]}
             if result['status']=='matched':
                 with self.db.connect() as c:
                     c.executemany('INSERT INTO web_danmu_matches(media_id,source_key,episode_identity) VALUES(?,?,?) '
                                   'ON CONFLICT(media_id,source_key) DO UPDATE SET episode_identity=excluded.episode_identity',
                                   [(key,s['id'],self.episode_identity(item)) for s in result.get('selected',[])])
                 if len(self.auto_cache)>=100:self.auto_cache.clear()
-                self.auto_cache[cache_key]=(time.time(),result)
+                # A partially failed source must be fetched again on a retry.
+                if not any(s.get('error') for s in result.get('sources',[])):
+                    self.auto_cache[cache_key]=(time.time(),result)
             return result
 
     def episode_identity(self,item):
@@ -196,6 +233,26 @@ class WebPlayer:
 
 
 SITES={'www.bilibili.com':'bilibili','ani.gamer.com.tw':'bahamut','www.iqiyi.com':'iqiyi','v.youku.com':'youku','v.qq.com':'tencent'}
+
+
+def source_page_url(url):
+    """Only expose public video pages, without arbitrary queries or credentials."""
+    try:
+        u=urlparse(url)
+        if u.scheme not in ('http','https') or u.hostname not in SITES or u.username or u.password or u.port:return None
+        query=parse_qs(u.query)
+        clean={}
+        if u.hostname=='ani.gamer.com.tw':
+            sn=query.get('sn',[])
+            if u.path!='/animeVideo.php' or len(sn)!=1 or not re.fullmatch(r'[1-9][0-9]{0,11}',sn[0]):return None
+            clean={'sn':sn[0]}
+        elif u.hostname=='www.bilibili.com':
+            if not re.fullmatch(r'/(?:video/BV[0-9A-Za-z]+|bangumi/play/(?:ss|ep)[1-9][0-9]*|bangumi/media/md[1-9][0-9]*)/?',u.path):return None
+            part=query.get('p',[])
+            if len(part)==1 and re.fullmatch(r'[1-9][0-9]{0,4}',part[0]) and u.path.startswith('/video/'):clean={'p':part[0]}
+        elif not re.fullmatch(r'/[0-9A-Za-z_./=-]+\.html',u.path):return None
+        return urlunparse(('https',u.hostname,u.path,'',urlencode(clean),''))
+    except (ValueError,TypeError):return None
 
 
 def normalize_comments(data):
@@ -249,7 +306,7 @@ def register_webplayer(app,db):
     @app.get('/api/web/danmu/search')
     def search(q:str):
         if not 1<=len(q)<=100:raise ValueError('请输入作品名')
-        return player.danmu('search/anime',{'keyword':q})
+        return player.describe_candidates(player.danmu('search/anime',{'keyword':q.strip()}))
     @app.get('/api/web/danmu/show/{sid}')
     def episodes(sid:int):
         return player.bind_episodes(player.danmu('bangumi/'+str(sid)))
