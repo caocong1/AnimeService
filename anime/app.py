@@ -21,6 +21,19 @@ def catalog_quarters(today=None):
     py,pm=(y,m-3) if m>1 else (y-1,10)
     return [f'{py}-{pm:02}',f'{y}-{m:02}']
 
+def status_events(db):
+    """Present historical task failures without reporting them as live errors."""
+    events=db.rows('''SELECT e.*,t.status task_status,t.error task_error FROM events e
+        LEFT JOIN tasks t ON e.scope='task:'||t.hash ORDER BY e.id DESC LIMIT 60''')
+    for event in events:
+        task_status=event.pop('task_status');task_error=event.pop('task_error')
+        if event['level']=='error' and task_status is not None and (task_status in ('review','complete','cleaned') or not task_error):
+            # Original records remain unchanged. Older cached UI scripts also
+            # receive the current severity, while history keeps its original one.
+            event['original_level']='error';event['historical']=True
+            event['level']='warning' if task_status=='review' else 'info'
+    return events
+
 def create_app(db=None,engine=None,start_worker=True):
     db=db or Store();engine=engine or Engine(db);token=secrets.token_urlsafe(32);jobs=threading.Lock()
     deployment=load_deployment()
@@ -76,7 +89,13 @@ def create_app(db=None,engine=None,start_worker=True):
                 return JSONResponse({'error':'跨站请求被拒绝'},status_code=403)
             if not login and not secrets.compare_digest(request.headers.get('x-anime-token',''),token):return JSONResponse({'error':'会话已更新，请刷新页面'},status_code=403)
         response=await call_next(request)
-        if path.startswith('/api/') or path=='/login':response.headers['Cache-Control']='no-store'
+        if path.startswith('/api/') or path in ('/login','/manage'):response.headers['Cache-Control']='no-store'
+        elif (response.headers.get('content-type','').startswith('text/html')
+              or (path.startswith('/static/') and not path.startswith('/static/vendor/') and path.endswith(('.html','.js','.css')))
+              or path in ('/','/manage','/library','/season','/watch') or path.startswith('/show/')):
+            # Revalidate first-party UI on ordinary reloads, including 304s.
+            # HTML entry points must not strand a browser on old script URLs.
+            response.headers['Cache-Control']='no-cache'
         response.headers['X-Content-Type-Options']='nosniff';response.headers['Referrer-Policy']='no-referrer'
         response.headers['Content-Security-Policy']="default-src 'self'; img-src 'self' https: data:; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'"
         if path.startswith('/static/vendor/libass/'):
@@ -103,7 +122,9 @@ def create_app(db=None,engine=None,start_worker=True):
     @app.get('/')
     def index():return FileResponse(ROOT/'static/index.html')
     @app.get('/manage')
-    def manage_page():return FileResponse(ROOT/'static/manage.html')
+    def manage_page(request:Request):
+        if 'v' in request.query_params:return RedirectResponse('/manage',status_code=303)
+        return FileResponse(ROOT/'static/manage.html')
     @app.get('/show/{sid}')
     def show_page(sid:int):return FileResponse(ROOT/'static/show.html')
     @app.get('/season')
@@ -144,7 +165,7 @@ def create_app(db=None,engine=None,start_worker=True):
             'catalogs':{q:db.get('catalog_'+q) for q in catalog_quarters()},
             'sources':db.rows('SELECT sources.*,shows.title FROM sources JOIN shows ON shows.id=sources.show_id'),
             'tasks':db.rows('SELECT * FROM tasks ORDER BY created DESC LIMIT 100'),
-            'events':db.rows('SELECT * FROM events ORDER BY id DESC LIMIT 60'),'player':db.get('player_health'),'dandan_history':db.get('dandan_history_health'),
+            'events':status_events(db),'player':db.get('player_health'),'dandan_history':db.get('dandan_history_health'),
             'authorized_count':db.one('SELECT count(*) n FROM shows WHERE authorized=1')['n'],
             'watch_counts':db.rows('''SELECT id,watched,(SELECT count(*) FROM episodes e WHERE e.show_id=shows.id
                 AND e.status='complete' AND NOT EXISTS (SELECT 1 FROM watches w WHERE w.show_id=e.show_id

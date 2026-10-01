@@ -10,6 +10,7 @@ const TASKS = {
   intent: '待提交', uncertain: '等待确认', downloading: '下载中', complete: '已完成', held: '已停止',
   review: '待核查', pending: '等待迅雷', legacy_unverified: '旧文件待核验', file_missing: '文件缺失',
   error: '错误', cleaned: '已清理',
+  linked: '已有文件（只读）',
 };
 
 const App = { token: '', local: true, settings: {}, quarters: [], ready: null };
@@ -129,6 +130,21 @@ function shell(active) {
     toast(r.blocker ? '已请求检查 · 下载受阻：' + r.blocker : '已请求检查新集');
   }));
   boot().then(() => { health(); setInterval(health, 60000); }).catch(e => toast(e.message));
+  addEventListener('pageshow', e => { if (e.persisted) health(); });
+}
+
+function statusProblems(s, now = Date.now() / 1000) {
+  const tasks = new Map((s.tasks || []).map(t => [t.hash, t]));
+  const error = (s.events || []).find(e => {
+    if (e.level !== 'error' || now - e.time >= 3600) return false;
+    if (!e.scope?.startsWith('task:')) return true;
+    const task = tasks.get(e.scope.slice(5));
+    // Keep historical events visible, but use the task's current result for
+    // health: review is actionable, completed/cleaned errors are historical.
+    return !task || (!['review', 'complete', 'cleaned'].includes(task.status) && Boolean(task.error));
+  });
+  const reviews = (s.tasks || []).filter(t => t.status === 'review');
+  return { error, reviews };
 }
 
 async function health() {
@@ -138,9 +154,9 @@ async function health() {
     const s = await api('/status');
     const alive = s.heartbeat && Date.now() / 1000 - s.heartbeat.time < 240;
     const blocked = s.downloader?.blocker;
-    const err = s.events.some(e => e.level === 'error' && Date.now() / 1000 - e.time < 3600);
-    el.dataset.state = !alive ? 'down' : blocked || err ? 'warn' : 'ok';
-    el.lastElementChild.textContent = !alive ? '后台未响应' : blocked ? '下载受阻' : err ? '有错误' : '后台正常';
+    const { error, reviews } = statusProblems(s);
+    el.dataset.state = !alive ? 'down' : blocked || error || reviews.length ? 'warn' : 'ok';
+    el.lastElementChild.textContent = !alive ? '后台未响应' : blocked ? '下载受阻' : error ? '有错误' : reviews.length ? '有待核查' : '后台正常';
     el.title = alive ? '心跳 ' + ago(s.heartbeat.time) : '';
     dispatchEvent(new CustomEvent('fanyu:status', { detail: s }));
   } catch {

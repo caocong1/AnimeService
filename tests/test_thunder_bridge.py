@@ -1,15 +1,16 @@
 import json,time
 from pathlib import Path
 import pytest
-from test_reliability import setup
+from test_reliability import setup,torrent
 from anime.thunder_bridge import ThunderBridge
+from anime.thunder import ThunderReviewRequired
 
 class FakeThunder:
     def __init__(self):self.data={}
     def by_hash(self,h):return [self.data[h]] if h in self.data else []
     def verify(self,id,h,path,files,ids):
         t=self.data[h]
-        if t['TaskId']!=id or t['SavePath']!=path:raise ValueError('path/id mismatch')
+        if t['TaskId']!=id or t['SavePath']!=path:raise ThunderReviewRequired('迅雷未采用项目指定目录')
         return t
 
 def ready(setup):
@@ -52,6 +53,89 @@ def test_foreign_hash_never_adopted(setup):
     db,q,e,r,t=ready(setup);accept(r,t)
     with pytest.raises(ValueError):e.thunder.inspect(t)
     assert not db.one('SELECT acknowledged FROM tasks')['acknowledged']
+
+
+def test_foreign_task_quarantined_once_without_network_error_or_adoption(setup):
+    db,q,e,r,t=ready(setup);accept(r,t)
+    before=db.show(42)
+    e.reconcile();e.reconcile()
+    current=db.one('SELECT * FROM tasks')
+    assert current['status']=='review' and '提交凭据' in current['error']
+    assert '请求失败' not in current['error']
+    assert not current['acknowledged'] and current['external_id'] is None
+    queue=db.one('SELECT * FROM thunder_queue')
+    assert queue['state']=='review' and not queue['lease'] and not queue['committing']
+    events=db.rows("SELECT * FROM events WHERE scope=?",('task:'+t['hash'],))
+    assert len(events)==1 and events[0]['level']=='warning'
+    assert db.one('SELECT status FROM episodes')['status']=='pending'
+    assert not db.rows('SELECT * FROM watches') and db.show(42)==before
+    e.thunder=ThunderBridge(e,r)
+    assert e.thunder.claim() is None and q.adds==0 and not q.starts
+
+
+def test_claim_skips_foreign_conflict_and_leases_next_valid_task(setup):
+    db,q,e,r,t=ready(setup);accept(r,t)
+    e.sources.data=torrent((2,));e.ingest(setup[3]('[Group] Example S01E02 [1080p][CHS]',source=2))
+    second=db.one('SELECT * FROM tasks WHERE hash<>?',(t['hash'],))
+    job=e.thunder.claim()
+    assert job['hash']==second['hash'] and job['action']=='submit'
+    assert db.one('SELECT state FROM thunder_queue WHERE hash=?',(t['hash'],))['state']=='review'
+    assert db.one('SELECT external_id FROM tasks WHERE hash=?',(t['hash'],))['external_id'] is None
+    assert e.thunder.claim() is None and q.adds==0 and not q.starts
+
+
+def test_owned_task_directory_conflict_preserves_uncertain_commit(setup):
+    db,q,e,r,t=ready(setup);job=e.thunder.claim();e.thunder.preflight(t['hash'],job['lease'])
+    accept(r,t);r.data[t['hash']]['SavePath']='some-other-directory'
+    e.reconcile()
+    current=db.one('SELECT * FROM tasks');queue=db.one('SELECT * FROM thunder_queue')
+    assert current['status']=='review' and '指定目录' in current['error']
+    assert current['external_id'] is None and not current['acknowledged']
+    assert queue['committing']==1 and queue['state']=='review' and not queue['lease']
+    assert e.thunder.claim() is None and q.adds==0
+
+
+def test_temporary_thunder_read_failure_remains_retryable(setup,monkeypatch):
+    db,q,e,r,t=ready(setup)
+    def unavailable(h):raise OSError('untrusted exception text')
+    monkeypatch.setattr(r,'by_hash',unavailable)
+    e.reconcile()
+    current=db.one('SELECT * FROM tasks')
+    assert current['status']=='intent' and 'OSError' in current['error']
+    assert 'untrusted' not in current['error']
+    assert db.one('SELECT state FROM thunder_queue')['state']=='pending'
+
+
+def test_explicit_readonly_link_resolves_review_without_owning_or_cleaning_file(setup,tmp_path):
+    from anime.cleanup import Cleanup
+    from anime.webplayer import WebPlayer
+    db,q,e,r,t=ready(setup);accept(r,t,8)
+    outside=tmp_path/'outside-project';outside.mkdir()
+    r.data[t['hash']]['SavePath']=str(outside)
+    f=json.loads(t['selection'])['files'][0];p=outside/f['name'];p.parent.mkdir(parents=True);p.write_bytes(b'x'*f['size'])
+    e.reconcile();before=db.show(42)
+    result=e.thunder.link_reviewed_completed_file(t['hash'],81)
+    assert result['mode']=='read_only' and Path(result['path'])==p.resolve()
+    episode=db.one('SELECT * FROM episodes');task=db.one('SELECT * FROM tasks')
+    assert episode['status']=='complete' and episode['hash'] is None and episode['first_completed'] is None
+    assert task['status']=='linked' and not task['external_id'] and not task['acknowledged']
+    assert db.one('SELECT state FROM thunder_queue')['state']=='done'
+    assert db.show(42)==before and not db.rows('SELECT * FROM watches')
+    WebPlayer(db);e.reconcile();e.dispatch(task)
+    assert e.thunder.claim() is None and q.adds==0 and not q.starts
+    e.state(42,'dropped');assert db.one('SELECT status FROM tasks')['status']=='linked'
+    assert Cleanup(db,e).preview(42) is None and p.read_bytes()==b'x'*f['size']
+
+
+def test_readonly_link_requires_explicit_complete_unambiguous_review(setup,tmp_path):
+    db,q,e,r,t=ready(setup);accept(r,t)
+    e.reconcile()
+    with pytest.raises(ValueError,match='完成'):e.thunder.link_reviewed_completed_file(t['hash'],81)
+    db.execute('UPDATE thunder_queue SET committing=1')
+    with pytest.raises(ValueError,match='不确定提交'):e.thunder.link_reviewed_completed_file(t['hash'],81)
+    db.execute('UPDATE thunder_queue SET committing=0');db.execute('UPDATE shows SET cleanup_hold=1 WHERE id=42')
+    with pytest.raises(ValueError,match='已清理'):e.thunder.link_reviewed_completed_file(t['hash'],81)
+    assert db.one('SELECT hash FROM episodes')['hash']==t['hash'] and not db.rows('SELECT * FROM watches')
 
 def test_cleanup_removes_both_owned_links_after_confirmation(setup):
     from anime.cleanup import Cleanup

@@ -18,6 +18,38 @@ def app_at(tmp_path):
     return app,db
 
 
+def test_ui_revalidates_on_normal_and_conditional_reload(tmp_path):
+    app,db=app_at(tmp_path)
+    client=TestClient(app,base_url='http://localhost:4871')
+    for path in ('/manage','/','/watch','/static/core.js?v=2','/static/manage.js?v=2','/static/app.css'):
+        response=client.get(path)
+        cache='no-store' if path=='/manage' else 'no-cache'
+        assert response.status_code==200 and response.headers['cache-control']==cache
+        conditional=client.get(path,headers={'If-None-Match':response.headers['etag']})
+        assert conditional.status_code==(304 if path.startswith('/static/') else 200)
+        assert conditional.headers['cache-control']==cache
+    html=client.get('/manage').text
+    assert '/static/core.js?v=2' in html and '/static/manage.js?v=2' in html
+    assert client.get('/api/bootstrap').headers['cache-control']=='no-store'
+
+
+def test_manage_has_one_canonical_entry_and_keeps_error_history(tmp_path):
+    app,db=app_at(tmp_path)
+    client=TestClient(app,base_url='http://localhost:4871')
+    old=client.get('/manage?v=2',follow_redirects=False)
+    assert old.status_code==303 and old.headers['location']=='/manage'
+    assert old.headers['cache-control']=='no-store'
+    db.execute("INSERT INTO tasks(hash,show_id,status,error) VALUES('abc',42,'review','ownership conflict')")
+    db.event('task:abc','old failure','error');db.event('service','live failure','error')
+    events=client.get('/api/status').json()['events']
+    past=next(e for e in events if e['scope']=='task:abc')
+    assert past['level']=='warning' and past['original_level']=='error' and past['historical']
+    assert next(e for e in events if e['scope']=='service')['level']=='error'
+    assert db.one("SELECT level FROM events WHERE scope='task:abc'")['level']=='error'
+    db.execute("UPDATE tasks SET status='downloading',error='still failing' WHERE hash='abc'")
+    assert next(e for e in client.get('/api/status').json()['events'] if e['scope']=='task:abc')['level']=='error'
+
+
 @pytest.mark.parametrize('base,origin', [
     ('http://127.0.0.1:4871','http://127.0.0.1:4871'),
     ('http://localhost:4871','http://localhost:4871'),

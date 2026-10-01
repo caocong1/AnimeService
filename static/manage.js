@@ -12,21 +12,22 @@
 
   /* ---------- 状态 ---------- */
 
-  async function renderStatus() {
-    const s = status = await api('/status');
+  async function renderStatus(latest) {
+    const s = status = latest || await api('/status');
     s.events.sort((a, b) => b.time - a.time);
     const alive = s.heartbeat && Date.now() / 1000 - s.heartbeat.time < 240;
-    const recentErr = s.events.find(e => e.level === 'error' && Date.now() / 1000 - e.time < 3600);
+    const { error: recentErr, reviews } = statusProblems(s);
     const dh = s.dandan_history || {};
     const tile = (k, v, sub, state = 'ok') => `<div class="tile" data-state="${state}"><span class="k">${k}</span><span class="v"><i></i>${v}</span>${sub ? `<span class="s${state === 'down' ? ' error-line' : ''}">${sub}</span>` : ''}</div>`;
     const errSources = s.sources.filter(x => x.error || x.archive_error);
     const sources = [...errSources, ...s.sources.filter(x => !(x.error || x.archive_error))];
-    const openTasks = s.tasks.filter(t => t.status !== 'complete' && t.status !== 'cleaned');
-    const tasks = [...openTasks, ...s.tasks.filter(t => t.status === 'complete' || t.status === 'cleaned')];
+    const closed = t => ['complete', 'cleaned', 'linked'].includes(t.status);
+    const openTasks = s.tasks.filter(t => !closed(t));
+    const tasks = [...openTasks, ...s.tasks.filter(closed)];
     $('#sec-status').innerHTML = `
       <h2 class="sr">状态</h2>
       <div class="tiles">
-        ${tile('后台', !alive ? '未响应' : recentErr ? '有错误' : '运行中', recentErr ? `${ago(recentErr.time)} · ${esc(recentErr.message)}` : s.heartbeat ? '心跳 ' + ago(s.heartbeat.time) : '没有心跳', !alive ? 'down' : recentErr ? 'warn' : 'ok')}
+        ${tile('后台', !alive ? '未响应' : recentErr ? '有错误' : '运行中', recentErr ? `${ago(recentErr.time)} · ${esc(recentErr.message)}` : reviews.length ? `${reviews.length} 项下载待核查 · ${esc(reviews[0].error)}` : s.heartbeat ? '心跳 ' + ago(s.heartbeat.time) : '没有心跳', !alive ? 'down' : recentErr || reviews.length ? 'warn' : 'ok')}
         ${tile('下载器', esc(s.downloader?.label || '—'), s.downloader?.blocker ? esc(s.downloader.blocker) : `已开启自动下载 ${s.authorized_count} 部`, s.downloader?.blocker ? 'warn' : 'ok')}
         ${tile('观看同步', dh.ok ? '正常' : dh.error ? '失败' : '未同步', dh.ok ? `${ago(dh.success)} · 已同步 ${dh.synced_watched || 0} 集` : esc(dh.error || ''), dh.ok ? 'ok' : dh.error ? 'down' : 'warn')}
         ${tile('检查新集', `每 ${Math.round(s.schedule.poll_seconds / 60)} 分钟`, s.schedule.requested > s.schedule.completed ? '排队中' : '上次 ' + ago(s.schedule.finished), 'ok')}
@@ -40,7 +41,7 @@
       <h3 class="m-sub">下载任务 <span class="muted num">${openTasks.length} 进行中</span></h3>
       ${s.tasks.length ? table('', ['资源', '状态', '更新'], more('task', tasks, 10).map(t => `<tr${t.status === 'error' ? ' class="is-error"' : ''}><td style="overflow-wrap:anywhere">${esc(t.title)}${t.error ? `<div class="error-line">${esc(t.error)}</div>` : ''}</td><td class="nowrap">${TASKS[t.status] || esc(t.status)}</td><td class="nowrap">${ago(t.updated)}</td></tr>`)) + moreBtn('task', tasks, 10) : '<p class="muted">没有下载任务</p>'}
       <h3 class="m-sub">事件</h3>
-      ${table('', ['时间', '范围', '记录'], more('ev', s.events, 12).map(e => `<tr${e.level === 'error' ? ' class="is-error"' : ''}><td class="nowrap">${ago(e.time)}</td><td class="nowrap">${esc(e.scope)}</td><td>${esc(e.message)}</td></tr>`))}${moreBtn('ev', s.events, 12)}
+      ${table('', ['时间', '范围', '记录'], more('ev', s.events, 12).map(e => `<tr${e.level === 'error' ? ' class="is-error"' : ''}><td class="nowrap">${ago(e.time)}</td><td class="nowrap">${esc(e.scope)}</td><td>${e.historical ? '<span class="muted">历史错误 · </span>' : ''}${esc(e.message)}</td></tr>`))}${moreBtn('ev', s.events, 12)}
       <h3 class="m-sub">季度目录</h3>
       <div class="list-rows">${Object.entries(s.catalogs).map(([q, v]) => `<div class="list-row"><span><span class="t">${quarterName(q)}</span><div class="d">${v ? `${v.count} 部 · ${ago(v.success)}` : '未同步'}${v?.error ? ` · <span class="error-line">${esc(v.error)}</span>` : ''}</div></span><button class="btn small" type="button" data-sync="${q}">刷新</button></div>`).join('')}</div>`;
   }
@@ -202,6 +203,12 @@
     });
   });
   addEventListener('hashchange', () => show(current()));
+  $('#health').addEventListener('click', () => {
+    if (current() === 'status') renderStatus();
+  });
+  addEventListener('fanyu:status', e => {
+    if (current() === 'status' && loaded.status) renderStatus(e.detail);
+  });
   addEventListener('fanyu:theme', () => { if (current() === 'settings') renderSettings(); });
   boot().then(() => show(current())).catch(e => toast(e.message));
 })();

@@ -60,7 +60,7 @@ class Engine:
             self.db.event('show:'+str(sid),'用户将状态设置为 '+state)
             # State is durable BEFORE stop request. Reconciliation retries even if qB is offline.
             if not self.db.eligible(sid):
-                for t in self.db.rows("SELECT * FROM tasks WHERE show_id=? AND status<>'cleaned'",(sid,)):
+                for t in self.db.rows("SELECT * FROM tasks WHERE show_id=? AND status NOT IN ('cleaned','linked')",(sid,)):
                     try:self.hold(t)
                     except Exception as e:self.db.event('task:'+t['hash'],safe_error(e),'error')
             self.wake.set()
@@ -143,6 +143,7 @@ class Engine:
             self.db.execute("UPDATE candidates SET status='retry',reason=? WHERE id=?",(safe_error(e),candidate['id']))
             self.db.event('candidate:'+str(candidate['id']),safe_error(e),'error')
     def dispatch(self,t):
+        if t['status']=='linked':return
         h=t['hash'];sid=t['show_id'];selection=json.loads(t['selection'])
         with self.db.gate:
             if not self.db.eligible(sid):self.hold(t);return
@@ -188,7 +189,7 @@ class Engine:
                 for ep,f in desired.items():c.execute('UPDATE episodes SET file_index=?,status=? WHERE show_id=? AND episode=?',(indices[f['name']],'downloading',sid,ep))
             self.db.event('task:'+h,'已核验文件选择并确认启动：'+','.join(map(str,desired)))
     def reconcile(self):
-        tasks=self.db.rows("SELECT * FROM tasks WHERE status<>'cleaned' ORDER BY created")
+        tasks=self.db.rows("SELECT * FROM tasks WHERE status NOT IN ('cleaned','linked') ORDER BY created")
         all_tasks=self.qb.info() if any(t.get('provider')!='thunder' for t in tasks) or self.db.get('downloader_preference','qbit')=='qbit' else []
         self.db.set('qbit_health',{'ok':True,'time':time.time(),'tasks':len(all_tasks),'standby':self.db.get('downloader_preference')=='thunder_first'})
         byhash={t['hash']:t for t in all_tasks}
