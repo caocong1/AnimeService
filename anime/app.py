@@ -441,6 +441,8 @@ def create_app(db=None,engine=None,start_worker=True):
     register_transition(app,db,engine)
     from .dandan_history import register_history
     register_history(app,db)
+    from .tv import register_tv
+    register_tv(app,db)
     return app
 
 app=create_app(start_worker=os.environ.get('ANIMESERVICE_START_WORKER','1')!='0')

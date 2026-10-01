@@ -68,3 +68,11 @@
 远端音轨每任务最多读取 8 MiB，通过仅监听回环、单来源的 Range 代理按实际读取量计数，同一任务内存复用已读片段；FFmpeg 的并行探测/跳转由最新读取请求接管。PCM 上限 80 MiB，本地时长限 4–60 分钟，三处匹配必须间隔足够且偏移差不超过 0.5 秒；后台期限约 120 秒。结果缓存 24 小时，本地指纹按路径/大小/修改时间/音轨/算法复用。
 
 当前阈值经过控制实验和少量真实来源验证，尚未覆盖大量版本/配音/剪辑；失败时不猜偏移，中间剪辑和变速不支持统一自动对齐。测试全部使用临时媒体、假提取器和下载响应；`node --test tests/*.test.cjs` 检查人工优先与异步结果失效。
+
+## 电视盒子客户端
+
+`tv/` 是安卓盒子用的 APK（Kotlin、Compose、Media3），只做追番列表、作品分集和带自动弹幕的播放，接口与网页播放器相同。盒子不在家里时走现有的外网 HTTPS 地址（`public_authorities`），首次连接输入网页后台生成的配对码；盒子配对时声明 `device: tv`，会话有效期 365 天（其他设备仍为 30 天），「退出所有外部设备」同样立即作废。证书须由公共机构签发，App 内置 Let's Encrypt 根证书以兼容 Android 7.0 及更早的盒子。同一局域网内也可用 HTTP：设置 `bind_host`、`lan_authority`（盒子里填的 `IP:4871`）和 `lan_network`。
+
+构建需要 JDK 17+ 和 Android SDK：`cd tv && ./gradlew publishRelease`，输出 `tv/app/build/publish/{fanyu-tv.apk,release.json}`。签名密钥 `tv/fanyu-tv-release.jks` 与 `tv/keystore.properties` 不进 Git，须另行备份；换了密钥，已装的盒子无法覆盖升级。
+
+升级：每次发布先改 `tv/app/build.gradle.kts` 的 `appVersionCode`（递增）和 `appVersionName`，更新 `tv/release-notes.txt`，执行 `publishRelease`，再把两个输出文件复制到服务端 `data/tv/`。盒子启动时检查 `/api/tv/release`，有新版本就提示下载，校验 SHA-256 后交给系统安装；第一次升级需要在系统设置里允许番屿安装应用。

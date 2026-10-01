@@ -184,3 +184,19 @@ def test_lan_rejects_untrusted_peers_and_hosts(tmp_path,peer,base):
     app,db=app_at(tmp_path)
     client=TestClient(app,base_url=base,client=(peer,50000))
     assert client.get('/login',headers={'X-Forwarded-For':'127.0.0.1','X-Forwarded-Proto':'https'}).status_code==403
+
+
+@pytest.mark.parametrize('device,days',[(None,30),('tv',365),('phone',30)])
+def test_tv_box_pairs_for_a_year_and_others_for_thirty_days(tmp_path,device,days):
+    app,db=app_at(tmp_path)
+    local=TestClient(app,base_url='http://127.0.0.1:4871')
+    remote=TestClient(app,base_url='https://anime.example.test')
+    token=local.get('/api/bootstrap').json()['token']
+    code=local.post('/api/access/pair',headers={'X-Anime-Token':token},json={}).json()['code']
+    payload={'code':code,**({'device':device} if device else {})}
+    res=remote.post('/api/access/login',headers={'Origin':'https://anime.example.test'},json=payload)
+    assert res.status_code==200 and f'max-age={days*86400}' in res.headers['set-cookie'].lower()
+    left=db.one('SELECT expires FROM remote_sessions')['expires']-time.time()
+    assert days*86400-60<left<=days*86400
+    assert local.post('/api/access/revoke',headers={'X-Anime-Token':token},json={}).status_code==200
+    assert remote.get('/api/bootstrap').status_code==401

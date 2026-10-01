@@ -22,6 +22,7 @@
 !/integrations/
 !/scripts/
 !/docs/
+!/tv/
 !/.github/
 /scripts/*
 !/scripts/setup_web.py

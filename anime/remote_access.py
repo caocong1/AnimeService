@@ -5,6 +5,8 @@ from fastapi.responses import JSONResponse,FileResponse
 from .db import ROOT
 
 COOKIE='anime_device'
+# A TV box sits in someone else's living room; re-pairing it monthly is impractical.
+SESSION_DAYS={'tv':365}
 class RemoteAccess:
     def __init__(self,db):
         self.db=db;self.lock=threading.Lock();self.code=None;self.expires=0;self.attempts=[]
@@ -18,7 +20,7 @@ class RemoteAccess:
         with self.lock:
             code=secrets.token_hex(6).upper();self.code=self.digest(code);self.expires=time.time()+600
         return {'code':code,'expires':self.expires}
-    def exchange(self,value):
+    def exchange(self,value,days=30):
         now=time.time()
         with self.lock:
             self.attempts=[t for t in self.attempts if now-t<600]
@@ -30,7 +32,7 @@ class RemoteAccess:
             self.code=None;self.expires=0
         session=secrets.token_urlsafe(48)
         self.db.execute('DELETE FROM remote_sessions WHERE expires<?',(now,))
-        self.db.execute('INSERT INTO remote_sessions VALUES(?,?,?)',(self.digest(session),now+30*86400,now))
+        self.db.execute('INSERT INTO remote_sessions VALUES(?,?,?)',(self.digest(session),now+days*86400,now))
         return session
 
 def register_access(app,access):
@@ -42,9 +44,10 @@ def register_access(app,access):
         return access.issue_pair()
     @app.post('/api/access/login')
     def login(payload:dict,request:Request):
-        session=access.exchange(payload.get('code',''))
+        days=SESSION_DAYS.get(payload.get('device'),30)
+        session=access.exchange(payload.get('code',''),days)
         response=JSONResponse({'ok':True})
-        response.set_cookie(COOKIE,session,max_age=30*86400,secure=not request.state.lan,httponly=True,samesite='strict')
+        response.set_cookie(COOKIE,session,max_age=days*86400,secure=not request.state.lan,httponly=True,samesite='strict')
         return response
     @app.post('/api/access/logout')
     def logout(request:Request):
