@@ -9,7 +9,7 @@
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="stylesheet" href="/static/tokens.css">
 <link rel="stylesheet" href="/static/app.css">
-<link rel="stylesheet" href="/static/watch-controls.css?v=8">
+<link rel="stylesheet" href="/static/watch-controls.css?v=9">
 <script src="/static/theme.js"></script>
 </head>
 <body class="watch">
@@ -69,7 +69,9 @@
   <header class="dm-dialog-head"><button class="icon-btn" id="danmu-back" type="button" aria-label="返回搜索结果" hidden></button><h2 id="danmu-dialog-title">添加弹幕来源</h2><button class="icon-btn" id="close-danmu-search" type="button" aria-label="关闭"></button></header>
   <div class="dm-view" id="danmu-search-view">
     <div class="dm-tools">
-      <form id="danmu-search" class="dm-search"><label class="sr" for="danmu-q">作品名或视频链接</label><input id="danmu-q" type="search" name="query" required maxlength="100" placeholder="作品名、集数或视频链接"><button class="btn" type="submit">搜索</button></form>
+      <form id="danmu-search" class="dm-search"><label class="sr" for="danmu-q">作品名或视频标题</label><input id="danmu-q" type="search" name="query" required maxlength="2000" placeholder="作品名、视频标题或集数"><button class="btn" type="submit">搜索</button></form>
+      <form id="danmu-direct" class="dm-search"><label class="sr" for="danmu-url">B站视频网址或 BV号</label><input id="danmu-url" type="text" required maxlength="2000" placeholder="B站视频网址或 BV号" aria-describedby="danmu-direct-hint"><button class="btn" type="submit">直达查询</button></form>
+      <p class="dm-direct-hint" id="danmu-direct-hint">标题搜不到时，粘贴网址或 BV号直接查分P；确认版本后添加。</p>
       <div class="seg dm-sites" id="danmu-site" role="group" aria-label="来源类型"><button type="button" data-site="" aria-pressed="true">全部</button><button type="button" data-site="bilibili" aria-pressed="false">B站</button><button type="button" data-site="bahamut" aria-pressed="false">巴哈</button><button type="button" data-site="iqiyi" aria-pressed="false">爱奇艺</button><button type="button" data-site="youku" aria-pressed="false">优酷</button><button type="button" data-site="tencent" aria-pressed="false">腾讯</button></div>
     </div>
     <p class="dm-dialog-hint" id="danmu-results-note" aria-live="polite">本集推荐</p>
@@ -85,8 +87,8 @@
 <script src="/static/subtitle-renderer.js?v=2"></script>
 <script src="/static/danmu-timing.js?v=6"></script>
 <script src="/static/bili-uid.js?v=1"></script>
-<script src="/static/danmu-alignment.js?v=2"></script>
+<script src="/static/danmu-alignment.js?v=3"></script>
 <script src="/static/danmu-retry.js?v=1"></script>
-<script src="/static/watch.js?v=17"></script>
+<script src="/static/watch.js?v=19"></script>
 </body>
 </html>

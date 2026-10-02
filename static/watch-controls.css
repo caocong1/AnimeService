@@ -81,6 +81,7 @@
 .dm-tools { display:grid; gap:var(--s-3); padding:var(--s-4) var(--s-5) var(--s-3); }
 .dm-search { display:flex; gap:var(--s-2); }
 .dm-search input { min-width:0; flex:1; }
+.dm-direct-hint { margin:0; font-size:var(--text-xs); color:var(--muted); }
 .dm-sites { width:fit-content; max-width:100%; flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; }
 .dm-sites button { flex-shrink:0; }
 .dm-sites button { min-height:32px; font-size:var(--text-s); display:inline-flex; align-items:center; gap:6px; }

@@ -153,6 +153,7 @@ def test_range_proxy_hard_budget_and_no_seek_fallback(monkeypatch):
                 assert requests.get(url,headers={'Range':'bytes=0-65535'},timeout=3).content==first.content
                 assert requests.get(url,headers={'Range':'bytes=65536-'},timeout=3).status_code==502
                 assert proxy.downloaded==65536;assert proxy.session.request.call_count==1
+                assert proxy.error_reason=='budget'
             else:
                 assert first.status_code==502;assert proxy.downloaded==0;assert proxy.failed
             assert 'SECRET' not in first.text
@@ -186,3 +187,60 @@ def test_parallel_seek_does_not_wait_for_abandoned_probe_connection(monkeypatch)
             assert time.monotonic()-began<2
             assert proxy.downloaded<a.MAX_BYTES
         finally:probe.close()
+
+
+@pytest.mark.parametrize('reason,retryable', [('source_info',True),('source_audio',True),('timeout',True),
+    ('busy',True),('tool',False),('budget',False),('no_source_audio',False),('media_changed',False)])
+def test_failure_reasons_are_safe_and_only_transient_failures_retry(tmp_path,monkeypatch,reason,retryable):
+    s,item=service(tmp_path,monkeypatch)
+    def align(job):raise a.Unavailable(reason)
+    monkeypatch.setattr(s,'_align',align)
+    result=s.start(item,URL,'stable');public=finished(s,result['job_id'])
+    assert public['reason']==reason and public['retryable'] is retryable
+    assert item['path'] not in json.dumps(public)
+    assert not a.failure('https://invalid.test/?token=SECRET')['retryable']
+    assert 'SECRET' not in json.dumps(a.failure('https://invalid.test/?token=SECRET'))
+
+
+def test_transient_failed_job_force_retries_instead_of_returning_failure_cache(tmp_path,monkeypatch):
+    s,item=service(tmp_path,monkeypatch);calls=[]
+    def align(job):
+        calls.append(job['job_id'])
+        if len(calls)==1:raise a.Unavailable('source_info')
+        return {'status':'matched','offset':.06}
+    monkeypatch.setattr(s,'_align',align)
+    first=s.start(item,URL,'stable');assert finished(s,first['job_id'])['retryable']
+    assert s.start(item,URL,'stable')['job_id']==first['job_id']
+    second=s.start(item,URL,'stable',force=True)
+    assert second['job_id']!=first['job_id']
+    assert finished(s,second['job_id'])['status']=='matched'
+
+
+def test_missing_dependency_tool_and_changed_media_are_distinct(tmp_path,monkeypatch):
+    s,item=service(tmp_path,monkeypatch)
+    s.fpcalc=str(tmp_path/'missing.exe')
+    assert s.start(item,URL,'stable')['reason']=='tool'
+    s.fpcalc=sys.executable
+    assert s.start({**item,'size':1},URL,'stable')['reason']=='media_changed'
+    monkeypatch.setitem(sys.modules,'yt_dlp',None)
+    assert s.start(item,URL,'stable')['reason']=='dependency'
+
+
+@pytest.mark.parametrize('formats,duration,reason', [([],500,'no_source_audio'),
+    ([{'vcodec':'none','acodec':'aac','url':'https://upos.bilivideo.com/audio'}],11,'short_source')])
+def test_unreadable_or_short_source_never_retries(tmp_path,monkeypatch,formats,duration,reason):
+    s,item=service(tmp_path,monkeypatch);monkeypatch.setattr(s,'_work',lambda:None)
+    job=s.jobs[s.start(item,URL,'stable')['job_id']];job['deadline']=time.monotonic()+2
+    fake=Mock();fake.extract_info.return_value={'formats':formats,'duration':duration}
+    import yt_dlp
+    monkeypatch.setattr(yt_dlp,'YoutubeDL',lambda _:nullcontext(fake))
+    monkeypatch.setattr(a,'validate_cdn',lambda _:None)
+    with pytest.raises(a.Unavailable) as error:s._source_audio(job)
+    assert error.value.reason==reason and not a.failure(reason)['retryable']
+
+
+def test_local_probe_missing_audio_reports_local_error(tmp_path,monkeypatch):
+    s,item=service(tmp_path,monkeypatch)
+    monkeypatch.setattr(s,'_run',lambda *_args,**_kwargs:json.dumps({'format':{'duration':'1420'},'streams':[]}).encode())
+    with pytest.raises(a.Unavailable) as error:s._probe({'item':item})
+    assert error.value.reason=='local_audio'

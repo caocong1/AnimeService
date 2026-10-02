@@ -11,10 +11,9 @@ def patch():
     path = base / 'sources/bilibili.js'
     source = path.read_text(encoding='utf-8')
     source = source.replace('imageUrl: item.cover || null,', 'imageUrl: item.cover || item.pic || "",')
-    marker = "import { UGC_TYPE, ugcLinks } from '../utils/animeservice-bilibili-ugc.js';"
-    if marker in source:
-        path.write_text(source, encoding='utf-8')
-        return
+    old_marker = "import { UGC_TYPE, ugcLinks } from '../utils/animeservice-bilibili-ugc.js';"
+    marker = "import { UGC_TYPE, ugcLinks, searchUgc } from '../utils/animeservice-bilibili-ugc.js';"
+    already_ugc = old_marker in source or marker in source
     replacements = [
         ('if (data.code !== 0) {\n        log("error", "[bilibili] 获取 WBI 密钥失败:',
          'if (!data.data?.wbi_img?.img_url || !data.data?.wbi_img?.sub_url) {\n        log("error", "[bilibili] 获取 WBI 密钥失败:'),
@@ -30,11 +29,28 @@ def patch():
         ('if (anime._eps && anime._eps.length > 0 && !isIncomplete) {',
          'if (anime.mediaId.startsWith("bv")) {\n             links = ugcLinks(await this.getEpisodes(anime.mediaId));\n          } else if (anime._eps && anime._eps.length > 0 && !isIncomplete) {'),
     ]
-    for old, new in replacements:
+    if not already_ugc:
+        for old, new in replacements:
+            if source.count(old) != 1:
+                raise RuntimeError('Pinned Bilibili adapter changed; review patch before applying')
+            source = source.replace(old, new, 1)
+        source = marker + '\n' + source
+    source = source.replace(old_marker, marker)
+    improvements = [
+        ('const ugc = this._searchByType(keyword, "video", mixinKey);',
+         'const ugc = searchUgc(this, keyword, mixinKey);'),
+        ('smartTitleReplace(sourceAnimes, cnAlias);',
+         'smartTitleReplace(sourceAnimes.filter(anime => !anime.mediaId?.startsWith("bv")), cnAlias);'),
+        ('return s === resolvedQuerySeason || (resolvedQuerySeason === 1 && s === null);',
+         'return anime.mediaId?.startsWith("bv") || s === resolvedQuerySeason || (resolvedQuerySeason === 1 && s === null);'),
+    ]
+    for old, new in improvements:
+        if source.count(new) == 1:
+            continue
         if source.count(old) != 1:
-            raise RuntimeError('Pinned Bilibili adapter changed; review patch before applying')
+            raise RuntimeError('Pinned Bilibili search changed; review patch before applying')
         source = source.replace(old, new, 1)
-    path.write_text(marker + '\n' + source, encoding='utf-8')
+    path.write_text(source, encoding='utf-8')
 
 
 if __name__ == '__main__':

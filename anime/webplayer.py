@@ -8,7 +8,8 @@ from fastapi.responses import FileResponse
 from .db import ROOT
 from .subtitles import Subtitles
 from .auto_danmu import match as match_danmu
-from .audio_alignment import AlignmentService
+from .audio_alignment import AlignmentService, failure as alignment_failure
+from .bilibili_lookup import resolve_video
 
 
 def maintain_danmu(stop):
@@ -213,7 +214,7 @@ class WebPlayer:
         with self.alignment_lock:
             if self.alignment is None:
                 try:ffmpeg=self.subtitles.tool('ffmpeg');ffprobe=self.subtitles.tool('ffprobe')
-                except ValueError:return {'status':'unavailable','message':'未安装音频读取工具，仍可手动调时'}
+                except ValueError:return alignment_failure('tool')
                 fpcalc=ROOT/'tools/chromaprint/fpcalc.exe'
                 self.alignment=AlignmentService(self.db.path.parent/'cache/audio-alignment',ffmpeg,ffprobe,str(fpcalc))
             result=self.alignment.start(item,source['url'],hashlib.sha256(source['url'].encode()).hexdigest(),force=p.get('force') is True)
@@ -305,8 +306,15 @@ def register_webplayer(app,db):
         return {'ok':True}
     @app.get('/api/web/danmu/search')
     def search(q:str):
-        if not 1<=len(q)<=100:raise ValueError('请输入作品名')
+        if not 1<=len(q.strip())<=2000:raise HTTPException(400,'请输入作品名、B站网址或 BV号')
+        if re.match(r'(?i)^(?:BV|(?:https?://)?(?:www\.|m\.)?bilibili\.com(?:/|$))',q.strip()):
+            return player.bind_episodes(resolve_video(q))
+        if len(q)>100:raise HTTPException(400,'作品名最多100字；长网址请使用B站直达查询')
         return player.describe_candidates(player.danmu('search/anime',{'keyword':q.strip()}))
+    @app.get('/api/web/danmu/resolve')
+    def resolve(q:str):
+        if not 1<=len(q.strip())<=2000:raise HTTPException(400,'请输入B站网址或 BV号')
+        return player.bind_episodes(resolve_video(q))
     @app.get('/api/web/danmu/show/{sid}')
     def episodes(sid:int):
         return player.bind_episodes(player.danmu('bangumi/'+str(sid)))

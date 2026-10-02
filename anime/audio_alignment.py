@@ -26,13 +26,36 @@ MAX_PCM = 80 * 1024 * 1024
 ACTIVE = {'queued', 'running'}
 MESSAGES = {
     'queued': '等待音频对齐', 'running': '正在比对音频', 'matched': '音频一致，已计算偏移',
-    'unreliable': '音频未能可靠匹配，请手动调时', 'unavailable': '音轨或读取工具暂不可用，请手动调时',
+    'unreliable': '音频未能可靠匹配，请手动调时', 'unavailable': '音频对齐暂时失败，可点击重新对齐或手动调时',
     'unsupported': '此来源暂不支持音频对齐', 'cancelled': '已停止自动对齐',
+}
+FAILURES = {
+    'dependency': ('音频对齐依赖未安装或无法加载，请检查本机安装', False),
+    'tool': ('音频读取工具不存在或无法执行，请检查本机安装', False),
+    'media_changed': ('本地文件不存在或已变化，请重新核查', False),
+    'local_audio': ('无法读取本地音轨，请检查文件或使用弹弹play', False),
+    'duration': ('音频对齐目前支持4至60分钟的本地媒体', False),
+    'fingerprint': ('音频指纹计算失败，可手动调时', False),
+    'source_info': ('来源音轨信息暂时读取失败，可重试', True),
+    'source_audio': ('来源音频片段暂时读取失败，可重试', True),
+    'no_source_audio': ('此来源没有可读取的独立音轨，可换来源或手动调时', False),
+    'short_source': ('此来源音频太短，无法可靠自动对齐', False),
+    'budget': ('来源音轨读取已达到流量上限，请换来源或手动调时', False),
+    'timeout': ('音频对齐超时，可重试', True),
+    'busy': ('音频对齐正在忙，稍后可重试', True),
 }
 
 
+def failure(reason=None):
+    message, retryable = FAILURES.get(reason, (MESSAGES['unavailable'], False))
+    return {'status': 'unavailable', 'message': message, 'reason': reason if reason in FAILURES else 'unknown',
+            'retryable': retryable}
+
+
 class Unavailable(Exception):
-    pass
+    def __init__(self, reason=None):
+        self.reason = reason if reason in FAILURES else None
+        super().__init__()
 
 
 class Cancelled(Exception):
@@ -110,6 +133,7 @@ class RangeProxy:
         self.downloaded = 0
         self.failed = False
         self.error_type = None
+        self.error_reason = None
         self.total = None
         self.blocks = []
         self.cache_lock = threading.Lock()
@@ -148,7 +172,7 @@ class RangeProxy:
                     end=min(end if end is not None else proxy.total-1,proxy.total-1)
                     if response is not None and not head:
                         end=min(end,int(response.headers['Content-Range'].split('/')[0].split('-')[1]))
-                    if not head and cached(start) is None and proxy.downloaded>=MAX_BYTES:raise Unavailable()
+                    if not head and cached(start) is None and proxy.downloaded>=MAX_BYTES:raise Unavailable('budget')
                     self.send_response(206)
                     self.send_header('Content-Type',proxy.content_type)
                     self.send_header('Content-Length',str(end-start+1))
@@ -165,7 +189,7 @@ class RangeProxy:
                                 chunk=cached(position)
                                 if chunk is None:
                                     remaining=MAX_BYTES-proxy.downloaded
-                                    if remaining<=0:raise Unavailable()
+                                    if remaining<=0:raise Unavailable('budget')
                                     if response is None:response=proxy._open(position,end)
                                     chunk=response.raw.read(min(8192,remaining,end-position+1))
                                     if not chunk:raise Unavailable()
@@ -179,6 +203,7 @@ class RangeProxy:
                     if proxy.stop.is_set() or generation!=proxy.generation:return
                     proxy.failed = True
                     proxy.error_type = type(error).__name__
+                    proxy.error_reason = error.reason if isinstance(error, Unavailable) else None
                     try:
                         if not sent:self.send_error(502)
                     except OSError: pass
@@ -244,7 +269,7 @@ class AlignmentService:
         self.extractor_lock = threading.Lock()
 
     def _public(self, job):
-        return {k:v for k,v in job.items() if k in ('job_id','status','message','offset','anchors','algorithm')}
+        return {k:v for k,v in job.items() if k in ('job_id','status','message','offset','anchors','algorithm','reason','retryable')}
 
     def start(self, item, source_url, source_identity, force=False):
         url = canonical_source(source_url)
@@ -252,10 +277,13 @@ class AlignmentService:
         try:
             import numpy
             import yt_dlp
-            if any(not (Path(p).is_file() or shutil.which(p)) for p in (self.ffmpeg,self.ffprobe,self.fpcalc)): raise Unavailable()
+        except Exception: return failure('dependency')
+        if any(not (Path(p).is_file() or shutil.which(p)) for p in (self.ffmpeg,self.ffprobe,self.fpcalc)):
+            return failure('tool')
+        try:
             path = Path(item['path']); stat = path.stat()
-            if stat.st_size != item['size']: raise Unavailable()
-        except Exception: return {'status':'unavailable','message':MESSAGES['unavailable']}
+            if stat.st_size != item['size']: raise Unavailable('media_changed')
+        except Exception: return failure('media_changed')
         pair = hashlib.sha256(json.dumps([ALGORITHM,str(path.resolve()),stat.st_size,stat.st_mtime_ns,url,source_identity]).encode()).hexdigest()
         with self.lock:
             existing = self.jobs.get(self.pairs.get(pair))
@@ -263,7 +291,7 @@ class AlignmentService:
             if existing and (existing['status'] in ACTIVE or not force and existing['status'] != 'cancelled'
                              and time.time()-existing.get('finished',0)<ttl):
                 return self._public(existing)
-            if self.queue.full(): return {'status':'unavailable','message':'音频对齐队列已满，稍后可重试'}
+            if self.queue.full(): return failure('busy')
             for key in list(self.jobs):
                 if len(self.jobs) < 200: break
                 if self.jobs[key]['status'] not in ACTIVE:
@@ -294,15 +322,18 @@ class AlignmentService:
 
     def _check(self, job):
         if job['stop'].is_set(): raise Cancelled()
-        if job['deadline'] and time.monotonic() > job['deadline']: raise Unavailable()
-        stat = Path(job['item']['path']).stat()
-        if stat.st_size != job['item']['size'] or stat.st_mtime_ns != job['mtime']: raise Unavailable()
+        if job['deadline'] and time.monotonic() > job['deadline']: raise Unavailable('timeout')
+        try:stat = Path(job['item']['path']).stat()
+        except OSError:raise Unavailable('media_changed') from None
+        if stat.st_size != job['item']['size'] or stat.st_mtime_ns != job['mtime']: raise Unavailable('media_changed')
 
     def _run(self, job, args, data=None, cap=MAX_PCM):
         self._check(job)
-        process = subprocess.Popen(args,stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
-                                   creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        try:
+            process = subprocess.Popen(args,stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                                       creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        except OSError:raise Unavailable('tool') from None
         with self.lock: job['process']=process
         # Drain bounded stdout while checking cancellation; never buffer unbounded communicate().
         chunks=[]; total=0; overflow=threading.Event()
@@ -353,14 +384,15 @@ class AlignmentService:
                           '-show_entries','format=duration:stream=index:stream_tags=language:stream_disposition=default',
                           '-of','json',job['item']['path']],cap=1024*1024)
         data=json.loads(raw);duration=float(data['format']['duration'])
-        if not math.isfinite(duration) or not 240<=duration<=3600 or not data.get('streams'):raise Unavailable()
+        if not math.isfinite(duration) or not 240<=duration<=3600:raise Unavailable('duration')
+        if not data.get('streams'):raise Unavailable('local_audio')
         streams=sorted(data['streams'],key=lambda s:(s.get('tags',{}).get('language','').lower() not in ('jpn','ja'),not s.get('disposition',{}).get('default')))
         return duration,int(streams[0]['index'])
 
     def _source_audio(self, job):
         from yt_dlp import YoutubeDL
         result=[]; error=[]; done=threading.Event()
-        if not self.extractor_lock.acquire(blocking=False):raise Unavailable()
+        if not self.extractor_lock.acquire(blocking=False):raise Unavailable('busy')
         # Extractor may block on a remote request. It never owns a worker result/cache.
         def extract():
             try:
@@ -370,22 +402,22 @@ class AlignmentService:
                     info=ydl.extract_info(job['url'],download=False)
                 if info.get('entries'):raise Unavailable()
                 formats=[f for f in info.get('formats',[]) if f.get('vcodec')=='none' and f.get('acodec') not in (None,'none')]
-                if not formats:raise Unavailable()
+                if not formats:raise Unavailable('no_source_audio')
                 audio=min(formats,key=lambda f:f.get('abr') or f.get('tbr') or float('inf'))
                 validate_cdn(audio['url'])
                 duration=float(info.get('duration') or 0)
-                if not math.isfinite(duration) or duration<240:raise Unavailable()
+                if not math.isfinite(duration) or duration<240:raise Unavailable('short_source')
                 result.append((audio['url'],audio.get('http_headers') or info.get('http_headers') or
                                {'User-Agent':'Mozilla/5.0','Referer':'https://www.bilibili.com/'},duration, str(info.get('id',''))))
-            except Exception:error.append(True)
+            except Exception as exc:error.append(exc.reason if isinstance(exc,Unavailable) and exc.reason else 'source_info')
             finally:self.extractor_lock.release();done.set()
         thread=threading.Thread(target=extract,daemon=True);thread.start()
         until=min(job['deadline'],time.monotonic()+30)
         while not done.wait(.1):
             self._check(job)
-            if time.monotonic()>until:raise Unavailable()
+            if time.monotonic()>until:raise Unavailable('source_info')
         self._check(job)
-        if error or not result:raise Unavailable()
+        if error or not result:raise Unavailable(error[0] if error else 'source_info')
         return result[0]
 
     def _cache_write(self, path, value):
@@ -399,6 +431,7 @@ class AlignmentService:
 
     def _align(self, job):
         import numpy as np
+        job['stage']='local_audio'
         duration,track=self._probe(job)
         local=job['item']
         reference_key=hashlib.sha256(json.dumps([ALGORITHM,str(Path(local['path']).resolve()),local['size'],job['mtime'],track]).encode()).hexdigest()
@@ -418,26 +451,34 @@ class AlignmentService:
         if reference is None:
             pcm=self._run(job,[self.ffmpeg,'-nostdin','-v','error','-protocol_whitelist','file,pipe','-i',job['item']['path'],
                                '-t',str(duration),'-map',f'0:{track}','-vn','-ac','1','-ar','11025','-f','s16le','pipe:1'])
+            job['stage']='fingerprint'
             reference=self._fingerprint(job,pcm);del pcm
             with self.lock:
                 self._check(job);self._cache_write(ref_path,{'fingerprint':reference.tolist()})
+        job['stage']='source_info'
         url,headers,remote_duration,remote_id=self._source_audio(job)
         common=min(duration,remote_duration)
         starts=[common*x for x in (.22,.48,.75)]
         anchors=[]
         proxy=RangeProxy(url,headers,lambda:self._check(job))
+        job['stage']='source_audio'
         with proxy as local_url:
             for start in starts:
                 self._check(job)
                 if start<120 or start+35>common-30:return {'status':'unreliable'}
-                pcm=self._run(job,[self.ffmpeg,'-nostdin','-v','error','-protocol_whitelist','http,tcp',
-                                   '-rw_timeout','10000000','-ss',str(start),'-i',local_url,'-t','35',
-                                   '-map','0:a:0','-vn','-ac','1','-ar','11025','-f','s16le','pipe:1'],cap=11025*2*36)
+                try:
+                    pcm=self._run(job,[self.ffmpeg,'-nostdin','-v','error','-protocol_whitelist','http,tcp',
+                                       '-rw_timeout','10000000','-ss',str(start),'-i',local_url,'-t','35',
+                                       '-map','0:a:0','-vn','-ac','1','-ar','11025','-f','s16le','pipe:1'],cap=11025*2*36)
+                except Unavailable as exc:
+                    raise Unavailable(exc.reason or proxy.error_reason or 'source_audio') from None
                 if len(pcm)<11025*2*30:raise Unavailable()
+                job['stage']='fingerprint'
                 anchor=locate_fingerprint(reference,self._fingerprint(job,pcm))
+                job['stage']='source_audio'
                 anchor['source_time']=start;anchors.append(anchor)
                 if not anchor.get('reliable'):return {'status':'unreliable'}
-            if proxy.failed:raise Unavailable()
+            if proxy.failed:raise Unavailable(proxy.error_reason or 'source_audio')
         offset=decide_alignment(anchors,duration)
         if offset is None:return {'status':'unreliable'}
         result={'status':'matched','offset':offset,'anchors':anchors,'algorithm':ALGORITHM}
@@ -457,9 +498,11 @@ class AlignmentService:
                 with self.lock:
                     self._check(job);job.update(result);job['message']=MESSAGES[job['status']]
             except Cancelled:pass
-            except Exception:
+            except Exception as exc:
                 with self.lock:
-                    if not job['stop'].is_set():job['status']='unavailable';job['message']=MESSAGES['unavailable']
+                    if not job['stop'].is_set():
+                        reason=exc.reason if isinstance(exc,Unavailable) else None
+                        job.update(failure(reason or job.get('stage')))
             finally:
                 # Do not retain tool output, PCM, or URLs after this job.
                 job.pop('url',None);job.pop('item',None)
