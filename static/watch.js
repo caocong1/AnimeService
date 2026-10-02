@@ -7,7 +7,7 @@
   let played = false, art = null, media = null, show = null, lastPosition = 0, lastSave = 0, selected = [], comments = [], activeDanmu = null, danmuRev = 0, tracks = [];
   let searchRev = 0;
   let detailRev = 0;
-  let resultRows = [], resultContext = '本集相关视频';
+  let resultRows = [], resultContext = '本集推荐';
   let replaceDanmu = null;
   const sourceStorageKey = `fanyu-danmu-sources:${id}`;
   const removedStorageKey = `fanyu-danmu-removed:${id}`;
@@ -255,8 +255,7 @@
 
   async function applyDanmu() {
     if (!art) return;
-    const shift = Number($('#offset').value) || 0;
-    comments = DanmuTiming.mix(selected, shift, art.duration);
+    comments = DanmuTiming.mix(selected, 0, art.duration);
     replaceDanmu ||= DanmuTiming.createReplacer(art.plugins.artplayerPluginDanmuku);
     onScreen.clear(); refreshDanmuList();
     await replaceDanmu(comments);
@@ -381,10 +380,10 @@
     box.hidden = false;
   }
   function renderBlocked() {
-    $('#dm-blocked-count').textContent = blocked.size;
-    $('#dm-blocked-list').innerHTML = blocked.size ? [...blocked].reverse().map(([user, u]) =>
-      `<div class="dm-blocked-row"><span><b>${esc(u.text || '（无示例弹幕）')}</b><small>${SITE_NAMES[u.site] || '用户'} ${esc(user)}</small></span><span class="dm-blocked-acts">${u.site === 'bilibili' ? `<button class="btn quiet" type="button" data-find-uid="${esc(user)}">查找 UID</button>` : ''}<button class="btn quiet" type="button" data-unblock="${esc(user)}">解除屏蔽</button></span></div>${u.site === 'bilibili' ? `<div class="dm-uids" data-uids="${esc(user)}" hidden></div>` : ''}`).join('')
-      : '<p>在播放器或弹幕列表中右键一条弹幕，即可屏蔽发送者。</p>';
+    const box = $('#dm-blocked'), open = !!box.querySelector('details[open]');
+    box.innerHTML = blocked.size ? `<details class="dm-blocked"${open ? ' open' : ''}><summary><b>${blocked.size}</b> 个用户${icon('down')}</summary><div class="dm-blocked-list">${[...blocked].reverse().map(([user, u]) =>
+      `<div class="dm-blocked-row"><span><b>${esc(u.text || '（无示例弹幕）')}</b><small>${SITE_NAMES[u.site] || '用户'} ${esc(user)}</small></span><span class="dm-blocked-acts">${u.site === 'bilibili' ? `<button class="btn quiet small" type="button" data-find-uid="${esc(user)}">查找 UID</button>` : ''}<button class="btn quiet small" type="button" data-unblock="${esc(user)}">解除屏蔽</button></span></div>${u.site === 'bilibili' ? `<div class="dm-uids" data-uids="${esc(user)}" hidden></div>` : ''}`).join('')}</div></details>`
+      : '<p class="pc-note">无</p>';
   }
   function restoreTiming(source) {
     let saved = null;
@@ -401,16 +400,21 @@
     }
   function renderSelected() {
     if (document.activeElement?.matches('#danmu-selected input')) return;
-    const open = [...document.querySelectorAll('#danmu-selected details[open]')].map(x => x.dataset.sourceMore);
     $('#danmu-selected').innerHTML = selected.map((x, i) => {
-      const p = sourceLabel(x.title), episode = (x.title.match(/第\s*\d+\s*[集话話]/g) || []).at(-1) || '已选剧集';
-      const duration = (x.title.match(/\d+:\d{2}(?::\d{2})?/g) || []).at(-1);
-      const status = x.loading ? '加载中…' : x.error ? '获取失败' : x.count > 0 ? `已加载 ${x.count} 条` : x.count === 0 ? '暂无弹幕' : '尚未加载';
-      const alignStatus = x.alignmentEnabled === false ? '自动对齐已关闭' : x.alignmentManual ? '使用手动偏移' : ({queued:'等待音频对齐…', running:'正在音频对齐…', matched:`已自动对齐 ${x.offset > 0 ? '+' : ''}${x.offset || 0} 秒`, unreliable:'音频未能可靠匹配 · 可手动调时', unavailable:x.alignmentMessage || '自动对齐暂不可用 · 可手动调时'}[x.alignmentStatus] || '');
-      return `<article class="dm-source"><div class="dm-source-main"><div class="dm-identity"><span class="dm-mark" aria-hidden="true">${p.mark}</span><div><div class="dm-name">${p.name}</div><div class="dm-meta" data-state="${x.error ? 'error' : x.count > 0 ? 'ok' : ''}">${esc(episode)}${duration ? ` · ${duration}` : ''} · ${status}${!x.loading && (x.error || !x.count) ? `<button class="dm-source-retry" data-reload-source="${i}" type="button">${x.error ? '重试' : '刷新'}</button>` : ''}</div>${alignStatus ? `<div class="dm-meta dm-alignment" role="status">${esc(alignStatus)}</div>` : ''}</div></div>
-      <div class="dm-stepper"><button type="button" data-nudge="${i}" data-delta="-1" aria-label="${p.name} 提前1秒">− 提前</button><label class="dm-value"><input type="number" min="-3600" max="3600" step="0.1" data-timing="${i}" data-field="offset" value="${x.offset || 0}" aria-label="${p.name} 偏移秒数"><span>秒</span></label><button type="button" data-nudge="${i}" data-delta="1" aria-label="${p.name} 延后1秒">延后 ＋</button></div></div>
-      <details class="dm-more" data-source-more="${i}"${open.includes(String(i)) ? ' open' : ''}><summary>更多设置</summary><div class="dm-more-body"><p>${esc(cleanTitle(x.title))}</p><div class="dm-more-actions">${sourceLink(x.source_url)}${p.name === 'Bilibili' ? `<button class="btn quiet" type="button" data-align-source="${i}"${['queued','running'].includes(x.alignmentStatus) ? ' disabled' : ''}>${x.alignmentManual || x.alignmentEnabled === false ? '改用自动对齐' : '重新自动对齐'}</button>${x.alignmentEnabled !== false ? `<button class="btn quiet" type="button" data-disable-alignment="${i}">关闭自动对齐</button>` : ''}` : ''}<button class="btn quiet" type="button" data-remove="${i}">移除此来源</button></div></div></details></article>`;
-    }).join('') || '<p class="dm-empty">还没有可用来源。添加本集的弹幕，或在高级设置中重新匹配。</p>';
+      const p = sourceLabel(x.title), busy = ['queued','running'].includes(x.alignmentStatus);
+      const status = x.loading ? '加载中…' : x.error ? '获取失败' : x.count > 0 ? `${x.count} 条` : x.count === 0 ? '暂无弹幕' : '尚未加载';
+      const alignStatus = x.alignmentEnabled === false ? '自动对齐已关闭' : x.alignmentManual ? '手动调时' : ({queued:'等待音频对齐…', running:'正在音频对齐…', matched:`已自动对齐 ${x.offset > 0 ? '+' : ''}${x.offset || 0} 秒`, unreliable:'音频未能可靠匹配', unavailable:x.alignmentMessage || '自动对齐不可用'}[x.alignmentStatus] || '');
+      const acts = [
+        sourceLink(x.source_url),
+        p.name === 'Bilibili' ? `<button class="dm-act" type="button" data-align-source="${i}"${busy ? ' disabled' : ''}>${x.alignmentManual || x.alignmentEnabled === false ? '改用自动对齐' : '重新对齐'}</button>` : '',
+        p.name === 'Bilibili' && x.alignmentEnabled !== false ? `<button class="dm-act" type="button" data-disable-alignment="${i}">关闭自动对齐</button>` : '',
+        `<button class="dm-act dm-act-remove" type="button" data-remove="${i}">移除</button>`,
+      ].join('');
+      return `<article class="dm-source"><span class="dm-mark" aria-hidden="true">${p.mark}</span>
+      <div class="dm-info"><div class="dm-line"><b class="dm-name">${p.name}</b><span class="dm-meta" data-state="${x.error ? 'error' : x.count > 0 ? 'ok' : ''}">${status}</span>${!x.loading && (x.error || !x.count) ? `<button class="dm-act" data-reload-source="${i}" type="button">${x.error ? '重试' : '刷新'}</button>` : ''}</div>
+      <p class="dm-title" title="${esc(cleanTitle(x.title))}">${esc(cleanTitle(x.title))}</p><div class="dm-acts">${acts}</div></div>
+      <div class="dm-timing"><div class="dm-stepper"><button type="button" data-nudge="${i}" data-delta="-1" aria-label="${p.name} 提前1秒">提前</button><label class="dm-value"><input type="number" min="-3600" max="3600" step="0.1" data-timing="${i}" data-field="offset" value="${x.offset || 0}" aria-label="${p.name} 偏移秒数"><span>秒</span></label><button type="button" data-nudge="${i}" data-delta="1" aria-label="${p.name} 延后1秒">延后</button></div>${alignStatus ? `<p class="dm-alignment" role="status" data-state="${x.alignmentStatus === 'matched' && !x.alignmentManual && x.alignmentEnabled !== false ? 'ok' : ''}">${esc(alignStatus)}</p>` : ''}</div></article>`;
+    }).join('') || '<p class="dm-empty">还没有弹幕来源。</p>';
   }
   function sourceLabel(title = '') {
     if (/bilibili|B站/i.test(title)) return {name:'Bilibili', mark:'哔'};
@@ -423,25 +427,35 @@
   function cleanTitle(title = '') {
     return title.replace(/\((?:\d{4}|N\/A)\)【[^】]*】from \w+/g, '').replace(/【(?:bilibili1|bahamut)】\s*/g, '').trim();
   }
-  function sourceLink(url, label = '查看原站 ↗') {
+  function sourceLink(url, label = '原站') {
     try {
       const u = new URL(url);
       if (u.protocol !== 'https:' || u.username || u.password || u.port || !['www.bilibili.com','ani.gamer.com.tw','www.iqiyi.com','v.youku.com','v.qq.com'].includes(u.hostname)) return '';
       if ([...u.searchParams.keys()].some(k => !['p','sn'].includes(k))) return '';
-      return `<a class="dm-source-link" href="${esc(u.href)}" target="_blank" rel="noopener noreferrer" aria-label="${esc(label)}（新标签页）">${esc(label)}</a>`;
+      return `<a class="dm-source-link" href="${esc(u.href)}" target="_blank" rel="noopener noreferrer" aria-label="${esc(label)}（新标签页）">${esc(label)}${icon('external')}</a>`;
     } catch (_) { return ''; }
   }
+  const chosenEpisode = () => activeDanmu?.episodes?.[Number($('#danmu-episodes input[name="danmu-ep"]:checked')?.value)];
+  const siteOf = x => x.site || x.source || x.animeTitle?.match(/from (\w+)$/)?.[1];
+  function showDetail(on, title = '添加弹幕来源') {
+    $('#danmu-search-view').hidden = on; $('#danmu-detail-view').hidden = !on; $('#danmu-back').hidden = !on;
+    $('#danmu-dialog-title').textContent = title;
+  }
   function updateEpisodeLink() {
-    const ep = activeDanmu?.episodes?.[Number($('#danmu-ep')?.value)];
     const box = $('#danmu-episode-link');
-    if (box) box.innerHTML = sourceLink(ep?.source_url, '查看此集原站 ↗');
+    if (box) box.innerHTML = sourceLink(chosenEpisode()?.source_url, '此集原站');
   }
   function renderDanmuResults(rows = resultRows, context = resultContext) {
     resultRows = rows; resultContext = context;
-    const site = $('#danmu-site').value;
-    const shown = rows.filter(x => !site || (x.site || x.source || x.animeTitle?.match(/from (\w+)$/)?.[1]) === site);
-    $('#danmu-results-note').textContent = `${context} · ${shown.length} 个来源${site ? ` / 共 ${rows.length} 个` : ''}`;
-    $('#danmu-results').innerHTML = shown.map(x => { const p=sourceLabel(x.site || x.source || x.animeTitle); return `<div class="dm-result-row"><button class="dm-result" type="button" data-anime="${esc(x.animeId)}"><span class="dm-mark" aria-hidden="true">${p.mark}</span><span><b>${esc(cleanTitle(x.animeTitle))}</b><small>${p.name} · ${x.episodeCount ?? '—'} ${x.type?.includes('B站视频') ? '个分P' : '集'}</small></span>${icon('chevron')}</button>${sourceLink(x.source_url)}</div>`; }).join('') || `<p class="dm-empty">${rows.length && site ? '当前结果中没有此类型来源，可切换全部来源，或换个关键词搜索。' : '没有找到结果。试试作品简称加集数，或粘贴视频链接。'}</p>`;
+    const site = $('#danmu-site [aria-pressed="true"]').dataset.site;
+    for (const b of $('#danmu-site').children) {
+      const n = b.dataset.site ? rows.filter(x => siteOf(x) === b.dataset.site).length : rows.length;
+      b.dataset.count = n;
+      b.disabled = !n && b.dataset.site !== site;
+    }
+    const shown = rows.filter(x => !site || siteOf(x) === site);
+    $('#danmu-results-note').textContent = `${context} · ${shown.length} 个`;
+    $('#danmu-results').innerHTML = shown.map(x => { const p=sourceLabel(siteOf(x) || x.animeTitle); return `<div class="dm-result-row"><button class="dm-result" type="button" data-anime="${esc(x.animeId)}"><span class="dm-mark" aria-hidden="true">${p.mark}</span><span><b>${esc(cleanTitle(x.animeTitle))}</b><small>${p.name} · ${x.episodeCount ?? '—'} ${x.type?.includes('B站视频') ? '个分P' : '集'}</small></span>${icon('chevron')}</button>${sourceLink(x.source_url)}</div>`; }).join('') || `<p class="dm-empty">${rows.length && site ? '这类来源没有结果。' : '没有找到结果。试试作品简称加集数，或粘贴视频链接。'}</p>`;
   }
   async function loadSource(source) {
     source.loading=true; source.error=null; renderSelected();
@@ -455,6 +469,7 @@
   function closeSourceDialog() { ++detailRev; $('#danmu-dialog').close(); }
   async function restoreDanmu() {
     const saved = DanmuTiming.savedSources(readSaved(sourceStorageKey));
+    $('#retry-danmu').disabled = false;
     if (saved === null) return autoDanmu();
     selected = saved.map(restoreTiming);
     renderSelected();
@@ -472,14 +487,14 @@
     try {
       const d = await web(`/media/${id}/danmu`);
       if (rev !== danmuRev) return;
-      if (searchVersion === searchRev && d.candidates) renderDanmuResults(d.candidates, '系统按作品与集数查找的来源');
+      if (searchVersion === searchRev && d.candidates) renderDanmuResults(d.candidates, '本集推荐');
       if (d.status === 'matched') {
         const matched=d.selected.map(x => restoreTiming({...x, ...d.sources.find(s => s.id === x.id)}));
         for (const s of matched) { if (removedSources.has(s.source_identity)) continue; const old=selected.find(x=>x.source_identity===s.source_identity); if(old) Object.assign(old,{id:s.id,comments:s.comments,count:s.count,error:s.error}); else if(selected.length<5) selected.push(s); }
         saveSources(); renderSelected(); await applyDanmu(); note.title = d.title || '';
         selected.forEach(source => alignSource(source));
       } else { if (!selected.length) { note.textContent = d.status === 'error' ? '暂时失败' : '未匹配'; renderSelected(); if(d.message) $('#danmu-selected .dm-empty').textContent=d.message; } note.title = d.message || ''; }
-    } catch (e) { if (rev === danmuRev) { note.textContent = '未连接'; note.title = e.message; if(!selected.length) $('#danmu-selected').innerHTML='<p class="dm-empty">自动匹配暂时失败。可以添加来源，或在高级设置中重试。</p>'; } }
+    } catch (e) { if (rev === danmuRev) { note.textContent = '未连接'; note.title = e.message; if(!selected.length) $('#danmu-selected').innerHTML='<p class="dm-empty">自动匹配暂时失败。</p>'; } }
   }
 
   /* ---------- events ---------- */
@@ -498,7 +513,7 @@
       saveTiming(x); const selector=`[data-nudge="${b.dataset.nudge}"][data-delta="${b.dataset.delta}"]`; renderSelected(); document.querySelector(selector)?.focus(); applyDanmu().catch(e => toast(e.message)); return;
     }
     if (b.dataset.findUid !== undefined) { const box = document.querySelector(`[data-uids="${CSS.escape(b.dataset.findUid)}"]`); if (box.hidden) renderUids(box, b.dataset.findUid); else box.hidden = true; return; }
-    if (b.dataset.unblock !== undefined) { unblockUser(b.dataset.unblock); ($('#dm-blocked-list button') || $('#dm-blocked > summary')).focus(); return; }
+    if (b.dataset.unblock !== undefined) { unblockUser(b.dataset.unblock); ($('#dm-blocked [data-unblock]') || $('#danmu-display-reset')).focus(); return; }
     if (b.dataset.reloadSource !== undefined) return loadSource(selected[Number(b.dataset.reloadSource)]);
     if (b.dataset.alignSource !== undefined) {
       const source=selected[Number(b.dataset.alignSource)];
@@ -509,10 +524,11 @@
       const source=selected[Number(b.dataset.disableAlignment)];
       alignment.cancel(source); source.alignmentEnabled=false; source.alignmentStatus='disabled'; saveTiming(source); renderSelected(); return;
     }
+    if (b.dataset.site !== undefined) { for (const x of $('#danmu-site').children) x.setAttribute('aria-pressed', String(x === b)); return renderDanmuResults(); }
     if (b.dataset.anime) return act(b, async () => {
       ++danmuRev;
       const rev=++detailRev;
-      $('#danmu-search-view').hidden=true; $('#danmu-detail-view').hidden=false;
+      showDetail(true, '选择分集');
       $('#danmu-episodes').innerHTML='<p class="dm-empty" role="status">正在读取分集…</p>';
       $('#danmu-back').focus();
       let d;
@@ -521,9 +537,13 @@
       if(rev!==detailRev) return;
       activeDanmu = d.bangumi;
       const episodes=activeDanmu.episodes || [];
-      $('#danmu-episodes').innerHTML = `<h3>${esc(cleanTitle(activeDanmu.animeTitle))}</h3>${episodes.length ? `<label>选择分集<select id="danmu-ep">${episodes.map((x, i) => `<option value="${i}"${x.source_key ? '' : ' disabled'}>${esc(cleanTitle(x.episodeTitle))}</option>`).join('')}</select></label><p class="dm-dialog-hint">确认是本集即可添加。尾部拼接可能增加总时长，添加后可单独调时。</p><footer><span id="danmu-episode-link"></span><button class="btn primary" type="button" id="add-source">添加并加载</button></footer>` : '<p class="dm-empty">此来源暂时没有可用分集，返回选择其他来源。</p>'}`;
-      const match=episodes.findIndex(x=>x.source_key&&Number(x.episodeNumber)===media.episode);
-      if(match>=0) $('#danmu-ep').value=String(match);
+      const here=episodes.findIndex(x=>x.source_key&&Number(x.episodeNumber)===media.episode), pick=here>=0 ? here : episodes.findIndex(x=>x.source_key);
+      const p=sourceLabel(siteOf(activeDanmu) || activeDanmu.animeTitle);
+      $('#danmu-episodes').innerHTML = `<div class="dm-detail-head"><span class="dm-mark" aria-hidden="true">${p.mark}</span><div><h3>${esc(cleanTitle(activeDanmu.animeTitle))}</h3><small>${p.name} · ${episodes.length} 集</small></div></div>${episodes.length
+        ? `<div class="dm-eps" role="radiogroup" aria-label="分集">${episodes.map((x, i) => `<label class="dm-ep"><input type="radio" name="danmu-ep" value="${i}"${x.source_key ? '' : ' disabled'}${i === pick ? ' checked' : ''}><span>${esc(cleanTitle(x.episodeTitle))}</span>${i === here ? '<em>本集</em>' : ''}</label>`).join('')}</div><footer class="dm-detail-foot"><span id="danmu-episode-link"></span><button class="btn primary" type="button" id="add-source"${pick < 0 ? ' disabled' : ''}>添加</button></footer>`
+        : '<p class="dm-empty">此来源暂时没有可用分集。</p>'}`;
+      const list=$('#danmu-episodes .dm-eps'), chosen=$('#danmu-episodes input:checked')?.closest('label');
+      if (list && chosen) list.scrollTop = chosen.offsetTop - (list.clientHeight - chosen.offsetHeight) / 2;
       updateEpisodeLink();
     });
     switch (b.id) {
@@ -534,13 +554,12 @@
       case 'retry-danmu': return autoDanmu();
       case 'danmu-display-reset': saveDisplay({fontFamily: 'default'}); configDisplay(DISPLAY_DEFAULTS); renderDisplay(); return;
       case 'tab-playlist': case 'tab-danmu-list': return selectTab(b.getAttribute('aria-controls'));
-      case 'toggle-danmu': { const expanded=b.getAttribute('aria-expanded')==='true'; b.setAttribute('aria-expanded',String(!expanded)); $('#danmu-panel').hidden=expanded; return; }
-      case 'open-danmu-search': $('#danmu-search-view').hidden=false; $('#danmu-detail-view').hidden=true; $('#danmu-dialog').showModal(); $('#danmu-q').focus(); return;
+      case 'open-danmu-search': showDetail(false); $('#danmu-dialog').showModal(); $('#danmu-q').focus(); return;
       case 'close-danmu-search': return closeSourceDialog();
-      case 'danmu-back': ++detailRev; $('#danmu-search-view').hidden=false; $('#danmu-detail-view').hidden=true; $('#danmu-q').focus(); return;
+      case 'danmu-back': ++detailRev; showDetail(false); $('#danmu-q').focus(); return;
       case 'add-source': {
-        const ep = activeDanmu.episodes[Number($('#danmu-ep').value)];
-        if (!ep.source_key) return toast('这个来源不能直接加载');
+        const ep = chosenEpisode();
+        if (!ep?.source_key) return toast('这一集不能直接加载');
         const existing=selected.find(x=>x.source_identity===ep.source_identity);
         if(existing) { closeSourceDialog(); return toast('这个来源已经在使用'); }
         if (selected.length >= 5) return toast('最多使用 5 个来源，先移除一个再添加');
@@ -567,8 +586,7 @@
   $('#danmu-dialog').addEventListener('close', () => $('#open-danmu-search').focus());
   document.addEventListener('change', e => {
     const input = e.target;
-    if (input.id === 'danmu-site') return renderDanmuResults();
-    if (input.id === 'danmu-ep') return updateEpisodeLink();
+    if (input.name === 'danmu-ep') return updateEpisodeLink();
     if (input.dataset.timing === undefined) return;
     if (!input.checkValidity()) { input.reportValidity(); return; }
     const source = selected[Number(input.dataset.timing)];
@@ -585,12 +603,6 @@
   $('#danmu-selected').addEventListener('focusout', () => setTimeout(() => {
     if (!document.activeElement?.matches('#danmu-selected input')) renderSelected();
   },0));
-  try { $('#offset').value = DanmuTiming.settings({offset: localStorage.getItem(`fanyu-danmu-global:${id}`) || 0}).offset; } catch (_) {}
-  $('#offset').addEventListener('change', () => {
-    if (!$('#offset').checkValidity()) { $('#offset').reportValidity(); return; }
-    try { localStorage.setItem(`fanyu-danmu-global:${id}`, $('#offset').value); } catch (_) { toast('浏览器未能保存全部微调'); }
-    applyDanmu().catch(e => toast(e.message));
-  });
   $('#danmu-search').addEventListener('submit', e => {
     e.preventDefault();
     ++danmuRev;
@@ -638,6 +650,7 @@
   for (const type of ['resize', 'blur']) addEventListener(type, closeMenu);
   document.addEventListener('fullscreenchange', closeMenu);
   addEventListener('resize', renderRows);
+  $('#close-danmu-search').innerHTML = icon('close'); $('#danmu-back').innerHTML = icon('back');
   renderDisplay(); renderBlocked();
 
   (async () => {

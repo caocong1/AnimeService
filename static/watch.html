@@ -9,7 +9,7 @@
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="stylesheet" href="/static/tokens.css">
 <link rel="stylesheet" href="/static/app.css">
-<link rel="stylesheet" href="/static/watch-controls.css?v=7">
+<link rel="stylesheet" href="/static/watch-controls.css?v=8">
 <script src="/static/theme.js"></script>
 </head>
 <body class="watch">
@@ -21,26 +21,35 @@
         <div class="what"><a id="parent" href="/library"></a><h1 id="title">放映室</h1></div>
         <div class="acts" id="acts"></div>
       </div>
-      <div class="playback-controls">
-      <div class="watch-tools">
-        <label>字幕 <select id="subtitle" disabled><option value="">关闭</option></select></label>
-        <button class="dm-toggle" id="toggle-danmu" type="button" aria-expanded="false" aria-controls="danmu-panel" aria-label="弹幕设置">弹幕 <b id="danmu-note" aria-live="polite">—</b><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><path d="m5 9 7 7 7-7"/></svg></button>
-      </div>
-      <p id="sub-note" class="dm-tools-note"></p>
-      <section class="dm-panel" id="danmu-panel" aria-label="弹幕设置" hidden>
-        <div class="dm-heading"><h2>正在使用</h2><button class="btn primary" id="open-danmu-search" type="button">＋ 添加来源</button></div>
-        <div id="danmu-selected" class="dm-sources"><p class="dm-empty">正在匹配本集弹幕…</p></div>
-        <div class="dm-heading dm-display-heading"><h2>显示</h2><button class="btn quiet" id="danmu-display-reset" type="button">恢复默认</button></div>
-        <div class="dm-display">
-          <label>移动速度 <input type="range" id="dm-speed" min="1" max="10" step="1"><output for="dm-speed" id="dm-speed-out"></output></label>
-          <label>字号 <input type="range" id="dm-font-size" min="12" max="50" step="1"><output for="dm-font-size" id="dm-font-size-out"></output></label>
-          <label>不透明度 <input type="range" id="dm-opacity" min="0.1" max="1" step="0.05"><output for="dm-opacity" id="dm-opacity-out"></output></label>
-          <label>字体 <select id="dm-font"><option value="default">默认黑体</option><option value="sans">系统无衬线</option><option value="serif">宋体</option><option value="kai">楷体</option></select></label>
+      <section class="playback-controls" aria-label="字幕与弹幕">
+        <div class="pc-row">
+          <h2 class="pc-label"><label for="subtitle">字幕</label></h2>
+          <div class="pc-body pc-inline"><select id="subtitle" disabled><option value="">关闭</option></select><p id="sub-note" class="pc-note"></p></div>
         </div>
-        <details class="dm-more dm-global" id="dm-blocked"><summary>已屏蔽用户 <b id="dm-blocked-count">0</b></summary><div class="dm-more-body" id="dm-blocked-list"></div></details>
-        <details class="dm-more dm-global"><summary>高级设置</summary><div class="dm-more-body"><label>全部来源微调 <input id="offset" type="number" min="-3600" max="3600" step="0.5" value="0"> 秒</label><p>正数延后，负数提前。调时保存在此浏览器，自动恢复。</p><div><button class="btn" id="retry-danmu" type="button" disabled>重新匹配本集</button></div></div></details>
+        <div class="pc-row">
+          <h2 class="pc-label">弹幕</h2>
+          <div class="pc-body">
+            <div class="pc-head"><span class="pc-count" id="danmu-note" aria-live="polite">—</span><span class="pc-acts"><button class="btn quiet small" id="retry-danmu" type="button" disabled>重新匹配</button><button class="btn small" id="open-danmu-search" type="button"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>添加来源</button></span></div>
+            <div id="danmu-selected" class="dm-sources"><p class="dm-empty">正在匹配本集弹幕…</p></div>
+          </div>
+        </div>
+        <div class="pc-row">
+          <h2 class="pc-label">显示</h2>
+          <div class="pc-body pc-split">
+            <div class="dm-display">
+              <label class="dm-ctl"><span>移动速度</span><output for="dm-speed" id="dm-speed-out"></output><input type="range" id="dm-speed" min="1" max="10" step="1"></label>
+              <label class="dm-ctl"><span>字号</span><output for="dm-font-size" id="dm-font-size-out"></output><input type="range" id="dm-font-size" min="12" max="50" step="1"></label>
+              <label class="dm-ctl"><span>不透明度</span><output for="dm-opacity" id="dm-opacity-out"></output><input type="range" id="dm-opacity" min="0.1" max="1" step="0.05"></label>
+              <label class="dm-ctl"><span>字体</span><select id="dm-font"><option value="default">默认黑体</option><option value="sans">系统无衬线</option><option value="serif">宋体</option><option value="kai">楷体</option></select></label>
+            </div>
+            <button class="btn quiet small" id="danmu-display-reset" type="button">恢复默认</button>
+          </div>
+        </div>
+        <div class="pc-row">
+          <h2 class="pc-label">屏蔽</h2>
+          <div class="pc-body" id="dm-blocked"></div>
+        </div>
       </section>
-      </div>
     </div>
     <aside class="side" aria-label="分集与弹幕">
       <div class="side-tabs" role="tablist">
@@ -57,11 +66,16 @@
   </div>
 </main>
 <dialog class="dm-dialog" id="danmu-dialog" aria-labelledby="danmu-dialog-title">
-  <header class="dm-dialog-head"><h2 id="danmu-dialog-title">添加弹幕来源</h2><button class="icon-btn" id="close-danmu-search" type="button" aria-label="关闭添加来源">×</button></header>
-  <div class="dm-dialog-body">
-    <div id="danmu-search-view"><form id="danmu-search" class="dm-search"><label class="sr" for="danmu-q">作品名或视频链接</label><input id="danmu-q" type="search" name="query" required maxlength="100" placeholder="作品名、集数或视频链接"><button class="btn" type="submit">搜索</button></form><label class="dm-filter">来源类型 <select id="danmu-site"><option value="">全部来源</option><option value="bilibili">Bilibili</option><option value="bahamut">巴哈姆特</option><option value="iqiyi">爱奇艺</option><option value="youku">优酷</option><option value="tencent">腾讯视频</option></select></label><p class="dm-dialog-hint" id="danmu-results-note">本集相关视频 · 选择后核对分集</p><div id="danmu-results" class="dm-results" aria-live="polite"></div></div>
-    <div id="danmu-detail-view" hidden><button class="btn quiet" id="danmu-back" type="button">‹ 返回搜索结果</button><div id="danmu-episodes" class="dm-detail"></div></div>
+  <header class="dm-dialog-head"><button class="icon-btn" id="danmu-back" type="button" aria-label="返回搜索结果" hidden></button><h2 id="danmu-dialog-title">添加弹幕来源</h2><button class="icon-btn" id="close-danmu-search" type="button" aria-label="关闭"></button></header>
+  <div class="dm-view" id="danmu-search-view">
+    <div class="dm-tools">
+      <form id="danmu-search" class="dm-search"><label class="sr" for="danmu-q">作品名或视频链接</label><input id="danmu-q" type="search" name="query" required maxlength="100" placeholder="作品名、集数或视频链接"><button class="btn" type="submit">搜索</button></form>
+      <div class="seg dm-sites" id="danmu-site" role="group" aria-label="来源类型"><button type="button" data-site="" aria-pressed="true">全部</button><button type="button" data-site="bilibili" aria-pressed="false">B站</button><button type="button" data-site="bahamut" aria-pressed="false">巴哈</button><button type="button" data-site="iqiyi" aria-pressed="false">爱奇艺</button><button type="button" data-site="youku" aria-pressed="false">优酷</button><button type="button" data-site="tencent" aria-pressed="false">腾讯</button></div>
+    </div>
+    <p class="dm-dialog-hint" id="danmu-results-note" aria-live="polite">本集推荐</p>
+    <div id="danmu-results" class="dm-results"></div>
   </div>
+  <div class="dm-view" id="danmu-detail-view" hidden><div id="danmu-episodes" class="dm-detail"></div></div>
 </dialog>
 <div class="dm-menu" id="danmu-menu" role="menu" aria-label="弹幕操作" tabindex="-1" hidden><p id="danmu-menu-text"></p><button type="button" role="menuitem" id="danmu-block-user">屏蔽此用户</button><button type="button" role="menuitem" id="danmu-find-user" hidden>查找 B站用户</button><div class="dm-uids" id="danmu-menu-uids" hidden></div></div>
 <script src="/static/core.js?v=2"></script>
@@ -73,6 +87,6 @@
 <script src="/static/bili-uid.js?v=1"></script>
 <script src="/static/danmu-alignment.js?v=2"></script>
 <script src="/static/danmu-retry.js?v=1"></script>
-<script src="/static/watch.js?v=16"></script>
+<script src="/static/watch.js?v=17"></script>
 </body>
 </html>
