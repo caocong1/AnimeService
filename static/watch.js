@@ -120,10 +120,10 @@
   }
 
   async function mark(n, finished) {
-    await api(`/shows/${show.show.id}/watch`, { episode: n, finished });
+    const r = await api(`/shows/${show.show.id}/watch`, { episode: n, finished });
     await loadShow();
     const nx = nextEp();
-    toast(`第 ${n} 集${finished ? '已看' : '改为未看'}`, finished && nx && current()?.n === n ? { label: `播放第 ${nx.n} 集`, run: () => location.assign('/watch?media=' + nx.media) } : null);
+    toast(`第 ${n} 集${finished ? '已看' : '改为未看'}${r.state ? ' · 已设为' + STATES[r.state] : ''}`, finished && nx && current()?.n === n ? { label: `播放第 ${nx.n} 集`, run: () => location.assign('/watch?media=' + nx.media) } : null);
   }
 
   /* ---------- player ---------- */
@@ -168,6 +168,7 @@
       if (!hit) return closeMenu();
       e.preventDefault(); e.stopPropagation(); openMenu(hit, e.clientX, e.clientY);
     }, true);
+    art.controls.add({ name: 'shot', position: 'right', index: 20, html: art.icons.screenshot, tooltip: '截图', click: screenshot });
     renderDisplay();
     $('#screen').tabIndex=0;
     $('#screen').setAttribute('aria-label','视频播放器；空格播放或暂停，左右方向键或左右滑动快退快进，上下方向键增减音量，每次5%，回车切换全屏');
@@ -288,6 +289,36 @@
     if (layer) { layer.style.setProperty('--dm-font', font); layer.toggleAttribute('data-font', !!font); }
   }
   const configDisplay = patch => art?.plugins.artplayerPluginDanmuku.config(patch);
+
+  /* ---------- screenshot ---------- */
+
+  const shotStorageKey = 'fanyu-screenshot';
+  let shot = {danmu: false, subtitle: true, to: 'download', ...readSaved(shotStorageKey)};
+  function saveShot(patch) {
+    shot = {...shot, ...patch};
+    try { localStorage.setItem(shotStorageKey, JSON.stringify(shot)); } catch (_) {}
+    renderShot();
+  }
+  function renderShot() {
+    $('#shot-danmu').checked = shot.danmu; $('#shot-subtitle').checked = shot.subtitle;
+    for (const x of $('#shot-to').children) x.setAttribute('aria-pressed', String(x.dataset.to === shot.to));
+  }
+  /* Synchronous up to the clipboard write: browsers only allow it inside the click. */
+  function screenshot() {
+    if (!art) return;
+    const libass = subtitleRenderer?.renderer?.canvas, layer = art.plugins.artplayerPluginDanmuku;
+    let canvas;
+    try {
+      canvas = Screenshot.capture(art.video, {
+        layers: shot.subtitle && libass ? [libass] : [],
+        texts: [...(shot.subtitle && art.subtitle.show ? art.template.$subtitle.children : []), ...(shot.danmu && !layer.isHide ? art.template.$danmuku.children : [])],
+      });
+    } catch (e) { art.notice.show = e.message; return; }
+    const name = `${show ? `${show.show.title} 第 ${current()?.n ?? media.episode} 集` : media.name.replace(/\.[^.]+$/, '')} ${clock(art.currentTime).replace(/:/g, '-')}`;
+    const done = text => { art.notice.show = text; };
+    if (shot.to === 'clipboard' && Screenshot.canCopy()) Screenshot.copy(canvas).then(() => done('截图已复制到剪贴板'), e => done('复制失败：' + e.message));
+    else Screenshot.download(canvas, name).then(() => done(shot.to === 'clipboard' ? '浏览器不支持复制图片，已改为下载' : '截图已下载'), e => done(e.message));
+  }
 
   /* ---------- danmu list and blocking ---------- */
 
@@ -539,6 +570,7 @@
       const source=selected[Number(b.dataset.disableAlignment)];
       alignment.cancel(source); source.alignmentEnabled=false; source.alignmentStatus='disabled'; saveTiming(source); renderSelected(); return;
     }
+    if (b.dataset.to) return saveShot({to: b.dataset.to});
     if (b.dataset.site !== undefined) { for (const x of $('#danmu-site').children) x.setAttribute('aria-pressed', String(x === b)); return renderDanmuResults(); }
     if (b.dataset.anime) return act(b, async () => {
       ++danmuRev;
@@ -558,6 +590,7 @@
       case 'unmute': if (art) { art.muted = false; b.remove(); } return;
       case 'desktop': return act(b, async () => { await web(`/media/${id}/desktop`, {}); toast('已在本机播放器打开'); });
       case 'retry-danmu': return autoDanmu();
+      case 'shot': return screenshot();
       case 'danmu-display-reset': saveDisplay({fontFamily: 'default'}); configDisplay(DISPLAY_DEFAULTS); renderDisplay(); return;
       case 'tab-playlist': case 'tab-danmu-list': return selectTab(b.getAttribute('aria-controls'));
       case 'open-danmu-search': showDetail(false); $('#danmu-dialog').showModal(); $('#danmu-q').focus(); return;
@@ -648,6 +681,8 @@
   $('#dm-font-size').addEventListener('input', e => configDisplay({fontSize: Number(e.target.value)}));
   $('#dm-opacity').addEventListener('input', e => configDisplay({opacity: Number(e.target.value)}));
   $('#dm-font').addEventListener('change', e => { saveDisplay({fontFamily: e.target.value}); renderDisplay(); });
+  $('#shot-danmu').addEventListener('change', e => saveShot({danmu: e.target.checked}));
+  $('#shot-subtitle').addEventListener('change', e => saveShot({subtitle: e.target.checked}));
   const listBox = $('#danmu-list-scroll');
   let rowsFrame = 0;
   listBox.addEventListener('scroll', () => { cancelAnimationFrame(rowsFrame); rowsFrame = requestAnimationFrame(renderRows); });
@@ -678,7 +713,7 @@
   document.addEventListener('fullscreenchange', closeMenu);
   addEventListener('resize', renderRows);
   $('#close-danmu-search').innerHTML = icon('close'); $('#danmu-back').innerHTML = icon('back');
-  renderDisplay(); renderBlocked();
+  renderDisplay(); renderBlocked(); renderShot();
 
   (async () => {
     try {

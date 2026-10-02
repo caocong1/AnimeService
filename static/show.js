@@ -97,7 +97,7 @@
           <a class="crumb" href="/">${icon('back')}追番</a>
           <h1>${esc(s.title)}</h1>
           ${s.original && s.original !== s.title ? `<p class="original">${esc(s.original)}</p>` : ''}
-          <div class="facts">${s.score ? `<span>Bangumi <b>${s.score}</b></span>` : ''}${s.air_date ? `<span>${esc(s.air_date)} 首播</span>` : ''}<span>${s.total ? `共 <b>${s.total}</b> 集` : '集数未定'}</span></div>
+          <div class="facts">${s.score ? `<a class="bgm-score" href="https://bgm.tv/subject/${s.id}" target="_blank" rel="noopener" title="在 Bangumi 查看">Bangumi <b>${s.score}</b></a>` : ''}${s.air_date ? `<span>${esc(s.air_date)} 首播</span>` : ''}<span>${s.total ? `共 <b>${s.total}</b> 集` : '集数未定'}</span></div>
           <div class="tags">${(s.tags || []).slice(0, 6).map(t => `<span class="chip">${esc(t.name || t)}</span>`).join('')}</div>
         </div>
         <div class="aside">${nextState(b)}${autoDl(s, m)}</div>
@@ -156,10 +156,10 @@
     if (b.dataset.watch) return act(b, async () => {
       const n = Number(b.dataset.watch), fin = b.dataset.finished === 'true';
       epOpen = !!b.closest('.ep-fold');
-      await api(`/shows/${sid}/watch`, { episode: n, finished: fin });
+      const r = await api(`/shows/${sid}/watch`, { episode: n, finished: fin });
       await load();
       $(`[data-watch="${n}"]`)?.focus();
-      toast(`第 ${n} 集${fin ? '已看' : '改为未看'}`, { label: '撤销', run: () => act(null, async () => { await api(`/shows/${sid}/watch`, { episode: n, finished: !fin }); await load(); }) });
+      toast(`第 ${n} 集${fin ? '已看' : '改为未看'}${r.state ? ' · 已设为' + STATES[r.state] : ''}`, { label: '撤销', run: () => act(null, async () => { await api(`/shows/${sid}/watch`, { episode: n, finished: !fin }); await load(); }) });
     });
     if (b.dataset.rate) {
       const v = Number(b.dataset.rate), form = $('#feedback');

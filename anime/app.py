@@ -391,11 +391,18 @@ def create_app(db=None,engine=None,start_worker=True):
         db.event('show:'+str(sid),f'用户只读关联已有第{ep}集');return {'ok':True}
     @app.post('/api/shows/{sid}/watch')
     def watch(sid:int,p:dict):
-        show(sid);ep=int(p['episode'])
+        s=show(sid);ep=int(p['episode'])
         if not 1<=ep<=999:raise ValueError('集数超界')
+        def full():return bool(s['total']) and db.one('SELECT count(*) n FROM watches WHERE show_id=? AND finished=1 AND episode BETWEEN 1 AND ?',(sid,s['total']))['n']>=s['total']
+        before=full()
         db.execute('INSERT INTO watches(show_id,episode,finished,method,updated) VALUES(?,?,?,?,?) ON CONFLICT(show_id,episode) DO UPDATE SET finished=excluded.finished,method=excluded.method,updated=excluded.updated',(sid,ep,int(p.get('finished') is True),'manual',time.time()))
         db.execute('UPDATE shows SET watched=(SELECT count(*) FROM watches WHERE show_id=? AND finished=1) WHERE id=?',(sid,sid))
-        return {'ok':True}
+        # Only the edge of "all episodes watched" moves the tracking state, so a later manual choice sticks.
+        after=full();state=None
+        if s['selected'] and not before and after and s['state'] in ('wish','trial','watching','paused'):state='completed'
+        elif s['selected'] and before and not after and s['state']=='completed':state='watching'
+        if state:engine.state(sid,state);db.event('show:'+str(sid),f'看完全部 {s["total"]} 集，自动设为看完' if state=='completed' else '取消已看，自动恢复在追')
+        return {'ok':True,'state':state}
     @app.post('/api/player/probe')
     def probe():
         port=db.get('dandan_port',26666)

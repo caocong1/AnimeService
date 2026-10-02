@@ -49,6 +49,15 @@
           <h2 class="pc-label">屏蔽</h2>
           <div class="pc-body" id="dm-blocked"></div>
         </div>
+        <div class="pc-row">
+          <h2 class="pc-label">截图</h2>
+          <div class="pc-body pc-inline shot-opts">
+            <label class="check"><input type="checkbox" id="shot-subtitle">包含字幕</label>
+            <label class="check"><input type="checkbox" id="shot-danmu">包含弹幕</label>
+            <div class="seg" id="shot-to" role="group" aria-label="截图保存方式"><button type="button" data-to="download" aria-pressed="true">下载图片</button><button type="button" data-to="clipboard" aria-pressed="false">复制到剪贴板</button></div>
+            <button class="btn small" id="shot" type="button">截图</button>
+          </div>
+        </div>
       </section>
     </div>
     <aside class="side" aria-label="分集与弹幕">
@@ -89,6 +98,7 @@
 <script src="/static/bili-uid.js?v=1"></script>
 <script src="/static/danmu-alignment.js?v=3"></script>
 <script src="/static/danmu-retry.js?v=1"></script>
-<script src="/static/watch.js?v=19"></script>
+<script src="/static/screenshot.js?v=1"></script>
+<script src="/static/watch.js?v=20"></script>
 </body>
 </html>

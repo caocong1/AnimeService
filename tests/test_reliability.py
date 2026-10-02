@@ -41,7 +41,7 @@ def setup(tmp_path):
     db=Store(tmp_path/'data/test.db');db.upsert_subject({'id':42,'name':'Example','total_episodes':12})
     mapping={'aliases':['Example'],'season':1,'offset':0,'start':1,'end':12,'confirmed':True,'inventory_checked':True}
     db.execute("UPDATE shows SET mapping=?,selected=1,state='watching',authorized=1 WHERE id=42",(json.dumps(mapping),))
-    qb=FakeQbit();eng=Engine(db,qb,FakeSources(torrent()),tmp_path/'library');eng.check_legacy_owner=lambda sid=None:None
+    qb=FakeQbit();eng=Engine(db,qb,FakeSources(torrent()),tmp_path/'library');eng.check_legacy_owner=lambda sid=None:None;eng.catalog=Mock()
     def candidate(title='[Group] Example S01E01 [1080p][CHS]',source=1,url='https://mikanani.me/a.torrent'):
         cid=db.execute('INSERT INTO candidates(show_id,source_id,title,url,discovered) VALUES(42,?,?,?,?)',(source,title,url,time.time()))
         return db.one('SELECT * FROM candidates WHERE id=?',(cid,))
@@ -202,6 +202,22 @@ def test_api_host_csrf_watch_and_catalog_state(setup):
         assert client.post('/api/shows/42/watch',json={'episode':2,'finished':True},headers=headers).status_code==200
         assert db.show(42)['watched']==1 and not db.one('SELECT 1 FROM watches WHERE episode=1')
         assert client.post('/api/settings',json={'resolution':'720'},headers={**headers,'origin':'https://evil.example'}).status_code==403
+
+def test_watching_last_episode_completes_show_once(setup):
+    from anime.app import create_app
+    from fastapi.testclient import TestClient
+    db,q,e,c=setup;app=create_app(db,e,False)
+    with TestClient(app,base_url='http://127.0.0.1:4871') as client:
+        headers={'x-anime-token':client.get('/api/bootstrap').json()['token']}
+        watch=lambda n,f=True:client.post('/api/shows/42/watch',json={'episode':n,'finished':f},headers=headers).json()['state']
+        assert all(watch(n) is None for n in range(1,12)) and db.show(42)['state']=='watching'
+        assert watch(12)=='completed' and db.show(42)['state']=='completed'
+        assert watch(12,False)=='watching' and db.show(42)['state']=='watching'
+        assert watch(12)=='completed'
+        e.state(42,'watching')  # a manual choice after finishing sticks
+        assert watch(3) is None and db.show(42)['state']=='watching'
+        e.state(42,'dropped')
+        assert watch(12,False) is None and watch(12) is None and db.show(42)['state']=='dropped'
 
 def test_removed_confirmed_task_not_readded_on_drop_restore(setup):
     db,q,e,c=setup;e.ingest(c());h=next(iter(q.tasks));q.tasks.pop(h)
