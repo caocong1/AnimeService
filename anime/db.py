@@ -77,9 +77,9 @@ class Store:
     def show(self,sid):return self.one('SELECT * FROM shows WHERE id=?',(sid,))
     def mapping(self,sid):return json.loads(self.show(sid)['mapping'])
     def local_airings(self,sid):
-        # Catalog rows retain Bangumi numbering; consumers use the separately verified
-        # airing offset, never the release/file offset or a guessed previous-season total.
-        offset=self.mapping(sid).get('airing_offset',0)
+        # Catalog rows retain Bangumi `sort` numbering; consumers use the explicit airing offset,
+        # else Bangumi's own sort-to-ep shift, never the release/file offset or a guessed total.
+        offset=self.mapping(sid).get('airing_offset') or self.get('airing_sort_offset_'+str(sid),0)
         return [{**a,'source_episode':a['episode'],'episode':a['episode']-offset}
             for a in self.rows('SELECT * FROM airings WHERE show_id=? ORDER BY episode',(sid,))
             if a['episode']-offset>0]

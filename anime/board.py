@@ -13,7 +13,8 @@ def episode_board(db,engine,s):
     if keys:
         marks=','.join('?'*len(keys))
         progress={p['media_id']:p for p in db.rows(f'SELECT media_id,position,duration FROM web_progress WHERE media_id IN ({marks})',list(keys.values()))}
-    try:missing=set(engine.gaps(sid)['missing'])
+    # Aired-but-absent only counts as missing while the show is set to download; otherwise it is just aired.
+    try:gaps=engine.gaps(sid);missing=set(gaps['missing']) if gaps.get('active') else set()
     except Exception:missing=set()
     last=max([s['total'] or 0,*eps,*watched,*airings,*missing,0])
     out=[];next_ep=None

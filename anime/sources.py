@@ -58,6 +58,9 @@ class Catalog:
             for e in items:
                 n=e.get('sort',0)
                 if float(n).is_integer() and n>0:c.execute('INSERT OR REPLACE INTO airings VALUES(?,?,?,?)',(sid,int(n),e.get('airdate',''),e.get('name_cn') or e.get('name','')))
+        # Sequels keep the franchise-wide `sort` (S3E1 = 49); Bangumi's `ep` is the in-season number.
+        shifts={int(e['sort'])-int(e['ep']) for e in items if (e.get('sort') or 0)>0 and (e.get('ep') or 0)>0 and float(e['sort']).is_integer() and float(e['ep']).is_integer()}
+        self.db.set('airing_sort_offset_'+str(sid),shifts.pop() if len(shifts)==1 else 0)
         self.db.set('details_'+str(sid),time.time())
         return s
     def mikan_matches(self,sid):

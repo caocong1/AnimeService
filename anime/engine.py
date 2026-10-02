@@ -256,8 +256,11 @@ class Engine:
                         for c in candidates[:300]:
                             if self.stop_event.is_set():break
                             self.ingest(c)
-                if not self.db.get('details_'+str(source['show_id'])) or time.time()-self.db.get('details_'+str(source['show_id']),0)>21600:
-                    try:self.catalog.details(source['show_id'])
+            # Air dates for every tracked show, not just downloading ones, so the board can tell aired from future.
+            for show in self.db.rows("SELECT id FROM shows WHERE selected=1 AND state IN ('trial','watching','wish','paused')"):
+                if self.stop_event.is_set():break
+                if time.time()-self.db.get('details_'+str(show['id']),0)>21600:
+                    try:self.catalog.details(show['id'])
                     except Exception as e:self.db.event('airings',safe_error(e),'warning')
             if hasattr(self,'auto_tick'):self.auto_tick(force=force)
             self.db.set('heartbeat',{'time':time.time(),'phase':'idle'})

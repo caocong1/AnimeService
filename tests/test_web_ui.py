@@ -82,7 +82,9 @@ def test_airing_dates_and_gaps_share_only_explicit_airing_offset(tmp_path,mappin
     qb=Mock();engine=Engine(db,qbit=qb,library=tmp_path/'library')
     assert engine.gaps(42)['missing']==[1]
     board=episode_board(db,engine,db.show(42))
-    assert board['eps']==[{'n':1,'s':'missing'},{'n':2,'s':'future','date':'2999-01-01'}]
+    assert board['eps']==[{'n':1,'s':'aired'},{'n':2,'s':'future','date':'2999-01-01'}]
+    engine.gaps=lambda sid:{**Engine.gaps(engine,sid),'active':True}
+    assert episode_board(db,engine,db.show(42))['eps'][0]['s']=='missing'
     db.execute("INSERT INTO episodes(show_id,episode,status) VALUES(42,1,'held')")
     assert episode_board(db,engine,db.show(42))['eps'][0]['s']=='aired'
     assert not qb.mock_calls
@@ -148,3 +150,31 @@ def test_home_board_cost_does_not_grow_with_candidates(tmp_path,monkeypatch):
     assert client.get('/api/shows?scope=home').status_code==200
     # One show: a fixed number of queries, never one per candidate or per episode.
     assert opened[0]<40,opened[0]
+
+
+def test_sequel_airings_use_bangumi_season_numbering(tmp_path):
+    from anime.sources import Catalog
+    from anime.engine import Engine
+    from anime.board import episode_board
+    db=Store(tmp_path/'test.db');web=Mock()
+    eps=[{'sort':48+n,'ep':n,'airdate':'2000-01-01' if n==1 else '2999-01-01','name':f'E{n}'} for n in range(1,13)]
+    web.fetch.side_effect=[Mock(json=lambda:{'id':42,'name':'Example 第三季','total_episodes':12}),Mock(json=lambda:{'total':12,'data':eps})]
+    Catalog(db,web).details(42)
+    assert db.rows('SELECT episode FROM airings ORDER BY episode')[0]['episode']==49
+    board=episode_board(db,Engine(db,qbit=Mock(),library=tmp_path/'library'),db.show(42))['eps']
+    assert [e['n'] for e in board]==list(range(1,13))
+    assert board[0]=={'n':1,'s':'aired'} and board[1]=={'n':2,'s':'future','date':'2999-01-01'}
+    db.execute('UPDATE shows SET mapping=? WHERE id=42',(json.dumps({'airing_offset':47}),))
+    assert db.local_airings(42)[0]['episode']==2  # an explicit offset still wins
+
+
+def test_cycle_fetches_air_dates_for_tracked_shows_without_sources(tmp_path):
+    from anime.engine import Engine
+    db=Store(tmp_path/'test.db')
+    for sid,state in [(1,'wish'),(2,'completed')]:
+        db.upsert_subject({'id':sid,'name':f'Example{sid}'});db.execute('UPDATE shows SET selected=1,state=? WHERE id=?',(state,sid))
+    engine=Engine(db,qbit=Mock(),sources=Mock(),library=tmp_path/'library');engine.catalog=Mock()
+    engine.cycle()
+    engine.catalog.details.assert_called_once_with(1)
+    db.set('details_1',__import__('time').time());engine.cycle()
+    engine.catalog.details.assert_called_once_with(1)
