@@ -8,8 +8,8 @@ plugins {
 }
 
 // One version per closed loop; release.json carries it to installed boxes.
-val appVersionCode = 1
-val appVersionName = "1.0.0"
+val appVersionCode = 4
+val appVersionName = "1.0.3"
 
 val signing = Properties().apply {
     val file = rootProject.file("keystore.properties")
@@ -26,6 +26,7 @@ android {
         targetSdk = 36
         versionCode = appVersionCode
         versionName = appVersionName
+        testInstrumentationRunner = "com.fanyu.tv.player.PlayerStartupInstrumentation"
     }
 
     signingConfigs {
@@ -45,6 +46,7 @@ android {
             signingConfig = signingConfigs.findByName("release")
         }
     }
+    testBuildType = "release"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -72,6 +74,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    testImplementation("junit:junit:4.13.2")
 }
 
 // Writes build/publish/{fanyu-tv.apk,release.json}; copy both into the server's data/tv/.

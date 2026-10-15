@@ -4,11 +4,29 @@
   shell('');
   const params = new URLSearchParams(location.search), id = params.get('media');
   if (!id) return location.replace('/library');
+  // Paused/background pages also keep the old media/build alive during publication.
+  const viewingSession = crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(24)), x => x.toString(16).padStart(2, '0')).join('');
+  let viewingLeaseTimer = null;
+  const viewingLease = (closed = false) => media?.viewing_session_supported ? fetch(`/api/web/media/${id}/viewing-session`, {
+    method: 'POST', keepalive: closed,
+    headers: { 'Content-Type': 'application/json', 'X-Anime-Token': App.token },
+    body: JSON.stringify({ session: viewingSession, closed }),
+  }).catch(() => {}) : Promise.resolve();
+  window.addEventListener('pagehide', () => { clearInterval(viewingLeaseTimer); viewingLease(true); });
+  window.addEventListener('pageshow', () => {
+    clearInterval(viewingLeaseTimer);
+    viewingLease(); viewingLeaseTimer = setInterval(viewingLease, 30000);
+  });
   let played = false, art = null, media = null, show = null, lastPosition = 0, lastSave = 0, selected = [], comments = [], activeDanmu = null, danmuRev = 0, tracks = [];
   let searchRev = 0;
   let detailRev = 0;
   let resultRows = [], resultContext = '本集推荐';
+  const sourceInfoCache = new Map();
+  let infoTimer = null, infoBusy = false;
   let replaceDanmu = null;
+  let audioTracks = [], audioFingerprint = '', audioCurrent = '', audioRevision = 0, audioSwitching = false, initialMetadata = true;
+  let audioCopySupported = false;
+  const audioStorageKey = `fanyu-audio-track:${id}`;
   const sourceStorageKey = `fanyu-danmu-sources:${id}`;
   const removedStorageKey = `fanyu-danmu-removed:${id}`;
   const removedSources = new Set(Array.isArray(readSaved(removedStorageKey)) ? readSaved(removedStorageKey) : []);
@@ -130,8 +148,8 @@
 
   /* Only real playback moves the stored position; opening or leaving the page never does. */
   async function saveProgress(keepalive = false) {
-    if (!played || !art || !Number.isFinite(art.duration) || art.duration <= 0) return;
-    const delta = art.currentTime - lastPosition, playing = !art.paused && delta > 0 && delta < 35;
+    if (audioSwitching || !played || !art || !Number.isFinite(art.duration) || art.duration <= 0) return;
+    const delta = art.currentTime - lastPosition, playing = !art.video.paused && delta > 0 && delta < 35;
     lastPosition = art.currentTime;
     await fetch(`/api/web/media/${id}/progress`, {
       method: 'POST', keepalive,
@@ -142,6 +160,10 @@
 
   function desktopButton() {
     return App.local ? `<button class="btn" type="button" id="desktop">${icon('desktop')}用本机播放器打开</button>` : '';
+  }
+  function playbackFailure() {
+    const compatible = !audioCurrent && audioCopySupported && audioTracks.length;
+    screenState(`<b>浏览器无法播放这个文件</b>${compatible ? '<button class="btn" type="button" id="compat-playback">原码流兼容播放</button><span>只换封装，视频不转码；浏览器仍须支持原编码。</span>' : ''}${desktopButton()}`);
   }
 
   function openPlayer() {
@@ -169,19 +191,37 @@
       e.preventDefault(); e.stopPropagation(); openMenu(hit, e.clientX, e.clientY);
     }, true);
     art.controls.add({ name: 'shot', position: 'right', index: 20, html: art.icons.screenshot, tooltip: '截图', click: screenshot });
+    const clip = ClipExport.mount({id, player: () => art, audio: () => audioCurrent, request: (path, body) => web(path, body)});
+    art.on('destroy', () => clip.close());
+    const picture = PictureQuality.mount(art, {request: () => web(`/media/${id}/picture`),
+      select: $('#picture-mode'), note: $('#picture-note'), details: $('#picture-details')});
+    art.on('destroy', () => picture.close());
     renderDisplay();
     $('#screen').tabIndex=0;
-    $('#screen').setAttribute('aria-label','视频播放器；空格播放或暂停，左右方向键或左右滑动快退快进，上下方向键增减音量，每次5%，回车切换全屏');
+    $('#screen').setAttribute('aria-label','视频播放器；空格播放或暂停，左右方向键或左右滑动快退快进，上下方向键增减音量，全屏时可用鼠标滚轮增减音量，每次5%，回车切换全屏');
+    const adjustVolume = step => {
+      art.volume = Math.max(0, Math.min(1, Math.round((art.volume + step) * 100) / 100));
+      art.notice.show = `音量 ${Math.round(art.volume * 100)}%`;
+    };
+    // Only fullscreen owns wheel volume; inline playback must leave page scrolling alone.
+    art.template.$player.addEventListener('wheel', e => {
+      if (!art.fullscreen && !art.fullscreenWeb) return;
+      if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+      if (!Number.isFinite(e.deltaY) || !e.deltaY || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+      if (e.target.closest('input, textarea, select, button, [contenteditable], .art-settings, .art-contextmenus, #danmu-menu')) return;
+      e.preventDefault();
+      adjustVolume(e.deltaY < 0 ? 0.05 : -0.05);
+    }, {passive: false});
     // Page-wide hotkeys, unless focus sits in a control that owns these keys (buttons, fields, the danmu list, dialogs).
     document.addEventListener('keydown', e => {
       const t = e.target;
-      if(t!==document.body && !$('#screen').contains(t)) return;
+      if(t!==document.body && !$('#screen').contains(t) && !art.template.$player.contains(t)) return;
       if(t.closest('input, textarea, select, button, [contenteditable], #danmu-menu')) return;
       if(e.isComposing || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
       if(e.code==='Space') { e.preventDefault(); if(!e.repeat) art.toggle(); }
       if(e.key==='Enter') { e.preventDefault(); if(!e.repeat) art.fullscreen=!art.fullscreen; }
       if(e.key==='ArrowLeft' || e.key==='ArrowRight') { e.preventDefault(); art.currentTime=Math.max(0,Math.min(art.duration,art.currentTime+(e.key==='ArrowRight'?5:-5))); }
-      if(e.key==='ArrowUp' || e.key==='ArrowDown') { e.preventDefault(); art.volume=Math.max(0,Math.min(1,Math.round((art.volume+(e.key==='ArrowUp'?0.05:-0.05))*100)/100)); }
+      if(e.key==='ArrowUp' || e.key==='ArrowDown') { e.preventDefault(); adjustVolume(e.key==='ArrowUp'?0.05:-0.05); }
     });
     // Horizontal swipe on the video seeks in the arrow keys' 5 s steps; a full player width is 60 s. Seeks once, on release.
     let swipe = null;
@@ -205,17 +245,15 @@
     $video.addEventListener('touchend', () => { if(swipe?.on) art.currentTime = swipe.to; swipe = null; });
     $video.addEventListener('touchcancel', () => { swipe = null; });
     art.on('video:loadedmetadata', () => {
+      if (!initialMetadata || audioSwitching) return;
+      initialMetadata = false;
       applyDanmu().catch(() => {});
       if (resumable()) { art.currentTime = media.progress.position; lastPosition = art.currentTime; }
-      art.play().catch(() => {
-        art.muted = true;
-        art.play().then(() => {
-          $('#acts').insertAdjacentHTML('afterbegin', `<button class="btn" type="button" id="unmute">开声音</button>`);
-        }).catch(() => {});
-      });
+      // If audible autoplay is blocked, wait for the viewer to press play without muting.
+      art.play().catch(() => {});
     });
     art.on('video:playing', () => { played = true; });
-    art.on('video:error', () => screenState(`<b>浏览器无法播放这个文件</b>${desktopButton()}`));
+    art.on('video:error', () => { if (!audioSwitching) playbackFailure(); });
     art.on('video:timeupdate', () => { followList(); if (Date.now() - lastSave > 15000) { lastSave = Date.now(); saveProgress().catch(() => {}); } });
     art.on('video:pause', () => saveProgress().catch(() => {}));
     art.on('video:ended', () => {
@@ -228,8 +266,127 @@
     });
     addEventListener('pagehide', () => saveProgress(true).catch(() => {}));
     loadSubtitles();
+    loadAudioTracks();
     restoreDanmu();
   }
+
+  /* ---------- audio tracks ---------- */
+
+  function audioLabel(value) {
+    return audioTracks.find(t => String(t.index) === value)?.label || '文件默认';
+  }
+  function renderAudioSetting() {
+    if (audioTracks.length <= 1) {
+      if (art.setting.find('audio-track')) art.setting.remove('audio-track');
+      return;
+    }
+    const option = {
+      name: 'audio-track', html: '音轨', width: 300,
+      tooltip: audioSwitching ? '正在切换…' : esc(audioLabel(audioCurrent)),
+      selector: [{html: '文件默认', value: '', default: audioCurrent === ''},
+        ...audioTracks.map(t => ({html: esc(t.label), value: String(t.index), default: String(t.index) === audioCurrent}))],
+      onSelect: item => {
+        changeAudioTrack(item.value);
+        // Do not announce a new track before preparation and playback succeed.
+        return esc(audioLabel(audioCurrent));
+      },
+    };
+    if (art.setting.find('audio-track')) art.setting.update(option);
+    else art.setting.add(option);
+  }
+  async function loadAudioTracks() {
+    const note = $('#audio-note'), sel = $('#audio-track');
+    try {
+      const d = await web(`/media/${id}/audio-tracks`);
+      audioTracks = d.tracks; audioFingerprint = d.fingerprint;
+      audioCopySupported = d.supported;
+      $('#audio-track-row').hidden = audioTracks.length <= 1;
+      sel.innerHTML = '<option value="">文件默认</option>' + audioTracks.map(t => `<option value="${t.index}">${esc(t.label)}${t.default ? '（默认标记）' : ''}</option>`).join('');
+      sel.disabled = !d.supported || !audioTracks.length;
+      note.textContent = !audioTracks.length ? '未检测到音轨' : !d.supported ? '此视频请用本机播放器切换音轨' : '';
+      if (art.video.error && !audioSwitching) playbackFailure();
+      if (sel.disabled) return;
+      renderAudioSetting();
+      const saved = readSaved(audioStorageKey);
+      if (saved?.fingerprint === audioFingerprint && audioTracks.some(t => String(t.index) === saved.index)) {
+        await changeAudioTrack(saved.index);
+      }
+    } catch (e) { note.textContent = '音轨读取失败，可刷新重试或用本机播放器'; }
+  }
+  function loadAudioUrl(url, snapshot) {
+    return new Promise((resolve, reject) => {
+      const video = art.video;
+      const cleanup = () => { clearTimeout(timer); video.removeEventListener('loadedmetadata', metadata); video.removeEventListener('canplay', ready); video.removeEventListener('error', failed); };
+      const failed = () => { cleanup(); reject(Error('这条音轨无法在浏览器播放')); };
+      const metadata = () => {
+        initialMetadata = false;
+        art.currentTime = Math.min(snapshot.time, Math.max(0, art.duration - 0.1));
+        art.playbackRate = snapshot.rate;
+        art.volume = snapshot.volume; art.muted = snapshot.muted;
+      };
+      const ready = () => { cleanup(); resolve(); };
+      const timer = setTimeout(() => { cleanup(); reject(Error('音轨加载超时，请重试')); }, 30000);
+      video.addEventListener('loadedmetadata', metadata);
+      video.addEventListener('canplay', ready);
+      video.addEventListener('error', failed);
+      art.type = url.endsWith('/stream') && !url.includes('/audio-tracks/') ? (media.name.toLowerCase().endsWith('.mp4') ? 'mp4' : 'mkv') : 'mp4';
+      art.url = url;
+    });
+  }
+  async function changeAudioTrack(value) {
+    value = String(value);
+    if (!art || audioSwitching) return;
+    if (value && !audioTracks.some(t => String(t.index) === value)) return;
+    const rev = ++audioRevision, sel = $('#audio-track'), note = $('#audio-note');
+    sel.value = audioCurrent;
+    if (value === audioCurrent) { note.textContent = ''; renderAudioSetting(); return; }
+    // Preparation leaves the original playback available; a later selection supersedes it.
+    try {
+      if (value) {
+        note.textContent = `正在准备${audioLabel(value)}，当前播放可继续…`;
+        art.notice.show = '正在准备音轨…';
+        let state = await web(`/media/${id}/audio-tracks/${value}/prepare`, {});
+        const deadline = Date.now() + 1250000;
+        while (state.state === 'preparing' && rev === audioRevision && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          if (rev !== audioRevision) return;
+          state = await web(`/media/${id}/audio-tracks/${value}`);
+        }
+        if (rev !== audioRevision) return;
+        if (state.state !== 'ready') throw Error(state.message || '音轨尚未准备好，请重试');
+      }
+      if (rev !== audioRevision) return;
+      const snapshot = {time: initialMetadata ? (media.progress?.position || 0) : art.currentTime, rate: art.playbackRate,
+        volume: art.volume, muted: art.muted, paused: art.video.paused, url: art.url};
+      audioSwitching = true; sel.disabled = true;
+      note.textContent = '正在切换音轨…'; art.pause();
+      try {
+        await loadAudioUrl(value ? `/api/web/media/${id}/audio-tracks/${value}/stream` : `/api/web/media/${id}/stream`, snapshot);
+      } catch (e) {
+        await loadAudioUrl(snapshot.url, snapshot).catch(() => {
+          playbackFailure();
+        });
+        if (!snapshot.paused) art.play().catch(() => {});
+        throw e;
+      }
+      audioCurrent = value; sel.value = value;
+      lastPosition = art.currentTime;
+      screenState('');
+      await changeSubtitle().catch(() => {}); await applyDanmu().catch(() => {});
+      note.textContent = '';
+      if (!snapshot.paused) {
+        try { await art.play(); } catch (_) { note.textContent = '音轨已切换，点击播放继续'; }
+      }
+      try { localStorage.setItem(audioStorageKey, JSON.stringify({index: value, fingerprint: audioFingerprint})); }
+      catch (_) { note.textContent = '音轨已切换，但浏览器未能保存选择'; }
+      art.notice.show = `音轨：${audioLabel(value)}`;
+    } catch (e) {
+      if (rev === audioRevision) { note.textContent = e.message; art.notice.show = e.message; }
+    } finally {
+      if (rev === audioRevision) { audioSwitching = false; sel.disabled = false; sel.value = audioCurrent; renderAudioSetting(); }
+    }
+  }
+  addEventListener('pagehide', () => { ++audioRevision; });
 
   /* ---------- subtitles ---------- */
 
@@ -238,17 +395,24 @@
     try {
       const d = await web(`/media/${id}/subtitles`);
       tracks = d.tracks;
+      $('#subtitle-row').hidden = false;
       sel.innerHTML = '<option value="">关闭</option>' + d.tracks.map(t => `<option value="${t.index}"${t.supported ? '' : ' disabled'}>${esc(t.label)}${t.supported ? '' : '（图形字幕）'}</option>`).join('');
       sel.disabled = !d.tracks.some(t => t.supported);
-      note.textContent = d.tracks.length ? '' : '无内嵌字幕';
+      note.textContent = d.tracks.length ? '' : '未发现可关闭字幕轨；画面硬字幕尚未核验';
+      $('#playing-subtitle').textContent = d.tracks.length ? '可关闭字幕已关闭；画面硬字幕不受此开关影响' : '未加载外挂或内嵌字幕；画面硬字幕尚未核验';
       if (d.default !== null) { sel.value = String(d.default); await changeSubtitle(); }
-    } catch (e) { note.textContent = e.message; }
+    } catch (e) { note.textContent = e.message; $('#playing-subtitle').textContent = '字幕信息读取失败 · ' + e.message; $('#subtitle-row').hidden = false; }
   }
   let subtitleRenderer = null;
   async function changeSubtitle() {
     const value = $('#subtitle').value, note = $('#sub-note');
     if (!art) return;
-    subtitleRenderer ??= new SubtitleRenderer(art, note, `/api/web/media/${id}/subtitle-fonts`);
+    subtitleRenderer ??= new SubtitleRenderer(art, note, `/api/web/media/${id}/subtitle-fonts`, ({status,track}) => {
+      const source = track?.origin === 'authored' ? '系统自制' : track?.origin === 'embedded' ? '视频自带 · 内嵌软字幕' : track?.origin === 'sidecar' ? '发布包外挂字幕' : '来源未核实';
+      const label = track?.label.replace(/^系统自制\s*·\s*/, '');
+      const file = track?.origin === 'embedded' ? '轨道 ' + track.index : track?.file_name;
+      $('#playing-subtitle').textContent = status === 'off' ? '可关闭字幕已关闭；画面硬字幕不受此开关影响' : `${source} · ${label}${file ? ' · ' + file : ''}${track.build_id ? ' · 版本 ' + track.build_id : ''} · ${{loading:'加载中',active:'正在使用',error:'加载失败'}[status]}`;
+    });
     await subtitleRenderer.select(value === '' ? null : tracks.find(x => String(x.index) === value));
   }
 
@@ -443,7 +607,7 @@
       ].join('');
       return `<article class="dm-source"><span class="dm-mark" aria-hidden="true">${p.mark}</span>
       <div class="dm-info"><div class="dm-line"><b class="dm-name">${p.name}</b><span class="dm-meta" data-state="${x.error ? 'error' : x.count > 0 ? 'ok' : ''}">${status}</span>${!x.loading && (x.error || !x.count) ? `<button class="dm-act" data-reload-source="${i}" type="button">${x.error ? '重试' : '刷新'}</button>` : ''}</div>
-      <p class="dm-title" title="${esc(cleanTitle(x.title))}">${esc(cleanTitle(x.title))}</p><div class="dm-acts">${acts}</div></div>
+      <p class="dm-title" title="${esc(cleanTitle(x.title))}">${esc(cleanTitle(x.title))}${x.uploader ? ` · UP主 ${esc(x.uploader)}` : ''}</p><div class="dm-acts">${acts}</div></div>
       <div class="dm-timing"><div class="dm-stepper"><button type="button" data-nudge="${i}" data-delta="-1" aria-label="${p.name} 提前1秒">提前</button><label class="dm-value"><input type="number" min="-3600" max="3600" step="0.1" data-timing="${i}" data-field="offset" value="${x.offset || 0}" aria-label="${p.name} 偏移秒数"><span>秒</span></label><button type="button" data-nudge="${i}" data-delta="1" aria-label="${p.name} 延后1秒">延后</button></div>${alignStatus ? `<p class="dm-alignment" role="status" data-state="${x.alignmentStatus === 'matched' && !x.alignmentManual && x.alignmentEnabled !== false ? 'ok' : ''}">${esc(alignStatus)}</p>` : ''}</div></article>`;
     }).join('') || '<p class="dm-empty">还没有弹幕来源。</p>';
   }
@@ -469,14 +633,15 @@
   const chosenEpisode = () => activeDanmu?.episodes?.[Number($('#danmu-episodes input[name="danmu-ep"]:checked')?.value)];
   function renderDanmuDetail(d) {
     activeDanmu = d.bangumi;
+    activeDanmu.uploader ||= resultRows.find(x => String(x.animeId) === String(activeDanmu.animeId))?.uploader || '';
     showDetail(true, '选择分集');
     const episodes=activeDanmu.episodes || [], ugc=activeDanmu.type?.includes('B站视频');
     const here=ugc ? -1 : episodes.findIndex(x=>x.source_key&&Number(x.episodeNumber)===media.episode);
     const preferred=episodes.findIndex(x=>x.source_key&&x.url===activeDanmu.preferred_url);
     const pick=preferred>=0 ? preferred : here>=0 ? here : episodes.findIndex(x=>x.source_key);
     const p=sourceLabel(siteOf(activeDanmu) || activeDanmu.animeTitle);
-    $('#danmu-episodes').innerHTML = `<div class="dm-detail-head"><span class="dm-mark" aria-hidden="true">${p.mark}</span><div><h3>${esc(cleanTitle(activeDanmu.animeTitle))}</h3><small>${p.name} · ${episodes.length} ${ugc ? '个分P · 请核对版本与集数' : '集'}</small></div></div>${episodes.length
-      ? `<div class="dm-eps" role="radiogroup" aria-label="分集">${episodes.map((x, i) => `<label class="dm-ep"><input type="radio" name="danmu-ep" value="${i}"${x.source_key ? '' : ' disabled'}${i === pick ? ' checked' : ''}><span>${esc(cleanTitle(x.episodeTitle))}</span>${i === here ? '<em>本集</em>' : ''}</label>`).join('')}</div><footer class="dm-detail-foot"><span id="danmu-episode-link"></span><button class="btn primary" type="button" id="add-source"${pick < 0 ? ' disabled' : ''}>添加</button></footer>`
+    $('#danmu-episodes').innerHTML = `<div class="dm-detail-head"><span class="dm-mark" aria-hidden="true">${p.mark}</span><div><h3>${esc(cleanTitle(activeDanmu.animeTitle))}</h3><small>${p.name} · ${episodes.length} ${ugc ? '个分P · 请核对版本与集数' : '集'}</small><small id="danmu-uploader">${activeDanmu.uploader ? `UP主 ${esc(activeDanmu.uploader)}` : ''}</small></div></div>${episodes.length
+      ? `<div class="dm-eps" role="radiogroup" aria-label="分集">${episodes.map((x, i) => `<label class="dm-ep"><input type="radio" name="danmu-ep" value="${i}"${x.source_key ? '' : ' disabled'}${i === pick ? ' checked' : ''}><span>${esc(cleanTitle(x.episodeTitle))}</span>${i === here ? '<em>本集</em>' : ''}</label>`).join('')}</div><footer class="dm-detail-foot"><div><span id="danmu-episode-link"></span><small id="danmu-source-info" aria-live="polite"></small></div><button class="btn primary" type="button" id="add-source"${pick < 0 ? ' disabled' : ''}>添加</button></footer>`
       : '<p class="dm-empty">此来源暂时没有可用分集。</p>'}`;
     const list=$('#danmu-episodes .dm-eps'), chosen=$('#danmu-episodes input:checked')?.closest('label');
     if (list && chosen) list.scrollTop = chosen.offsetTop - (list.clientHeight - chosen.offsetHeight) / 2;
@@ -490,6 +655,57 @@
   function updateEpisodeLink() {
     const box = $('#danmu-episode-link');
     if (box) box.innerHTML = sourceLink(chosenEpisode()?.source_url, '此集原站');
+    const ep = chosenEpisode(), button = $('#add-source'), info = $('#danmu-source-info');
+    const existing = ep && selected.find(x => x.source_identity === ep.source_identity);
+    if (button) { button.disabled = !ep?.source_key || !!existing; button.textContent = existing ? '已添加' : '添加'; }
+    clearTimeout(infoTimer);
+    if (!info) return;
+    if (existing && typeof existing.count === 'number' && !existing.error && !existing.loading) {
+      info.textContent = `已加载 ${existing.count} 条弹幕`; return;
+    }
+    if (ep?.site !== 'bilibili' || !ep.source_key) { info.textContent = ''; return; }
+    const cached = sourceInfoCache.get(ep.source_identity);
+    if (cached && cached.expires > Date.now()) { showSourceInfo(ep, cached.data); return; }
+    info.textContent = '正在查询弹幕数量…';
+    infoTimer = setTimeout(queryChosenSourceInfo, 300);
+  }
+  function showSourceInfo(ep, data) {
+    rememberUploader(ep, data);
+    if (data.uploader) {
+      const uploader = $('#danmu-uploader');
+      if (uploader) uploader.textContent = `UP主 ${data.uploader}`;
+    }
+    const info = $('#danmu-source-info');
+    if (info) info.textContent = Number.isInteger(data.count) && data.count >= 0
+      ? `B站弹幕 ${data.count.toLocaleString()} 条${data.count === 0 ? ' · 暂无弹幕' : ''}`
+      : '数量暂不可用，可添加后查看实际加载条数';
+  }
+  function rememberUploader(ep, data) {
+    if (!data.uploader) return;
+    ep.uploader = data.uploader;
+    const source = selected.find(x => x.source_identity === ep.source_identity);
+    if (source && source.uploader !== data.uploader) {
+      source.uploader = data.uploader; saveSources(); renderSelected();
+    }
+  }
+  async function queryChosenSourceInfo() {
+    if (infoBusy || $('#danmu-detail-view').hidden || !$('#danmu-dialog').open) return;
+    const ep = chosenEpisode(), rev = detailRev;
+    if (ep?.site !== 'bilibili' || !ep.source_key) return;
+    infoBusy = true;
+    try {
+      let data;
+      try { data = await api('/web/danmu/source/' + encodeURIComponent(ep.source_key) + '/info'); }
+      catch (_) { data = {count: null}; }
+      if (sourceInfoCache.size >= 100) sourceInfoCache.delete(sourceInfoCache.keys().next().value);
+      sourceInfoCache.set(ep.source_identity, {data, expires: Date.now() + (data.count === null ? 30000 : 600000)});
+      rememberUploader(ep, data);
+      if (rev === detailRev && ep === chosenEpisode() && $('#danmu-dialog').open) showSourceInfo(ep, data);
+    } finally {
+      infoBusy = false;
+      // Rapid selection changes queue only the latest part, never every intermediate part.
+      if (rev !== detailRev || ep !== chosenEpisode()) updateEpisodeLink();
+    }
   }
   function renderDanmuResults(rows = resultRows, context = resultContext) {
     resultRows = rows; resultContext = context;
@@ -501,7 +717,7 @@
     }
     const shown = rows.filter(x => !site || siteOf(x) === site);
     $('#danmu-results-note').textContent = `${context} · ${shown.length} 个`;
-    $('#danmu-results').innerHTML = shown.map(x => { const p=sourceLabel(siteOf(x) || x.animeTitle); return `<div class="dm-result-row"><button class="dm-result" type="button" data-anime="${esc(x.animeId)}"><span class="dm-mark" aria-hidden="true">${p.mark}</span><span><b>${esc(cleanTitle(x.animeTitle))}</b><small>${p.name} · ${x.episodeCount ?? '—'} ${x.type?.includes('B站视频') ? '个分P' : '集'}</small></span>${icon('chevron')}</button>${sourceLink(x.source_url)}</div>`; }).join('') || `<p class="dm-empty">${rows.length && site ? '这类来源没有结果。' : '没有找到相关结果。B站标题搜索受收录限制，可用网址或 BV号直达查询。'}</p>`;
+    $('#danmu-results').innerHTML = shown.map(x => { const p=sourceLabel(siteOf(x) || x.animeTitle); return `<div class="dm-result-row"><button class="dm-result" type="button" data-anime="${esc(x.animeId)}"><span class="dm-mark" aria-hidden="true">${p.mark}</span><span><b>${esc(cleanTitle(x.animeTitle))}</b><small>${p.name} · ${x.episodeCount ?? '—'} ${x.type?.includes('B站视频') ? '个分P' : '集'}${x.uploader ? ` · UP主 ${esc(x.uploader)}` : ''}${Number.isInteger(x.danmaku_total) && x.danmaku_total >= 0 ? ` · 视频总弹幕 ${x.danmaku_total.toLocaleString()} 条` : ''}</small></span>${icon('chevron')}</button>${sourceLink(x.source_url)}</div>`; }).join('') || `<p class="dm-empty">${rows.length && site ? '这类来源没有结果。' : '没有找到相关结果。B站标题搜索受收录限制，可用网址或 BV号直达查询。'}</p>`;
   }
   async function loadSource(source) {
     source.loading=true; source.error=null; renderSelected();
@@ -510,7 +726,7 @@
       if (!selected.includes(source)) return;
       Object.assign(source, d.sources[0]);
     } catch(e) { if (selected.includes(source)) { source.error=e.message; source.comments=[]; } }
-    finally { source.loading=false; if (selected.includes(source)) { renderSelected(); await applyDanmu(); alignSource(source,{confirmed:source.alignmentConfirmed === true}); } }
+    finally { source.loading=false; if (selected.includes(source)) { renderSelected(); updateEpisodeLink(); await applyDanmu(); alignSource(source,{confirmed:source.alignmentConfirmed === true}); } }
   }
   function closeSourceDialog() { ++detailRev; ++searchRev; $('#danmu-dialog').close(); }
   async function restoreDanmu() {
@@ -587,8 +803,12 @@
     switch (b.id) {
       case 'dismiss': return screenState('');
       case 'restart': if (art) { art.currentTime = 0; art.play(); b.remove(); } return;
-      case 'unmute': if (art) { art.muted = false; b.remove(); } return;
       case 'desktop': return act(b, async () => { await web(`/media/${id}/desktop`, {}); toast('已在本机播放器打开'); });
+      case 'compat-playback': return act(b, async () => {
+        const track = audioTracks.find(t => t.default) || audioTracks[0];
+        if (!audioCopySupported || !track) return;
+        await changeAudioTrack(String(track.index));
+      });
       case 'retry-danmu': return autoDanmu();
       case 'shot': return screenshot();
       case 'danmu-display-reset': saveDisplay({fontFamily: 'default'}); configDisplay(DISPLAY_DEFAULTS); renderDisplay(); return;
@@ -600,11 +820,11 @@
         const ep = chosenEpisode();
         if (!ep?.source_key) return toast('这一集不能直接加载');
         const existing=selected.find(x=>x.source_identity===ep.source_identity);
-        if(existing) { closeSourceDialog(); return toast('这个来源已经在使用'); }
+        if(existing) return toast('这个来源已经在使用');
         if (selected.length >= 5) return toast('最多使用 5 个来源，先移除一个再添加');
         ++danmuRev;
-        const source=restoreTiming({ id: ep.source_key, source_identity: ep.source_identity, source_url: ep.source_url, site: ep.site, title: activeDanmu.animeTitle + ' · ' + ep.episodeTitle });
-        removedSources.delete(source.source_identity); saveRemoved(); source.alignmentConfirmed=true; selected.push(source); saveSources(); closeSourceDialog(); return loadSource(source);
+        const source=restoreTiming({ id: ep.source_key, source_identity: ep.source_identity, source_url: ep.source_url, site: ep.site, uploader: ep.uploader || activeDanmu.uploader || '', title: activeDanmu.animeTitle + ' · ' + ep.episodeTitle });
+        removedSources.delete(source.source_identity); saveRemoved(); source.alignmentConfirmed=true; selected.push(source); saveSources(); updateEpisodeLink(); toast('已添加，可以继续选择其他来源'); return loadSource(source);
       }
       case 'load-danmu': return act(b, async () => {
         const rev = ++danmuRev, sources = [...selected];
@@ -620,6 +840,7 @@
     }
   });
   $('#subtitle').addEventListener('change', changeSubtitle);
+  $('#audio-track').addEventListener('change', e => changeAudioTrack(e.target.value));
   $('#danmu-dialog').addEventListener('cancel', () => { ++detailRev; });
   $('#danmu-dialog').addEventListener('keydown', e => { if(e.key==='Escape' && !e.isComposing) { e.preventDefault(); e.stopPropagation(); closeSourceDialog(); } });
   $('#danmu-dialog').addEventListener('close', () => $('#open-danmu-search').focus());
@@ -719,6 +940,9 @@
     try {
       await boot();
       media = await web('/media/' + id);
+      viewingLease();
+      $('#playing-file').textContent = media.name;
+      if (media.show_id) $('#playing-subtitle-library').href = '/subtitle-library?show=' + media.show_id;
       $('#danmu-q').value = media.show_id ? '' : media.folder;
       openPlayer();
       if (media.show_id) { await loadShow(); $('#danmu-q').value = show.show.title; } else await loadFolder();

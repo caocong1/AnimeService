@@ -30,10 +30,29 @@ class Cleanup:
             if p.absolute()!=resolved or any(x.is_symlink() or (hasattr(x,'is_junction') and x.is_junction()) for x in [p,*p.parents] if x!=root.parent):raise ValueError('链接路径不能自动清理')
             if not p.is_file() or p.stat().st_size!=e['size']:raise ValueError('文件已变化，请重新核查')
             st=p.stat();files.append({'path':str(resolved),'size':st.st_size,'mtime_ns':st.st_mtime_ns,'episode':e['episode']});hashes.add(e['hash'])
+            from .browser_media import BrowserMedia
+            from .subtitles import Subtitles
+            cache=BrowserMedia(Subtitles(self.db));preview=cache.cached(e)
+            if preview and preview.resolve().is_relative_to(cache.root.resolve()):
+                st=preview.stat();files.append({'path':str(preview.resolve()),'size':st.st_size,'mtime_ns':st.st_mtime_ns,'episode':0,'preview_cache':True})
         core={'id':sid,'state':s['state'],'activity':activity,'files':files,'hashes':sorted(hashes)}
         for h in sorted(hashes):
             task=self.db.one('SELECT * FROM tasks WHERE hash=?',(h,))
-            if task.get('provider')!='thunder':continue
+            if task.get('provider')!='thunder':
+                aliases=[self.db.get(r['key']) for r in self.db.rows("SELECT key FROM kv WHERE key LIKE ?",('qbit_file_alias_'+h+'_%',))]
+                if not aliases:continue
+                rows=self.engine.qb.info(h)
+                if not rows or not self.engine.qb.owned(rows[0]) or Path(rows[0]['save_path']).resolve()!=Path(task['save_path']).resolve():raise ValueError('qB归库链接任务所有权已变化')
+                self.engine.verify_qbit_files(task,self.engine.qb.files(h))
+                for alias in aliases:
+                    source=Path(alias['source']).resolve();target=Path(alias['path']).resolve()
+                    if not source.is_relative_to(self.engine.incomplete.parent.resolve()) or not target.is_relative_to(root):raise ValueError('qB归库链接路径越界')
+                    if not any(x['path']==str(target) for x in files):continue
+                    if not source.is_file() or source.stat().st_size!=alias['size'] or not os.path.samefile(source,target):raise ValueError('qB归库链接已变化')
+                    if any(x.is_symlink() or (hasattr(x,'is_junction') and x.is_junction()) for x in [source,*source.parents]):raise ValueError('链接路径不能自动清理')
+                    if not any(x['path']==str(source) for x in files):
+                        st=source.stat();files.append({'path':str(source),'size':st.st_size,'mtime_ns':st.st_mtime_ns,'episode':0,'hardlink':True})
+                continue
             observed=self.engine.thunder.inspect(task)
             if not observed or not observed['verified_complete']:raise ValueError('迅雷尚未核验全部选中文件完成')
             stage=Path(task['staging_path']).resolve();dest=Path(task['save_path']).resolve()

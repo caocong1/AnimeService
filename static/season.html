@@ -12,18 +12,29 @@
 <script src="/static/theme.js"></script>
 </head>
 <body>
-<main id="main">
-  <header class="page-head"><h1>新番</h1><p class="meta" id="summary"></p>
-    <div class="tools"><button class="btn small quiet" type="button" id="sync"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/></svg>刷新目录</button></div>
-  </header>
-  <nav class="tabs-local" id="quarters" aria-label="季度"></nav>
-  <div class="season-tools">
-    <label class="search"><span class="sr">搜索新番</span><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input id="q" type="search" placeholder="中文名或原名" autocomplete="off"></label>
-    <label><span class="sr">范围</span><select id="kind"><option value="series">TV · 网络</option><option value="all">含电影</option><option value="uncertain">含待核实</option></select></label>
-    <label><span class="sr">排序</span><select id="sort"><option value="air">按首播</option><option value="score">按评分</option></select></label>
-    <div class="seg" role="group" aria-label="视图"><button type="button" data-view="grid" aria-pressed="true">封面</button><button type="button" data-view="week" aria-pressed="false">按星期</button></div>
+<main id="main" class="discovery-page">
+  <header class="page-head"><h1>新番</h1><p class="meta">找一部想看的动画，不必先选季度</p><div class="tools"><button class="btn small quiet" type="button" id="sync">刷新目录</button></div></header>
+  <section class="discover-search" aria-label="查找动画">
+    <form id="search-form" class="discover-search-row">
+      <label class="search"><span class="sr">搜索动画作品名</span><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input id="q" type="search" placeholder="搜索作品名，例如：柯南、夏目友人帐" autocomplete="off" maxlength="100" aria-describedby="search-hint"></label>
+      <button class="btn primary" type="submit" id="online-search">搜索 Bangumi</button>
+    </form>
+    <p class="meta" id="search-hint">输入名称筛选已收录作品；在 Bangumi 查找还未收录的剧场版、OVA 和旧番。</p>
+  </section>
+  <nav class="tabs-local discover-types" aria-label="作品类型" id="types">
+    <button type="button" data-kind="all">全部作品</button><button type="button" data-kind="tv">TV 动画</button><button type="button" data-kind="web">网络动画</button><button type="button" data-kind="movie">剧场版</button><button type="button" data-kind="ova">OVA / OAD</button><button type="button" data-kind="continuing">跨季续播</button>
+  </nav>
+  <div class="season-tools discover-filters">
+    <div class="seg" role="group" aria-label="目录来源"><button type="button" data-source="local">已收录</button><button type="button" data-source="online">Bangumi 全站</button></div>
+    <label class="discover-field"><span>年份</span><select id="year"><option value="">全部年份</option></select></label>
+    <label class="discover-field" id="quarter-field"><span>季度</span><select id="quarter"><option value="">不限季度</option></select></label>
+    <label class="discover-field"><span>排序</span><select id="sort"><option value="recent">最新首播</option><option value="air">最早首播</option><option value="score">评分优先</option></select></label>
+    <label class="discover-unknown"><input id="unknown" type="checkbox">含地区待核实</label>
+    <button class="btn small quiet" type="button" id="reset">重置筛选</button>
   </div>
-  <div id="list"><div class="posters"><div class="skeleton" style="aspect-ratio:3/4"></div><div class="skeleton" style="aspect-ratio:3/4"></div><div class="skeleton" style="aspect-ratio:3/4"></div></div></div>
+  <div class="discover-results"><p class="meta" id="summary" role="status" aria-live="polite"></p><div class="seg" role="group" aria-label="视图"><button type="button" data-view="grid" aria-pressed="true">封面</button><button type="button" data-view="week" aria-pressed="false">按星期</button></div></div>
+  <div id="list" aria-busy="true"><div class="posters"><div class="skeleton" style="aspect-ratio:3/4"></div><div class="skeleton" style="aspect-ratio:3/4"></div></div></div>
+  <div id="paging" class="discover-paging"></div>
 </main>
 <script src="/static/core.js?v=2"></script>
 <script src="/static/season.js"></script>

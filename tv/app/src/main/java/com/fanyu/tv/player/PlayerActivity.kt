@@ -3,6 +3,8 @@ package com.fanyu.tv.player
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.SystemClock
+import android.util.Log
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -23,7 +25,9 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
-import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -84,6 +88,7 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var player: ExoPlayer
     private lateinit var danmaku: DanmakuView
     private lateinit var playerView: PlayerView
+    private lateinit var bufferPolicy: AdaptiveBufferPolicy
     private var showId = 0
     private var media: String? = null
     private var played = false
@@ -101,11 +106,25 @@ class PlayerActivity : ComponentActivity() {
         ui.settings = app.prefs.danmu
 
         val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(true)
-        // A remote box streams over the home uplink; a deeper buffer rides out its dips.
-        val loadControl = DefaultLoadControl.Builder().setBufferDurationsMs(30_000, 120_000, 2_500, 5_000).build()
+        val maxHeapBytes = Runtime.getRuntime().maxMemory()
+        bufferPolicy = AdaptiveBufferPolicy(maxHeapBytes)
+        val transfers = PlaybackTransferEstimator { bytes, elapsed, at -> bufferPolicy.recordTransfer(bytes, elapsed, at) }
+        val videoDataSource = OkHttpDataSource.Factory(app.api.client).setTransferListener(object : TransferListener {
+            override fun onTransferInitializing(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) = Unit
+            override fun onTransferStart(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {
+                if (isNetwork) transfers.transferStarted(SystemClock.elapsedRealtime())
+            }
+            override fun onBytesTransferred(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean, bytesTransferred: Int) {
+                if (isNetwork) transfers.bytesTransferred(bytesTransferred, SystemClock.elapsedRealtime())
+            }
+            override fun onTransferEnd(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {
+                if (isNetwork) transfers.transferEnded(SystemClock.elapsedRealtime())
+            }
+        })
+        Log.i("FanyuPlayback", "heapLimitBytes=$maxHeapBytes bufferTargetBytes=${bufferPolicy.hardTargetBytes}")
         player = ExoPlayer.Builder(this, renderers)
-            .setLoadControl(loadControl)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(app.api.client)))
+            .setLoadControl(AdaptiveLoadControl(bufferPolicy, transfers))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(videoDataSource))
             .build()
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setPreferredTextLanguages("zh", "chi", "zho")
@@ -146,9 +165,19 @@ class PlayerActivity : ComponentActivity() {
         load()
         lifecycleScope.launch {
             var ticks = 0
+            var lastBufferSettings: AdaptiveBufferPolicy.Settings? = null
             while (true) {
                 ui.position = player.currentPosition.coerceAtLeast(0)
                 ui.duration = player.duration.takeIf { it != MediaC.TIME_UNSET } ?: 0L
+                bufferPolicy.setMediaDuration(ui.duration)
+                val runtime = Runtime.getRuntime()
+                val bufferSettings = bufferPolicy.settings(SystemClock.elapsedRealtime(),
+                    runtime.totalMemory() - runtime.freeMemory(), player.playbackParameters.speed)
+                if (bufferSettings != lastBufferSettings) {
+                    Log.i("FanyuPlayback", "bufferMode=${bufferSettings.mode} bufferTargetBytes=${bufferSettings.targetBytes}" +
+                        " startMs=${bufferSettings.window.startMs} resumeMs=${bufferSettings.window.resumeMs}")
+                    lastBufferSettings = bufferSettings
+                }
                 delay(500)
                 if (++ticks % 30 == 0 && player.isPlaying) saveProgress()
             }
@@ -165,6 +194,7 @@ class PlayerActivity : ComponentActivity() {
             ui.globalOffset = app.prefs.globalOffset(id)
             danmaku.offsetMillis = (ui.globalOffset * 1000).toLong()
             val item = app.api.getObject("/api/web/media/$id")
+            bufferPolicy.setMediaSize(item.optLong("size", 0))
             val progress = item.optJSONObject("progress")
             val pos = progress?.optDouble("position", 0.0) ?: 0.0
             val dur = progress?.optDouble("duration", 0.0) ?: 0.0
@@ -273,6 +303,10 @@ class PlayerActivity : ComponentActivity() {
 
         override fun onPlayerError(error: PlaybackException) {
             saveProgress()
+            val runtime = Runtime.getRuntime()
+            // Exception messages/stack traces can include private stream URLs or headers.
+            Log.e("FanyuPlayback", "errorCode=${error.errorCode} causeType=${error.cause?.javaClass?.simpleName}" +
+                " heapUsedBytes=${runtime.totalMemory() - runtime.freeMemory()} heapLimitBytes=${runtime.maxMemory()}")
             fail(when (error.errorCode) {
                 in 4000..4999 -> "这台盒子无法解码这个视频（${error.errorCodeName}）"
                 in 2000..2999 -> "视频传输中断，检查网络后重试"
@@ -403,6 +437,7 @@ class PlayerActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         danmuJob?.cancel()
+        playerView.player = null
         player.removeListener(listener)
         player.release()
     }

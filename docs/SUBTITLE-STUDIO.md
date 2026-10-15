@@ -1,0 +1,21 @@
+> 2026-10-15 文档整理：本文保留按日期演进的设计与实现记录。当前执行以 [项目规则](PROJECT-RULES.md)、[两阶段制作](SUBTITLE-TWO-PASS.md) 和 [定时任务](AUTOMATION.md) 为准；旧 accepted 前置、已看 experience、迅雷优先/UI heartbeat 或历史周期不自动恢复。
+
+# Episode subtitle studio
+
+The separately maintained `D:/SubtitleSkillLab` owns research, skill and authoring tools. AnimeService owns private media identity, current personal intent and downloader/blacklist gates. Set `subtitle_studio_enabled` only after installing and validating the lab. No cloud model key or audio upload is needed.
+
+`/subtitle-studio` and `GET /api/subtitle-studio` show per-episode native/estimated drafts and editorial jobs. Original subtitles are stored unchanged under `data/subtitle-studio/bases`; raw, normalized text and media fingerprints remain separate. Source discoveries are recorded per episode, including groups that first appear later. New drafts refresh candidates and preserve edited cues, previous workbooks and accepted builds.
+
+Only the existing personally selected, authorized new-series source-review cohort participates. First-episode candidates reuse protected `source_samples`; later research uses `subtitle_sample` tasks and `subtitle_samples`, without reserving ordinary episodes or setting watched flags. Submit, claim, preflight, qB handoff and completion share current intent, mapping, publisher exclusions and actual episode bounds. Reuse existing hashes/completed files; uncertain or outside tasks are not adopted/retried. Each episode is bounded to twelve research families and 20 GiB; a cycle bounds network attempts and backs off when the configured downloader is unavailable. Current downloader preference is respected; no automatic GUI launch/switch.
+
+The explicit `scripts/seed_subtitle_studio.py --enable` makes an online SQLite backup and archives already verified completed media only. It does not call discovery, cycle, dispatch, maintenance, reconciliation or download submission. OCR stays estimated. Japanese language is based on verified language information, never Han-character counting. Original sidecar bytes and their completion manifest are retained; missing language is a review task.
+
+The lab's optional Python 3.11 ASR environment is separate from AnimeService. `SubtitleStudio.transcribe` requires independently identified Japanese audio, uses local cached weights and marks output unreviewed/estimated. Use a short trial first. It does not turn ASR probability into a translation score. The normal archival worker does not start repeated whole-episode transcription; the editorial heartbeat schedules needed work and persists decisions.
+
+A workbook binds to one work/season/episode, archived Chinese base and exact video fingerprint. Other/estimated media timelines need inspected piecewise mappings. Every final cue has actual Japanese provenance, Chinese decision/reason and coverage links. Screen text has frame/position evidence. `compile` emits immutable bilingual ASS, static ASS, VTT and decision/checksum manifests; `accept` requires actual semantic, timing, screen-text and render evidence. Mechanical validation is not semantic approval.
+
+Only accepted files matching the currently registered video fingerprint are exposed to playback as the default `-1000` track. Original tracks remain selectable. Modified targets/output or newly excluded source provenance revoke authored playback. Default-track reads never alter personal state, watches or original video. A clean research raw needing a different normal video must go through existing explicit video/source selection; accepting subtitles alone does not silently replace ordinary media.
+
+Noto CJK SC/JP support Chinese/Japanese glyphs; the renderer/installer retains OFL and checks pinned font SHA-256. Caption style, sign placement and restrained effects require actual renders; static/VTT fallbacks remain available. Public export requires separate credits/permissions and excludes local paths/media; this feature does not publish automatically.
+
+Tests use temporary databases, original synthetic cues and fake downloaders, including late episode groups, scope revocation, forbidden publishers, exact manifests, safe/uncertain fallback, original-file preservation and pending-workbook/default boundaries.

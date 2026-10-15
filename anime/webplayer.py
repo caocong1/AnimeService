@@ -7,9 +7,13 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from .db import ROOT
 from .subtitles import Subtitles
+from .audio_tracks import AudioTracks
+from .browser_media import BrowserMedia
+from .picture import Picture
 from .auto_danmu import match as match_danmu
 from .audio_alignment import AlignmentService, failure as alignment_failure
-from .bilibili_lookup import resolve_video
+from .bilibili_lookup import BilibiliMetadata
+from .source_blacklist import media_filter
 
 
 def maintain_danmu(stop):
@@ -40,7 +44,11 @@ class WebPlayer:
         self.db=db
         self.lock=threading.Lock()
         self.sources={}
+        self.bilibili_metadata=BilibiliMetadata()
         self.subtitles=Subtitles(db)
+        self.audio=AudioTracks(self.subtitles)
+        self.browser_media=BrowserMedia(self.subtitles)
+        self.picture=Picture(self.subtitles)
         self.auto_lock=threading.Lock()
         self.auto_cache={}
         self.alignment=None
@@ -66,12 +74,15 @@ class WebPlayer:
         if inventory.exists() and inventory.stat().st_mtime_ns!=self.inventory_mtime:
             self.inventory=json.loads(inventory.read_text(encoding='utf-8'));self.inventory_mtime=inventory.stat().st_mtime_ns
         rows={}
+        blocked=media_filter(self.db)
         for x in self.inventory:
             if x.get('legacy_active'):continue
+            if blocked(x):continue
             path=Path(x['path'])
             key=hashlib.sha256(str(path).lower().encode()).hexdigest()[:32]
             rows[key]={'id':key,'name':path.name,'folder':path.parent.name,'path':str(path),'size':x['size'],'legacy':True}
         for x in self.db.rows("SELECT episodes.*,shows.title FROM episodes JOIN shows ON shows.id=episodes.show_id WHERE episodes.status='complete' OR (episodes.status='legacy_unverified' AND episodes.hash IS NULL)"):
+            if blocked(x):continue
             key=hashlib.sha256(x['path'].lower().encode()).hexdigest()[:32]
             if x['status']=='legacy_unverified' and key not in rows:continue
             rows[key]={'id':key,'name':Path(x['path']).name,'folder':x['title'],'path':x['path'],'size':x['size'],'legacy':not bool(x['hash']),'show_id':x['show_id'],'episode':x['episode'],'unverified':x['status']=='legacy_unverified'}
@@ -79,6 +90,9 @@ class WebPlayer:
 
     def item(self,key):
         row=self.media().get(key)
+        if not row:
+            from .subtitle_targets import retained_item
+            row=retained_item(self.db,key)
         if not row:raise HTTPException(404,'未找到已盘点的媒体')
         p=Path(row['path'])
         if not p.is_file() or p.stat().st_size!=row['size']:raise ValueError('文件不存在或大小已变化，请重新核查')
@@ -274,6 +288,9 @@ def normalize_comments(data):
 
 def register_webplayer(app,db):
     player=WebPlayer(db)
+    app.state.webplayer=player
+    from .clips import register_clips
+    register_clips(app,player)
     @app.get('/watch')
     def page():return FileResponse(ROOT/'static/watch.html')
     @app.get('/api/web/media')
@@ -284,11 +301,32 @@ def register_webplayer(app,db):
     @app.get('/api/web/media/{key}')
     def item(key:str):
         r=player.item(key)
-        return {**{k:v for k,v in r.items() if k!='path'},'progress':db.one('SELECT * FROM web_progress WHERE media_id=?',(key,))}
+        return {**{k:v for k,v in r.items() if k!='path'},'progress':db.one('SELECT * FROM web_progress WHERE media_id=?',(key,)),
+                'viewing_session_supported':True}
+    @app.post('/api/web/media/{key}/viewing-session')
+    def viewing_session(key:str,p:dict):
+        return app.state.engine.subtitle_studio.production_targets.lease(player.item(key),p.get('session'),p.get('closed') is True)
     @app.get('/api/web/media/{key}/stream')
     def stream(key:str):
         r=player.item(key)
-        return FileResponse(r['path'],media_type='video/mp4' if Path(r['path']).suffix.lower()=='.mp4' else 'video/x-matroska',headers={'Cross-Origin-Resource-Policy':'same-origin'})
+        return FileResponse(player.browser_media.file(r),media_type='video/mp4' if Path(r['path']).suffix.lower()=='.mp4' else 'video/x-matroska',headers={'Cross-Origin-Resource-Policy':'same-origin'})
+    @app.get('/api/web/media/{key}/audio-tracks')
+    def audio_tracks(key:str):
+        d=player.audio.probe(player.item(key))
+        return {k:d[k] for k in ('tracks','supported','fingerprint')}
+    @app.get('/api/web/media/{key}/picture')
+    def picture(key:str):
+        return player.picture.probe(player.item(key))
+    @app.post('/api/web/media/{key}/audio-tracks/{index}/prepare')
+    def audio_prepare(key:str,index:int):
+        return player.audio.prepare(player.item(key),index)
+    @app.get('/api/web/media/{key}/audio-tracks/{index}')
+    def audio_status(key:str,index:int):
+        return player.audio.status(player.item(key),index)
+    @app.get('/api/web/media/{key}/audio-tracks/{index}/stream')
+    def audio_stream(key:str,index:int):
+        return FileResponse(player.audio.file(player.item(key),index),media_type='video/mp4',
+                            headers={'Cross-Origin-Resource-Policy':'same-origin'})
     @app.post('/api/web/media/{key}/progress')
     def progress(key:str,p:dict):
         player.item(key);pos=float(p.get('position',0));duration=float(p.get('duration',0))
@@ -308,13 +346,21 @@ def register_webplayer(app,db):
     def search(q:str):
         if not 1<=len(q.strip())<=2000:raise HTTPException(400,'请输入作品名、B站网址或 BV号')
         if re.match(r'(?i)^(?:BV|(?:https?://)?(?:www\.|m\.)?bilibili\.com(?:/|$))',q.strip()):
-            return player.bind_episodes(resolve_video(q))
+            return player.bind_episodes(player.bilibili_metadata.video(q))
         if len(q)>100:raise HTTPException(400,'作品名最多100字；长网址请使用B站直达查询')
         return player.describe_candidates(player.danmu('search/anime',{'keyword':q.strip()}))
     @app.get('/api/web/danmu/resolve')
     def resolve(q:str):
         if not 1<=len(q.strip())<=2000:raise HTTPException(400,'请输入B站网址或 BV号')
-        return player.bind_episodes(resolve_video(q))
+        return player.bind_episodes(player.bilibili_metadata.video(q))
+    @app.get('/api/web/danmu/source/{sid}/info')
+    def source_info(sid:str):
+        source=db.one('SELECT url FROM web_danmu_sources WHERE source_key=?',(sid,))
+        if not source:raise HTTPException(404,'请重新搜索并选择来源')
+        url=source_page_url(source['url'])
+        if not url or urlparse(url).hostname!='www.bilibili.com':
+            return {'uploader':'','count':None}
+        return player.bilibili_metadata.source_info(url)
     @app.get('/api/web/danmu/show/{sid}')
     def episodes(sid:int):
         return player.bind_episodes(player.danmu('bangumi/'+str(sid)))
@@ -332,23 +378,51 @@ def register_webplayer(app,db):
     def alignment_cancel(key:str,job:str):return player.alignment_status(key,job,cancel=True)
     @app.get('/api/web/media/{key}/subtitles')
     def subtitles(key:str):
-        tracks=player.subtitles.tracks(player.item(key))
+        item=player.item(key)
+        tracks=player.subtitles.tracks(item)
+        from .subtitle_studio import authored
+        selected=authored(db,item)
         supported=[t for t in tracks if t['supported']]
-        return {'tracks':[{**t,'url':f'/api/web/media/{key}/subtitles/{t["index"]}.vtt',
-                           'ass_url':f'/api/web/media/{key}/subtitles/{t["index"]}.ass' if t['codec'] in ('ass','ssa') else None} for t in tracks],
-                'default':supported[0]['index'] if supported else None}
+        result=[{**t,'origin':t.get('origin','embedded'),'file_name':t.get('file_name',item['name']),'url':f'/api/web/media/{key}/subtitles/{t["index"]}.vtt',
+                           'ass_url':f'/api/web/media/{key}/subtitles/{t["index"]}.ass' if t['codec'] in ('ass','ssa') else None} for t in tracks]
+        if selected:result.insert(0,{'index':-1000,'codec':'ass','language':'chi+jpn','label':'系统自制 · 中日双语',
+            'origin':'authored','build_id':selected['id'],'file_name':Path(selected['files']['bilingual.ass']['path']).name,
+            'supported':True,'url':f'/api/web/media/{key}/subtitles/-1000.vtt','ass_url':f'/api/web/media/{key}/subtitles/-1000.ass'})
+        return {'tracks':result,'default':-1000 if selected else supported[0]['index'] if supported else None}
     @app.get('/api/web/media/{key}/subtitles/{index}.ass')
     def subtitle_ass(key:str,index:int):
+        if index==-1000:
+            from .subtitle_studio import authored
+            selected=authored(db,player.item(key))
+            if not selected:raise ValueError('该视频暂无已验收的校订字幕')
+            return FileResponse(selected['files']['bilingual.ass']['path'],media_type='text/plain; charset=utf-8')
         path=player.subtitles.extract(player.item(key),index,'ass')
         return FileResponse(path,media_type='text/plain; charset=utf-8')
     @app.get('/api/web/media/{key}/subtitle-fonts')
     def subtitle_fonts(key:str):
-        fonts=player.subtitles.fonts(player.item(key))
-        return {'fonts':[f'/api/web/media/{key}/subtitle-fonts/{f["index"]}' for f in fonts]}
+        item=player.item(key)
+        from .subtitle_studio import authored
+        selected=authored(db,item)
+        if selected:
+            urls=[f'/api/web/media/{key}/authored-fonts/{lang}' for lang in ('zh','ja')]
+        else:
+            urls=[f'/api/web/media/{key}/subtitle-fonts/{f["index"]}' for f in player.subtitles.fonts(item)]
+        return {'fonts':urls}
+    @app.get('/api/web/media/{key}/authored-fonts/{lang}')
+    def authored_font(key:str,lang:str):
+        from .subtitle_studio import authored
+        selected=authored(db,player.item(key))
+        if not selected or lang not in ('zh','ja'):raise ValueError('该视频暂无已验收的校订字体')
+        return FileResponse(selected['font_assets'][lang]['path'],media_type='application/octet-stream')
     @app.get('/api/web/media/{key}/subtitle-fonts/{index}')
     def subtitle_font(key:str,index:int):
         return FileResponse(player.subtitles.extract_font(player.item(key),index),media_type='application/octet-stream')
     @app.get('/api/web/media/{key}/subtitles/{index}.vtt')
     def subtitle_file(key:str,index:int):
+        if index==-1000:
+            from .subtitle_studio import authored
+            selected=authored(db,player.item(key))
+            if not selected:raise ValueError('该视频暂无已验收的校订字幕')
+            return FileResponse(selected['files']['bilingual.vtt']['path'],media_type='text/vtt; charset=utf-8')
         path=player.subtitles.extract(player.item(key),index)
         return FileResponse(path,media_type='text/vtt; charset=utf-8',headers={'Cross-Origin-Resource-Policy':'same-origin'})

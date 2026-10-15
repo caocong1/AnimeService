@@ -15,15 +15,17 @@
 <main id="main">
   <header class="page-head"><h1>后台</h1></header>
   <nav class="tabs-local" aria-label="后台">
-    <a href="#status" data-sec="status">状态</a><a href="#season" data-sec="season">季度收录</a><a href="#cleanup" data-sec="cleanup">清理</a><a href="#legacy" data-sec="legacy">旧片库</a><a href="#settings" data-sec="settings">设置</a>
+    <a href="#status" data-sec="status">状态</a><a href="#season" data-sec="season">季度收录</a><a href="#bangumi" data-sec="bangumi">Bangumi 同步</a><a href="#cleanup" data-sec="cleanup">清理</a><a href="#legacy" data-sec="legacy">旧片库</a><a href="#settings" data-sec="settings">设置</a>
   </nav>
   <section class="m-section" id="sec-status" data-sec="status"><div class="skeleton"></div></section>
   <section class="m-section" id="sec-season" data-sec="season" hidden></section>
+  <section class="m-section" id="sec-bangumi" data-sec="bangumi" hidden></section>
   <section class="m-section" id="sec-cleanup" data-sec="cleanup" hidden></section>
   <section class="m-section" id="sec-legacy" data-sec="legacy" hidden></section>
   <section class="m-section" id="sec-settings" data-sec="settings" hidden></section>
 </main>
-<script src="/static/core.js?v=2"></script>
-<script src="/static/manage.js?v=2"></script>
+<script src="/static/core.js?v=4"></script>
+<script src="/static/bangumi-sync.js?v=1"></script>
+<script src="/static/manage.js?v=3"></script>
 </body>
 </html>

@@ -3,7 +3,8 @@ from urllib.parse import urlparse
 import requests
 
 HOSTS={'api.bgm.tv','bgm.tv','bangumi.tv','mikanani.me','mikanime.tv','mikanani.hacgn.fun',
-       'share.dmhy.org','dl.dmhy.org'}
+       'share.dmhy.org','dl.dmhy.org','nyaa.si','www.tokyotosho.info','tokyotosho.info',
+       'bt4g.org','bt4gprx.com','1337x.to','www.1337x.to','itorrents.net'}
 class NetworkError(RuntimeError):pass
 
 def safe_error(e):
@@ -21,7 +22,7 @@ def validate_url(url):
 
 class Web:
     def __init__(self):
-        self.session=requests.Session();self.session.headers['User-Agent']='AnimeService/0.1 (local personal anime tracker; https://github.com/bangumi/api)'
+        self.session=requests.Session();self.session.headers['User-Agent']='sorawatcher/AnimeService/2.0 (personal anime tracker)'
     def fetch(self,url,method='GET',**kwargs):
         validate_url(url)
         for attempt in range(3):

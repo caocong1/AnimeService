@@ -1,5 +1,5 @@
 'use strict';
-/* 追番: tonight's screenings, what is on its way, and every tracked show. */
+/* Separate navigation views: screenings and the paginated personal list. */
 (() => {
   const legacy = { autumn: 1, summer: 0 };
   const hash = location.hash.slice(1), sid = new URLSearchParams(location.search).get('show');
@@ -10,10 +10,27 @@
     return;
   }
 
-  shell('home');
-  const ACTIVE = new Set(['watching', 'trial', 'wish']);
   const params = new URLSearchParams(location.search);
-  let shows = [], filter = params.get('state') || '', query = params.get('q') || '';
+  // Preserve old bookmarks that opened the shelf with a search/state filter.
+  const all = params.get('view') === 'all' || params.has('q') || Object.hasOwn(STATES, params.get('state'));
+  shell(all ? 'following' : 'home');
+  const ACTIVE = new Set(['watching', 'trial', 'wish']);
+  let shows = [], filter = '', query = '', page = 1, pageSize = 20, stopObserving;
+  function readUrl() {
+    const p = new URLSearchParams(location.search);
+    filter = Object.hasOwn(STATES, p.get('state')) ? p.get('state') : '';
+    query = p.get('q') || '';
+    const n = Number(p.get('page'));
+    page = Number.isSafeInteger(n) && n > 0 ? n : 1;
+    pageSize = [20, 40, 60].includes(Number(p.get('size'))) ? Number(p.get('size')) : 20;
+    $('#q').value = query;
+  }
+  readUrl();
+  $('#watch-board').hidden = all;
+  $('#shelf-section').hidden = !all;
+  $('h1').textContent = all ? '全部追番' : '追番';
+  $('h1').tabIndex = -1;
+  document.title = (all ? '全部追番' : '追番') + ' · 番屿';
 
   function facts(s) {
     const out = [stateChip(s)];
@@ -38,6 +55,9 @@
   }
 
   function render(lastPlayed) {
+    lastPlayed = {...lastPlayed};
+    for (const s of shows) for (const e of s.eps || []) if (e.s === 'resume' && e.release?.progress?.last_played)
+      lastPlayed[s.id] = Math.max(lastPlayed[s.id] || 0, e.release.progress.last_played);
     const active = shows.filter(s => ACTIVE.has(s.state));
     const playing = active.filter(s => s.next).sort((a, b) =>
       (lastPlayed[b.id] || 0) - (lastPlayed[a.id] || 0) || b.download_updated - a.download_updated);
@@ -47,7 +67,6 @@
     if (!shows.length) {
       $('#screens').innerHTML = `<div class="empty"><h2>还没有追番</h2><a class="btn primary" href="/season">${icon('season')}去看新番</a></div>`;
       $('#side').innerHTML = '';
-      $('#shelf-section').hidden = true;
       return;
     }
     $('#screens').innerHTML = playing.length
@@ -75,7 +94,6 @@
       group('即将首播', upcoming.map(s => sideItem(s, `<span class="date">${esc(airDate(s.air_date, false))}</span>`, `${WEEK[new Date(s.air_date + 'T00:00').getDay()]} · ${STATES[s.state]}${s.authorized ? ' · 自动下载' : ''}`))) +
       group('等更新', waiting.map(s => { const f = nextFuture(s); return sideItem(s, cover(s.image, s.title), `${s.watched}/${s.total || '?'} · 第 ${f.n} 集${f.date ? ' ' + airDate(f.date) : ''}`); })) +
       group('暂搁', paused.map(s => sideItem(s, cover(s.image, s.title), `${s.watched}/${s.total || '?'}${s.unwatched ? ' · 待看 ' + s.unwatched : ''}`)));
-    renderShelf();
   }
 
   function renderShelf() {
@@ -85,26 +103,53 @@
       .filter(([k, , n]) => !k || n).map(([k, v, n]) => `<button type="button" data-f="${k}" aria-pressed="${filter === k}">${v} <span class="num">${n}</span></button>`).join('');
     const q = query.trim().toLowerCase();
     const rows = shows.filter(s => (!filter || s.state === filter) && (!q || (s.title + ' ' + s.original).toLowerCase().includes(q)));
-    $('#shelf-count').textContent = rows.length;
-    $('#shelf').innerHTML = rows.length ? rows.map(s => `<div class="shelf-row" style="${lineColour(s.id)}">${cover(s.image, s.title, '', '/show/' + s.id)}
+    const pages = Math.max(1, Math.ceil(rows.length / pageSize));
+    page = Math.min(page, pages);
+    const start = (page - 1) * pageSize;
+    $('#summary').textContent = `${shows.length} 部 · 筛选结果 ${rows.length} 部`;
+    $('#shelf').innerHTML = rows.length ? rows.slice(start, start + pageSize).map(s => `<div class="shelf-row" style="${lineColour(s.id)}">${cover(s.image, s.title, '', '/show/' + s.id)}
       <div><a class="name" href="/show/${s.id}">${esc(s.title)}</a><div class="facts">${facts(s)}</div></div>${epStrip(s)}<div class="end">${ticket(s, false)}</div></div>`).join('')
-      : `<div class="empty"><p>没有符合「${esc(query || STATES[filter] || '')}」的作品</p><button class="btn small" type="button" id="clear">清除筛选</button></div>`;
+      : shows.length ? `<div class="empty"><p>没有符合「${esc(query || STATES[filter] || '')}」的作品</p><button class="btn small" type="button" id="clear">清除筛选</button></div>`
+      : `<div class="empty"><h2>还没有追番</h2><a class="btn primary" href="/season">${icon('season')}去看新番</a></div>`;
+    const numbers = [...new Set([1, pages, ...Array.from({length: 5}, (_, i) => page - 2 + i).filter(n => n > 0 && n <= pages)])].sort((a, b) => a - b);
+    const links = numbers.map((n, i) => `${i && n - numbers[i - 1] > 1 ? '<span aria-hidden="true">…</span>' : ''}<button class="btn small" type="button" data-page="${n}" aria-label="第 ${n} 页"${n === page ? ' aria-current="page"' : ''}>${n}</button>`).join('');
+    document.querySelectorAll('[data-pager]').forEach((el, i) => {
+      el.hidden = !rows.length;
+      el.innerHTML = `<span class="page-info" role="status">${start + 1}–${Math.min(start + pageSize, rows.length)} / ${rows.length} 部 · 第 ${page} / ${pages} 页</span>
+        <label class="page-size" for="page-size-${i}">每页<select id="page-size-${i}" data-page-size>${[20, 40, 60].map(n => `<option value="${n}"${n === pageSize ? ' selected' : ''}>${n} 部</option>`).join('')}</select></label>
+        <div class="page-links"><button class="btn small" type="button" data-page="${page - 1}"${page === 1 ? ' disabled' : ''}>上一页</button>${links}<button class="btn small" type="button" data-page="${page + 1}"${page === pages ? ' disabled' : ''}>下一页</button></div>`;
+    });
+    syncUrl();
   }
 
-  function syncUrl() {
+  function syncUrl(push = false) {
     const p = new URLSearchParams();
+    p.set('view', 'all');
     if (filter) p.set('state', filter);
     if (query) p.set('q', query);
-    history.replaceState(null, '', location.pathname + (p.size ? '?' + p : ''));
+    if (page > 1) p.set('page', page);
+    if (pageSize !== 20) p.set('size', pageSize);
+    const url = location.pathname + '?' + p;
+    if (url !== location.pathname + location.search) history[push ? 'pushState' : 'replaceState'](null, '', url);
   }
 
-  $('#q').value = query;
-  $('#q').addEventListener('input', e => { if (e.isComposing) return; query = e.target.value; syncUrl(); renderShelf(); });
-  $('#q').addEventListener('compositionend', e => { query = e.target.value; syncUrl(); renderShelf(); });
+  function search(e) { if (e.isComposing) return; query = e.target.value; page = 1; syncUrl(); renderShelf(); }
+  $('#q').addEventListener('input', search);
+  $('#q').addEventListener('compositionend', search);
+  document.addEventListener('change', e => {
+    if (!e.target.matches('[data-page-size]')) return;
+    pageSize = Number(e.target.value); page = 1; syncUrl(true); renderShelf();
+    $('#' + e.target.id).focus();
+  });
   document.addEventListener('click', e => {
     const f = e.target.closest('[data-f]');
-    if (f) { filter = f.dataset.f; syncUrl(); renderShelf(); }
-    if (e.target.closest('#clear')) { filter = ''; query = ''; $('#q').value = ''; syncUrl(); renderShelf(); }
+    if (f) { filter = f.dataset.f; page = 1; syncUrl(true); renderShelf(); $(`[data-f="${filter}"]`).focus(); }
+    const p = e.target.closest('[data-page]');
+    if (p && !p.disabled && Number(p.dataset.page) !== page) {
+      page = Number(p.dataset.page); syncUrl(true); renderShelf();
+      $('h1').focus({preventScroll: true}); window.scrollTo({top: 0, behavior: 'instant'});
+    }
+    if (e.target.closest('#clear')) { filter = ''; query = ''; page = 1; $('#q').value = ''; syncUrl(true); renderShelf(); $('#q').focus(); }
     if (e.target.closest('#retry')) load();
   });
 
@@ -113,19 +158,30 @@
       await boot();
       const forced = params.get('state');
       if (forced === 'error') throw Error('后台没有响应');
-      const [list, home] = await Promise.all([api('/shows?scope=history'), api('/home')]);
+      const [list, home, releases] = await Promise.all([api('/shows?scope=history'), all ? Promise.resolve({resume: []}) : api('/home'),
+        FinishedReleases.load({verifyMedia: true}).catch(e => { toast(e.message); return []; })]);
       if (forced === 'empty-first') { list.length = 0; home.resume = []; }
-      shows = list;
-      $('#shelf-section').hidden = false;
+      const scheduled = await applyListAiringSchedules(list);
+      shows = FinishedReleases.applyList(scheduled, releases);
       const lastPlayed = {};
       for (const r of home.resume) lastPlayed[r.show_id] = Math.max(lastPlayed[r.show_id] || 0, r.progress.last_played);
+      stopObserving?.();
+      stopObserving = FinishedReleases.observe(next => {
+        shows = FinishedReleases.applyList(scheduled, next);
+        if (all) renderShelf(); else render(lastPlayed);
+      }, {initial: releases});
+      $('#watch-board').hidden = all;
+      $('#shelf-section').hidden = !all;
+      if (all) { renderShelf(); return; }
       render(lastPlayed);
     } catch (e) {
       $('#shelf-section').hidden = true;
+      $('#watch-board').hidden = false;
       $('#side').innerHTML = '';
       $('#screens').innerHTML = `<div class="empty"><h2>连不上后台</h2><p>${esc(e.message)}</p><button class="btn" type="button" id="retry">重试</button></div>`;
     }
   }
   load();
-  addEventListener('pageshow', e => e.persisted && load());
+  addEventListener('pageshow', e => { if (e.persisted) { readUrl(); load(); } });
+  addEventListener('popstate', () => { readUrl(); if (all) renderShelf(); });
 })();

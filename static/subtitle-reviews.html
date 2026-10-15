@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>字幕对比记录 · 番屿</title>
+<link rel="icon" href="/static/icon.svg">
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
+</head>
+<body>
+<main id="main">
+  <header class="page-head"><h1>字幕对比记录</h1><p class="meta" id="summary">读取记录中</p></header>
+  <p>评分、具体差异和依据按评审版本保留，可累积比较不同作品。发布者与视频平台分别记录，尚未确认的译者归属留空。<a class="link" href="/subtitle-studio">逐集字幕制作</a></p>
+  <p><a class="link" href="/subtitle-reviews">想看的新番与评审</a> · <a class="link" id="scope" href="/">返回片库</a> · <a class="link" id="export" href="/api/source-review/subtitles/export">导出全部修订记录（JSON）</a></p>
+  <details class="more" id="overview"><summary>想看的新番选源进度<span class="aside" id="coverage-summary">读取中</span></summary><div class="body"><p class="muted">仅你已加入想看、试看或在追的新番参与比较。证据充分后自动确定主源和替补，记录持续累积，以后统一汇总报告。</p><div id="coverage"></div></div></details>
+  <label class="check"><input id="history" type="checkbox">显示历次修订</label>
+  <p class="muted" id="note"></p>
+  <section id="records" aria-live="polite"><div class="skeleton"></div></section>
+</main>
+<script src="/static/core.js?v=2"></script>
+<script src="/static/subtitle-reviews.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>字幕库 · 番屿</title><link rel="icon" href="/static/icon.svg"><link rel="stylesheet" href="/static/tokens.css"><link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/subtitle-library.css?v=editions1"><script src="/static/theme.js"></script></head>
+<body><main id="main"><header class="page-head"><div><h1>字幕库</h1><p class="meta" id="summary" role="status">正在读取交付进度…</p></div><button class="btn quiet" id="delivery-refresh" type="button">刷新进度</button></header>
+<p class="muted">看已做好的成品，了解下一集的素材和制作进度。先看v0观看版，随后提供v1精校细调版；两个版本均保留供选择。</p>
+<nav id="delivery-filters" class="delivery-filters" aria-label="交付状态筛选"><button type="button" data-filter="all" aria-pressed="true">全部</button><button type="button" data-filter="done" aria-pressed="false">已做好</button><button type="button" data-filter="making" aria-pressed="false">制作中</button><button type="button" data-filter="preparing" aria-pressed="false">准备中</button><button type="button" data-filter="waiting" aria-pressed="false">待开始</button></nav>
+<form class="subtitle-filters" id="filters" role="search" aria-label="筛选作品"><label>作品<select id="subtitle-show"><option value="">全部作品</option></select></label><label>搜索<input id="subtitle-search" type="search" placeholder="搜索作品名称" autocomplete="off"></label></form>
+<p id="delivery-notice" class="delivery-notice" role="status" hidden></p><div class="delivery-update"><p class="muted" id="result-count" role="status"></p><p class="muted" id="updated-at"></p></div>
+<section id="subtitle-records" aria-label="本集交付进度"><div class="skeleton"></div></section><button class="btn" id="subtitle-retry" type="button" hidden>重新读取</button>
+<details class="history-archive"><summary id="history-count">历史材料档案</summary><p class="muted">已看集数和其它作品的旧材料保留在这里，不占新集制作位置。</p><ul id="subtitle-history"></ul><p><a class="link" href="/subtitle-studio">制作档案</a> · <a class="link" href="/subtitle-reviews">基稿对比记录</a></p></details>
+</main><script src="/static/core.js?v=5"></script><script src="/static/finished-releases.js?v=editions1"></script><script src="/static/subtitle-delivery-model.js?v=editions1"></script><script src="/static/subtitle-library.js?v=editions1"></script></body></html>

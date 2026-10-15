@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FONT_SHA256 = '2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b'
+JP_FONT_SHA256 = '68a3fc98800b2a27b371f2fb79991daf3633bd89309d4ffaa6946fd587f375b5'
 BASE = 'https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/Sans/'
 
 
@@ -24,6 +25,13 @@ def install():
         font.write_bytes(data)
     with urllib.request.urlopen(BASE + '../LICENSE', timeout=30) as r:
         (target / 'NOTO-LICENSE.txt').write_bytes(r.read())
+    japanese = target / 'NotoSansCJKjp-Regular.otf'
+    if not japanese.exists() or hashlib.sha256(japanese.read_bytes()).hexdigest() != JP_FONT_SHA256:
+        with urllib.request.urlopen(BASE + 'OTF/Japanese/' + japanese.name, timeout=120) as r:
+            data = r.read()
+        if hashlib.sha256(data).hexdigest() != JP_FONT_SHA256:
+            raise RuntimeError('Unexpected Japanese CJK font checksum')
+        japanese.write_bytes(data)
 
 
 if __name__ == '__main__':

@@ -26,6 +26,7 @@ test('saved source list keeps settings and empty selections, strips transient da
   const source={id:'key',source_identity:'stable',title:'Bilibili',offset:-2,end:1420,comments:[comment(10)],loading:true};
   assert.deepEqual(savedSources([source,source,null]),[{id:'key',source_identity:'stable',title:'Bilibili',offset:-2}]);
   assert.deepEqual(savedSources([]),[]);
+  assert.equal(savedSources([{...source,uploader:'测试UP主'}])[0].uploader,'测试UP主');
   assert.equal(savedSources(null),null);
   assert.deepEqual(playerSettings({visible:false,opacity:0.5,fontSize:24,speed:6,danmuku:['large']}),{opacity:0.5,fontSize:24,speed:6,visible:false});
   assert.deepEqual(playerSettings({fontSize:NaN,speed:99,margin:['bad',-1]}),{});

@@ -1,0 +1,41 @@
+.subtitle-filters {display:flex;flex-wrap:wrap;gap:var(--s-4);margin-block:var(--s-5)}
+.subtitle-filters label {display:grid;gap:var(--s-1);color:var(--muted);font-size:var(--text-s);flex:1;min-width:0}
+.subtitle-filters select,.subtitle-filters input {width:100%;min-width:0}
+.page-head {display:flex;align-items:flex-start;justify-content:space-between;gap:var(--s-4)}
+.delivery-filters {display:flex;flex-wrap:wrap;gap:var(--s-2);margin-block:var(--s-5)}
+.delivery-filters button {min-height:var(--control);padding:var(--s-2) var(--s-4);background:var(--layer-1);border:1px solid var(--line);border-radius:var(--radius-s);color:var(--ink);font:inherit;cursor:pointer}
+.delivery-filters button[aria-pressed="true"] {border-color:var(--signal);background:var(--signal-wash);color:var(--signal)}
+.delivery-filters button span {margin-inline-start:var(--s-2);font-family:var(--num)}
+.delivery-update {display:flex;justify-content:space-between;flex-wrap:wrap;gap:var(--s-2);font-size:var(--text-s)}
+.delivery-notice {padding:var(--s-3);border-inline-start:var(--focus-w) solid var(--warn);background:var(--layer-1)}
+.subtitle-entry {padding-block:var(--s-5);border-top:1px solid var(--line)}
+.subtitle-entry-head {display:flex;flex-wrap:wrap;justify-content:space-between;gap:var(--s-2) var(--s-4)}
+.subtitle-entry-head h2 {margin:0;font-size:var(--text-m);overflow-wrap:anywhere}
+.subtitle-entry-head p {color:var(--muted)}
+.subtitle-status {color:var(--muted);font-size:var(--text-s);align-self:flex-start}
+.subtitle-status[data-ready="true"] {color:var(--ok)}
+.subtitle-entry p {margin-block:var(--s-2);overflow-wrap:anywhere}
+.subtitle-entry-actions {display:flex;flex-wrap:wrap;gap:var(--s-2) var(--s-5);margin-block:var(--s-3)}
+.subtitle-entry-actions a {display:inline-flex;align-items:center;min-height:var(--control)}
+.stage-line {display:flex;flex-wrap:wrap;gap:var(--s-3);align-items:center}
+.stage-line span {color:var(--muted);font-size:var(--text-s)}
+.next-action,.needed {max-width:70ch;font-size:var(--text-s)}
+.material-grid {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--s-4);padding:var(--s-4);margin-block:var(--s-4);background:var(--layer-1);border-radius:var(--radius)}
+.material-grid>div {display:grid;gap:var(--s-1);min-width:0}
+.material-grid span,.material-grid small {color:var(--muted);font-size:var(--text-s)}
+.material-grid strong {font-size:var(--text);font-weight:var(--weight-strong)}
+.production-steps {display:flex;flex-wrap:wrap;gap:var(--s-2) var(--s-4);padding:0;list-style:none;font-size:var(--text-s);counter-reset:phase;margin-block:var(--s-4)}
+.production-steps li {color:var(--muted);counter-increment:phase}
+.production-steps li::before {content:counter(phase) ' ';font-family:var(--num)}
+.production-steps li[data-phase="current"] {color:var(--signal);font-weight:var(--weight-strong);border-bottom:var(--focus-w) solid var(--signal)}
+.production-steps li[data-phase="passed"] {color:var(--ok)}
+.subtitle-details summary,.history-archive summary {min-height:var(--control);display:flex;align-items:center;cursor:pointer;color:var(--muted);gap:var(--s-2)}
+.subtitle-details summary::before,.history-archive summary::before {content:'＋'}
+.subtitle-details[open] summary::before,.history-archive[open] summary::before {content:'－'}
+.subtitle-details p {font-size:var(--text-s)}
+.history-archive {margin-block:var(--s-6);border-top:1px solid var(--line);padding-top:var(--s-3)}
+.history-archive ul {padding-left:var(--s-5)}
+.history-archive li {margin-block:var(--s-2);overflow-wrap:anywhere;font-size:var(--text-s)}
+.revision-heading {font-size:var(--text);margin-block:var(--s-4) var(--s-2)}
+.revision-process {border-inline-start:var(--focus-w) solid var(--signal);padding-inline-start:var(--s-4)}
+@media(max-width:720px){.subtitle-filters label {flex:1;flex-basis:0}.material-grid {grid-template-columns:1fr;gap:var(--s-3)}.page-head {flex-wrap:nowrap}.page-head>div {flex:1;min-width:0}.page-head #delivery-refresh {flex-shrink:0;font-size:var(--text-s)}.delivery-filters button {flex:1 0 auto}.subtitle-entry-head {flex-direction:column}.delivery-update {flex-direction:column}}

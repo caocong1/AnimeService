@@ -106,6 +106,83 @@ def test_temporary_thunder_read_failure_remains_retryable(setup,monkeypatch):
     assert db.one('SELECT state FROM thunder_queue')['state']=='pending'
 
 
+def test_ui_timeout_isolates_uncertain_submit_and_leases_other_work(setup):
+    db,q,e,r,t=ready(setup);job=e.thunder.claim();e.thunder.preflight(t['hash'],job['lease'])
+    e.thunder.report(t['hash'],job['lease'],'UI submit timeout; no acknowledgement')
+    uncertain=db.one('SELECT * FROM thunder_queue WHERE hash=?',(t['hash'],))
+    assert uncertain['state']=='review' and uncertain['committing']==1 and not uncertain['lease']
+    assert db.one('SELECT status FROM tasks WHERE hash=?',(t['hash'],))['status']=='review'
+    e.sources.data=torrent((2,));e.ingest(setup[3]('[Group] Example S01E02 [1080p][CHS]',source=2))
+    next_job=e.thunder.claim();assert next_job['hash']!=t['hash'] and not next_job['uncertain'] and q.adds==0
+
+
+def test_ui_timeout_with_real_ack_is_reconciled_before_review(setup):
+    db,q,e,r,t=ready(setup);job=e.thunder.claim();e.thunder.preflight(t['hash'],job['lease']);accept(r,t)
+    e.thunder.report(t['hash'],job['lease'],'UI response timed out')
+    assert db.one('SELECT status,acknowledged FROM tasks')=={'status':'downloading','acknowledged':1}
+    assert db.one('SELECT state FROM thunder_queue')['state']=='done' and e.thunder.claim() is None
+
+
+def uncertain_review(setup):
+    db,q,e,r,t=ready(setup);job=e.thunder.claim();e.thunder.preflight(t['hash'],job['lease'])
+    e.thunder.report(t['hash'],job['lease'],'UI submit timeout; no acknowledgement')
+    return db,q,e,r,t
+
+
+def test_uncertain_review_without_match_stays_isolated_after_restart(setup):
+    db,q,e,r,t=uncertain_review(setup)
+    before=db.one('SELECT * FROM thunder_queue');task=db.one('SELECT * FROM tasks');show=db.show(42)
+    e.thunder=ThunderBridge(e,r);e.reconcile();e.reconcile()
+    assert db.get('thunder_review_check_'+t['hash'])['result']=='no_match'
+    assert db.one('SELECT * FROM thunder_queue')==before and db.one('SELECT * FROM tasks')==task
+    assert e.thunder.claim() is None and q.adds==0 and not q.starts
+    assert db.show(42)==show and not db.rows('SELECT * FROM watches')
+
+
+def test_uncertain_review_late_receipt_is_verified_automatically(setup):
+    db,q,e,r,t=uncertain_review(setup);accept(r,t)
+    e.thunder=ThunderBridge(e,r);e.reconcile()
+    assert db.one('SELECT status,acknowledged,external_id,error FROM tasks')=={
+        'status':'downloading','acknowledged':1,'external_id':81,'error':''}
+    assert db.one('SELECT state,committing,lease FROM thunder_queue')=={'state':'done','committing':1,'lease':''}
+    assert db.get('thunder_review_check_'+t['hash'])['result']=='verified'
+    assert e.thunder.claim() is None and q.adds==0 and not q.starts
+
+
+def test_uncertain_late_receipt_after_drop_only_queues_pause(setup):
+    db,q,e,r,t=uncertain_review(setup);db.execute("UPDATE shows SET state='dropped',authorized=0 WHERE id=42")
+    before=db.show(42);accept(r,t);e.reconcile()
+    assert db.one('SELECT acknowledged,external_id,error FROM tasks')=={'acknowledged':1,'external_id':81,'error':''}
+    assert db.one('SELECT action,state FROM thunder_queue')=={'action':'pause','state':'pending'}
+    assert e.thunder.claim()['action']=='pause' and db.show(42)==before
+    assert q.adds==0 and not q.starts and not db.rows('SELECT * FROM watches')
+
+
+@pytest.mark.parametrize('failure',['path','old_task','read_error','duplicates'])
+def test_uncertain_review_never_adopts_unverified_or_unreadable_receipt(setup,monkeypatch,failure):
+    db,q,e,r,t=uncertain_review(setup);accept(r,t)
+    if failure=='path':r.data[t['hash']]['SavePath']='outside-project'
+    if failure=='old_task':r.data[t['hash']]['CreationTime']=int((t['created']-60)*1000)
+    if failure=='duplicates':monkeypatch.setattr(r,'by_hash',lambda h:[r.data[h],r.data[h]])
+    if failure=='read_error':
+        def unreadable(h):raise OSError('private exception text')
+        monkeypatch.setattr(r,'by_hash',unreadable)
+    before=db.one('SELECT * FROM tasks');queue=db.one('SELECT * FROM thunder_queue')
+    e.reconcile()
+    assert db.one('SELECT * FROM tasks')==before and db.one('SELECT * FROM thunder_queue')==queue
+    check=db.get('thunder_review_check_'+t['hash'])
+    assert check['result']==('unavailable' if failure=='read_error' else 'conflict')
+    assert 'private' not in check['error'] and q.adds==0 and not q.starts
+
+
+def test_claim_show_filter_leaves_other_work_untouched(setup):
+    db,q,e,r,t=ready(setup)
+    before=db.one('SELECT * FROM thunder_queue')
+    assert e.thunder.claim(99) is None
+    assert db.one('SELECT * FROM thunder_queue')==before
+    assert e.thunder.claim(42)['hash']==t['hash'] and q.adds==0
+
+
 def test_explicit_readonly_link_resolves_review_without_owning_or_cleaning_file(setup,tmp_path):
     from anime.cleanup import Cleanup
     from anime.webplayer import WebPlayer
@@ -136,6 +213,62 @@ def test_readonly_link_requires_explicit_complete_unambiguous_review(setup,tmp_p
     db.execute('UPDATE thunder_queue SET committing=0');db.execute('UPDATE shows SET cleanup_hold=1 WHERE id=42')
     with pytest.raises(ValueError,match='已清理'):e.thunder.link_reviewed_completed_file(t['hash'],81)
     assert db.one('SELECT hash FROM episodes')['hash']==t['hash'] and not db.rows('SELECT * FROM watches')
+
+
+def readonly_sample(setup,tmp_path):
+    from test_source_review import ready_review
+    db,q,e,r,c=ready_review(setup)
+    e.source_review.start(42)
+    t=db.one('SELECT * FROM tasks');accept(r,t,8)
+    outside=tmp_path/'outside-sample';outside.mkdir()
+    r.data[t['hash']]['SavePath']=str(outside)
+    f=json.loads(t['selection'])['files'][0];p=outside/f['name'];p.parent.mkdir(parents=True);p.write_bytes(b'x'*f['size'])
+    e.reconcile()
+    return db,q,e,r,t,p
+
+
+def test_readonly_sample_resolves_without_episode_or_downloader_adoption(setup,tmp_path,monkeypatch):
+    db,q,e,r,t,p=readonly_sample(setup,tmp_path)
+    before=db.show(42);outside=dict(r.data[t['hash']])
+    e.thunder.link_reviewed_completed_file(t['hash'],81)
+    s=db.one('SELECT * FROM source_samples')
+    assert s['path']==str(p.resolve()) and s['state']=='analyzing'
+    assert json.loads(s['evidence'])['read_only']['mode']=='read_only'
+    assert db.one('SELECT status,external_id,acknowledged FROM tasks')=={'status':'linked','external_id':None,'acknowledged':0}
+    assert db.one('SELECT state,error,committing FROM thunder_queue')=={'state':'done','error':'','committing':0}
+    assert not db.rows('SELECT * FROM episodes') and not db.rows('SELECT * FROM watches') and db.show(42)==before
+    calls=[]
+    monkeypatch.setattr(e.source_review,'analyze',lambda cid:calls.append(cid))
+    e.source_review.tick()
+    for worker in __import__('threading').enumerate():
+        if worker.name=='source-analysis':worker.join(timeout=2)
+    assert calls==[s['candidate_id']]
+    e.reconcile();e.dispatch(db.one('SELECT * FROM tasks'))
+    assert e.thunder.claim() is None and q.adds==0 and not q.starts and r.data[t['hash']]==outside
+    # If this reviewed source wins later, publish only the same read-only path.
+    e.source_review.promote(db.one('SELECT * FROM source_samples'))
+    ep=db.one('SELECT * FROM episodes')
+    assert ep['path']==str(p.resolve()) and ep['hash'] is None and ep['first_completed'] is None
+    from anime.cleanup import Cleanup
+    e.state(42,'dropped')
+    assert Cleanup(db,e).preview(42) is None and p.exists()
+
+
+@pytest.mark.parametrize('blocker',['unwanted','uncertain','changed_size','existing_path','not_first','wrong_title'])
+def test_readonly_sample_preserves_blocked_and_uncertain_records(setup,tmp_path,blocker):
+    db,q,e,r,t,p=readonly_sample(setup,tmp_path)
+    if blocker=='unwanted':db.execute('UPDATE shows SET selected=0 WHERE id=42')
+    if blocker=='uncertain':db.execute('UPDATE thunder_queue SET committing=1')
+    if blocker=='changed_size':db.execute('UPDATE source_samples SET size=size+1')
+    if blocker=='existing_path':db.execute("UPDATE source_samples SET path='existing'")
+    if blocker=='not_first':
+        selection=json.loads(t['selection']);selection['selected']={'2':selection['selected']['1']}
+        db.execute('UPDATE tasks SET selection=?',(json.dumps(selection),))
+    if blocker=='wrong_title':db.execute("UPDATE tasks SET title='Different S01E01' ")
+    before={table:db.rows('SELECT * FROM '+table) for table in ('tasks','thunder_queue','source_samples','episodes','watches','shows')}
+    with pytest.raises(ValueError):e.thunder.link_reviewed_completed_file(t['hash'],81)
+    assert before=={table:db.rows('SELECT * FROM '+table) for table in before}
+    assert p.exists() and q.adds==0
 
 def test_cleanup_removes_both_owned_links_after_confirmation(setup):
     from anime.cleanup import Cleanup

@@ -210,6 +210,25 @@ def test_track_routes_only_expose_registered_media_and_never_write_progress(libr
     assert not engine.mock_calls
     assert not db.rows('SELECT * FROM watches') and not db.rows('SELECT * FROM web_progress')
 
+
+def test_authored_fonts_serve_exact_accepted_assets_and_revoke(library,monkeypatch,tmp_path):
+    db,_,key,_=library
+    selected={'font_assets':{}}
+    for lang in ('zh','ja'):
+        path=tmp_path/(lang+'.fixture');path.write_bytes(('exact accepted '+lang+' face').encode())
+        selected['font_assets'][lang]={'path':str(path)}
+    monkeypatch.setattr('anime.subtitle_studio.authored',lambda *_:selected)
+    engine=Mock();client=TestClient(create_app(db,engine,start_worker=False),base_url='http://127.0.0.1:4871')
+    urls=client.get(f'/api/web/media/{key}/subtitle-fonts').json()['fonts']
+    assert urls==[f'/api/web/media/{key}/authored-fonts/{lang}' for lang in ('zh','ja')]
+    for lang,url in zip(('zh','ja'),urls):
+        assert client.get(url).content==('exact accepted '+lang+' face').encode()
+    assert client.get(f'/api/web/media/{key}/authored-fonts/en').status_code==400
+    assert client.get('/api/web/media/unregistered/authored-fonts/zh').status_code==404
+    selected=None
+    assert client.get(urls[0]).status_code==400
+    assert not engine.mock_calls and not db.rows('SELECT * FROM watches') and not db.rows('SELECT * FROM web_progress')
+
 def test_saved_danmu_source_survives_restart_and_rejects_unbound_urls(library):
     db, player, _, _ = library
     before = db.show(1)

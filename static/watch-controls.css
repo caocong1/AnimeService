@@ -1,4 +1,13 @@
 /* settings sheet under the player: one row per group, label column on the left */
+/* Keep picture surfaces centred without a transform (fractional composite scaling).
+   Canvas occupies only the video layer; subtitles, danmu and controls stay above. */
+#screen .art-video { position:absolute; inset:0; margin:auto; max-width:100%; max-height:100%; object-fit:contain; filter:none; transform:none; image-rendering:auto; }
+#screen .picture-canvas { position:absolute; inset:0; margin:auto; pointer-events:none; z-index:11; max-width:100%; max-height:100%; }
+#screen .picture-canvas[hidden] { display:none; }
+.screen-state { z-index:100; background:rgb(0 0 0 / .8); }
+.picture-details { margin-top:var(--s-2); color:var(--muted); }
+.picture-details summary { cursor:pointer; min-height:28px; }
+.picture-details p { white-space:pre-line; line-height:1.8; margin:var(--s-2) 0 0; overflow-wrap:anywhere; }
 .playback-controls { margin-top:var(--s-5); border-bottom:1px solid var(--line); font-size:var(--text-s); }
 .pc-row { display:grid; grid-template-columns:72px minmax(0,1fr); gap:var(--s-5); padding:var(--s-4) 0; border-top:1px solid var(--line); }
 .pc-label { margin:0; font-size:var(--text-s); font-weight:500; color:var(--muted); line-height:36px; }
@@ -114,6 +123,8 @@
 .dm-ep em { font-style:normal; font-size:var(--text-xs); color:var(--signal); border:1px solid currentColor; border-radius:var(--radius-pill); padding:0 6px; line-height:18px; flex-shrink:0; }
 .dm-detail-foot { display:flex; align-items:center; justify-content:space-between; gap:var(--s-3); padding:var(--s-3) var(--s-5); border-top:1px solid var(--line); }
 .dm-detail-foot .btn { min-width:112px; }
+#danmu-source-info, #danmu-uploader { display:block; overflow-wrap:anywhere; }
+#danmu-source-info { color:var(--muted); margin-top:4px; }
 .dm-uids { display:flex; flex-wrap:wrap; gap:var(--s-1) var(--s-3); padding:var(--s-2) 0; font-size:var(--text-s); }
 .dm-uids p { flex-basis:100%; margin:0; color:var(--muted); }
 .dm-uids a { font-family:var(--num); color:var(--ink); text-decoration:underline; min-height:32px; display:inline-flex; align-items:center; }
@@ -168,3 +179,8 @@
  .dm-stepper button, .dm-value, .pc-inline select { height:var(--control); min-height:var(--control); }
  .dm-sites button { min-height:40px; }
 }
+.playback-source { padding:var(--s-4); margin-block:var(--s-3) var(--s-5); background:var(--layer-1); font-size:var(--text-s); }
+.playback-source summary { cursor:pointer; min-height:var(--control); align-content:center; color:var(--ink); }
+.playback-source .kv { margin-block:var(--s-2) var(--s-3); }
+.playback-source dd { margin:0; overflow-wrap:anywhere; min-width:0; }
+.playback-source .link { display:inline-flex; align-items:center; min-height:var(--control); }

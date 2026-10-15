@@ -1,0 +1,43 @@
+{
+  "snapshot_date": "2026-10-15",
+  "timezone": "Asia/Shanghai",
+  "purpose": "portable documentation only; no live schedule changes",
+  "tasks": [
+    {
+      "id": "automation-2",
+      "name": "字幕v0→v1连续制作与派发",
+      "kind": "heartbeat",
+      "observed_status": "ACTIVE",
+      "source_prompt_sha256": "1b26cb150f171d4b522ff7731675ffc3cfa53f88248d809e4b9daa778adffd7b",
+      "template": "automation-2.txt",
+      "redactions": [
+        "target_thread_id omitted",
+        "inline thread IDs replaced with <LOCAL_THREAD_ID>"
+      ]
+    },
+    {
+      "id": "automation-3",
+      "name": "想看首集实评与稳定更新",
+      "kind": "heartbeat",
+      "observed_status": "ACTIVE",
+      "source_prompt_sha256": "c870372cf5dfcc6a099518dccb9eb6242030e794b39a240e0abcc6bb5735a134",
+      "template": "automation-3.txt",
+      "redactions": [
+        "target_thread_id omitted",
+        "inline thread IDs replaced with <LOCAL_THREAD_ID>"
+      ]
+    },
+    {
+      "id": "automation-4",
+      "name": "字幕遗留问题每周复盘",
+      "kind": "heartbeat",
+      "observed_status": "ACTIVE",
+      "source_prompt_sha256": "25fa376a65374fe6c79a50e443b975b8a8bebd62cfa88d1a0e82f4f8a6f1d08b",
+      "template": "automation-4.txt",
+      "redactions": [
+        "target_thread_id omitted",
+        "inline thread IDs replaced with <LOCAL_THREAD_ID>"
+      ]
+    }
+  ]
+}

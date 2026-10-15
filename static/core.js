@@ -39,7 +39,7 @@ async function api(path, body) {
 
 function boot() {
   App.ready ??= api('/bootstrap').then(b => {
-    Object.assign(App, { token: b.token, local: b.local, settings: b.settings, quarters: b.quarters || [] });
+    Object.assign(App, { token: b.token, local: b.local, settings: b.settings, quarters: b.quarters || [], catalog_years: b.catalog_years || [] });
     return App;
   });
   return App.ready;
@@ -82,8 +82,10 @@ function quarterName(q) {
 
 const ICONS = {
   home: '<path d="M4 10.5 12 4l8 6.5V20H4z"/><path d="M9.5 20v-6h5v6"/>',
+  following: '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>',
   season: '<rect x="4" y="5" width="16" height="15" rx="1"/><path d="M4 10h16M9 3v4M15 3v4"/>',
   library: '<path d="M5 4v16M10 4v16M15 5l4.5 14.5"/>',
+  subtitles: '<rect x="3" y="5" width="18" height="14" rx="1"/><path d="M6 12h5M14 12h4M6 15h3M12 15h6"/>',
   manage: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
   play: '<path d="M8 5.5v13l10.5-6.5z" fill="currentColor" stroke="none"/>',
   check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
@@ -103,7 +105,7 @@ const icon = (k, cls = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" fill="n
 /* ---------- Shell ---------- */
 
 const NAV_HEALTH = '/manage#status';
-const NAV = [['home', '/', '追番'], ['season', '/season', '新番'], ['library', '/library', '片库'], ['manage', '/manage', '后台']];
+const NAV = [['home', '/', '追番'], ['following', '/?view=all', '全部追番'], ['season', '/season', '新番'], ['library', '/library', '片库'], ['subtitles', '/subtitle-library', '字幕库'], ['manage', '/manage', '后台']];
 
 function shell(active) {
   const links = cls => NAV.map(([k, href, label]) =>
@@ -137,14 +139,20 @@ function statusProblems(s, now = Date.now() / 1000) {
   const tasks = new Map((s.tasks || []).map(t => [t.hash, t]));
   const error = (s.events || []).find(e => {
     if (e.level !== 'error' || e.scope === 'api' || now - e.time >= 3600) return false;
+    if (e.scope === 'dandan-history' && s.dandan_history?.ok === true
+      && s.dandan_history.success > e.time) return false;
     if (!e.scope?.startsWith('task:')) return true;
     const task = tasks.get(e.scope.slice(5));
     // Keep historical events visible, but use the task's current result for
     // health: review is actionable, completed/cleaned errors are historical.
-    return !task || (!['review', 'complete', 'cleaned'].includes(task.status) && Boolean(task.error));
+    return !task || (!['review', 'complete', 'cleaned', 'linked'].includes(task.status) && Boolean(task.error));
   });
-  const reviews = (s.tasks || []).filter(t => t.status === 'review');
-  return { error, reviews };
+  const reviews = s.task_reviews || (s.tasks || []).filter(t => t.status === 'review');
+  const uncertain = reviews.filter(t => t.submission_uncertain);
+  const reviewMessage = reviews.length ? uncertain.length === reviews.length
+    ? `${reviews.length} 项提交待确认 · 自动核对台账，暂不重复下载`
+    : `${reviews.length} 项下载待核查 · 详见下方任务记录` : '';
+  return { error, reviews, reviewMessage };
 }
 
 async function health() {
@@ -204,7 +212,46 @@ document.addEventListener('error', e => {
 /* ---------- Episodes ---------- */
 
 const EP_LABEL = { watched: '已看', resume: '续播', ready: '可播放', downloading: '下载中', missing: '缺集', aired: '已播出', future: '未播出' };
-const watchHref = e => `/watch?media=${e.media}${e.s === 'resume' ? '&resume=1' : ''}`;
+/* Also correct responses from a running worker that predates the schedule fix. */
+function applyAiringSchedule(detail, today = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'
+}).format(new Date())) {
+  const dates = new Map((detail.airings || []).map(a => [a.episode, a.airdate]));
+  const future = [...dates].filter(([, date]) => date && date > today).map(([n]) => n);
+  if (!future.length) return detail;
+  const firstFuture = Math.min(...future);
+  const actual = new Set((detail.episodes || []).map(e => e.episode));
+  const watched = new Set((detail.watches || []).filter(w => w.finished).map(w => w.episode));
+  const last = Math.max(detail.show.total || 0, ...dates.keys(), ...actual, ...watched);
+  detail.board.eps = detail.board.eps.filter(e => e.n <= last).map(e => {
+    if (e.n >= firstFuture && (!dates.get(e.n) || dates.get(e.n) > today) && ['missing', 'aired'].includes(e.s) && !actual.has(e.n) && !watched.has(e.n)) {
+      return { n: e.n, s: 'future', ...(dates.get(e.n) ? { date: dates.get(e.n) } : {}) };
+    }
+    return e;
+  });
+  if (detail.gaps) detail.gaps.missing = detail.gaps.missing.filter(n => n < firstFuture || actual.has(n) || (dates.get(n) && dates.get(n) <= today));
+  return detail;
+}
+async function applyListAiringSchedules(list, fetchDetail = id => api('/shows/' + id)) {
+  // Old running services lack the corrected gaps logic. Read their schedule
+  // through the same detail endpoint, then reuse the detail correction above.
+  // Updated services already share the backend board and need no extra GETs.
+  const pending = list.filter(s => !s.airing_schedule_version &&
+    (s.eps || []).some(e => e.s === 'missing'));
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
+    while (cursor < pending.length) {
+      const show = pending[cursor++];
+      const detail = applyAiringSchedule(await fetchDetail(show.id));
+      show.eps = detail.board.eps;
+      show.next = detail.board.next;
+    }
+  }));
+  return list;
+}
+const watchHref = e => e.release
+  ? '/static/finished-player.html?release=' + encodeURIComponent(e.release.id)
+  : `/watch?media=${e.media}${e.s === 'resume' ? '&resume=1' : ''}`;
 
 const coarse = matchMedia('(pointer: coarse)').matches;
 /* One DOM for every family; tokens and CSS decide how it reads (ticket chips, station line, tick grid). */
@@ -225,7 +272,7 @@ function epStrip(show) {
     const label = `第 ${e.n} 集 ${EP_LABEL[e.s]}${extra}`;
     const style = e.s === 'downloading' ? ` style="--p:${e.progress}%"` : e.s === 'resume' && e.duration ? ` style="--p:${Math.round(e.position / e.duration * 100)}%"` : '';
     const inner = `<span class="ep-n">${e.n}</span><span class="ep-note">${e.s === 'missing' ? '缺' : e.s === 'downloading' ? e.progress + '%' : e.s === 'future' && e.date ? airDate(e.date, false) : ''}</span>`;
-    const hit = e.media && !coarse
+    const hit = (e.media || e.release) && !coarse
       ? `<a class="ep-hit" href="${watchHref(e)}" aria-label="${label}" title="${label}">${inner}</a>`
       : `<span class="ep-hit" role="img" aria-label="${label}" title="${label}">${inner}</span>`;
     return `<li class="ep ${cls}" data-s="${e.s}" data-rel="${rel}"${style}>${hit}</li>`;

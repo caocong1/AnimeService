@@ -2,7 +2,7 @@
 /* 后台: is everything running; season collection; cleanup; the old library; settings. */
 (() => {
   shell('manage');
-  const SECTIONS = ['status', 'season', 'cleanup', 'legacy', 'settings'];
+  const SECTIONS = ['status', 'season', 'bangumi', 'cleanup', 'legacy', 'settings'];
   const loaded = {};
   let status = null, season = null, plans = [], showAll = {};
 
@@ -16,7 +16,9 @@
     const s = status = latest || await api('/status');
     s.events.sort((a, b) => b.time - a.time);
     const alive = s.heartbeat && Date.now() / 1000 - s.heartbeat.time < 240;
-    const { error: recentErr, reviews } = statusProblems(s);
+    const { error: recentErr, reviews, reviewMessage } = statusProblems(s);
+    const backgroundNote = [recentErr ? `${ago(recentErr.time)} · ${esc(recentErr.message)}` : '', esc(reviewMessage)].filter(Boolean).join('<br>')
+      || (s.heartbeat ? '心跳 ' + ago(s.heartbeat.time) : '没有心跳');
     const dh = s.dandan_history || {};
     const tile = (k, v, sub, state = 'ok') => `<div class="tile" data-state="${state}"><span class="k">${k}</span><span class="v"><i></i>${v}</span>${sub ? `<span class="s${state === 'down' ? ' error-line' : ''}">${sub}</span>` : ''}</div>`;
     const errSources = s.sources.filter(x => x.error || x.archive_error);
@@ -27,7 +29,7 @@
     $('#sec-status').innerHTML = `
       <h2 class="sr">状态</h2>
       <div class="tiles">
-        ${tile('后台', !alive ? '未响应' : recentErr ? '有错误' : '运行中', recentErr ? `${ago(recentErr.time)} · ${esc(recentErr.message)}` : reviews.length ? `${reviews.length} 项下载待核查 · ${esc(reviews[0].error)}` : s.heartbeat ? '心跳 ' + ago(s.heartbeat.time) : '没有心跳', !alive ? 'down' : recentErr || reviews.length ? 'warn' : 'ok')}
+        ${tile('后台', !alive ? '未响应' : recentErr ? '有错误' : '运行中', backgroundNote, !alive ? 'down' : recentErr || reviews.length ? 'warn' : 'ok')}
         ${tile('下载器', esc(s.downloader?.label || '—'), s.downloader?.blocker ? esc(s.downloader.blocker) : `已开启自动下载 ${s.authorized_count} 部`, s.downloader?.blocker ? 'warn' : 'ok')}
         ${tile('观看同步', dh.ok ? '正常' : dh.error ? '失败' : '未同步', dh.ok ? `${ago(dh.success)} · 已同步 ${dh.synced_watched || 0} 集` : esc(dh.error || ''), dh.ok ? 'ok' : dh.error ? 'down' : 'warn')}
         ${tile('检查新集', `每 ${Math.round(s.schedule.poll_seconds / 60)} 分钟`, s.schedule.requested > s.schedule.completed ? '排队中' : '上次 ' + ago(s.schedule.finished), 'ok')}
@@ -36,6 +38,11 @@
         <button class="btn primary" type="button" id="check">${icon('refresh')}检查新集</button>
         ${App.local ? '<button class="btn" type="button" id="probe">检测弹弹play</button>' : ''}
       </div>
+      ${reviews.length ? `<h3 class="m-sub">待核查下载 <span class="muted num">${reviews.length}</span></h3><div class="list-rows">${reviews.map(t => {
+        const check = t.reconciliation;
+        const result = { no_match: '台账暂无匹配，仍不能确定提交失败', conflict: '发现台账记录，但归属核验未通过', unavailable: '台账暂不可读，将继续核对' }[check?.result];
+        return `<div class="list-row"><span><a class="t" href="/show/${t.show_id}">${esc(t.title)}</a><div class="d">${t.submission_uncertain ? '提交待确认 · 已隔离，不会重复下载' : '下载待核查'}${result ? ` · ${ago(check.time)}核对：${result}` : ''}</div><details><summary>原始记录</summary><div class="d">${esc(t.error)}</div><div class="d">hash ${esc(t.hash)}</div></details></span></div>`;
+      }).join('')}</div>` : ''}
       <h3 class="m-sub">来源 <span class="muted num">${s.sources.length}</span>${errSources.length ? ` <span class="chip danger">${errSources.length} 个异常</span>` : ''}</h3>
       ${s.sources.length ? table('', ['作品', '来源', '最近成功', '最新 / 异常'], more('src', sources, 10).map(x => `<tr${x.error || x.archive_error ? ' class="is-error"' : ''}><td><a href="/show/${x.show_id}">${esc(x.title)}</a></td><td class="nowrap">${x.kind === 'mikan' ? '蜜柑' : '动漫花园'}${x.enabled ? '' : ' · 停用'}</td><td class="nowrap">${ago(x.last_success)}</td><td>${esc(x.error || x.archive_error || x.latest)}</td></tr>`)) + moreBtn('src', sources, 10) : '<p class="muted">没有订阅来源</p>'}
       <h3 class="m-sub">下载任务 <span class="muted num">${openTasks.length} 进行中</span></h3>
@@ -145,6 +152,7 @@
     try {
       if (sec === 'status') await renderStatus();
       if (sec === 'season') await renderSeason();
+      if (sec === 'bangumi') await renderBangumi();
       if (sec === 'cleanup') await renderCleanup();
       if (sec === 'legacy') await renderLegacy();
       if (sec === 'settings') renderSettings();

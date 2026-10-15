@@ -70,6 +70,7 @@ def test_api_cards_details_and_live_counts_agree_after_sync(tmp_path):
     from unittest.mock import Mock
     db,h,media,data,t=sample(tmp_path);h.merge(data,media)
     engine=Mock();engine.gaps.return_value={}
+    engine.source_review.status.return_value={'policy':{},'samples':[],'candidates':[],'recommendation':[]}
     app=create_app(db=db,engine=engine,start_worker=False)
     client=TestClient(app,base_url='http://127.0.0.1:4871')
     assert client.get('/api/shows?scope=history').json()[0]['watched']==1

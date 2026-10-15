@@ -1,0 +1,4 @@
+# Keep recurring dispatch sessions from accumulating hundreds of thousands of
+# tokens before compacting. This changes context management only, not the model.
+model_auto_compact_token_limit = 200000
+tool_output_token_limit = 6000

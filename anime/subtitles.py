@@ -41,7 +41,54 @@ class Subtitles:
             raise ValueError('无法读取这份文件的字幕，请用弹弹play打开')
         return result.stdout
 
+    def sidecars(self, item):
+        """Only selected, completed, same-video files in the owned torrent manifest."""
+        episode = self.db.one('SELECT * FROM episodes WHERE show_id=? AND episode=?',
+                              (item.get('show_id'), item.get('episode')))
+        if not episode or not episode.get('hash') or episode['path'] != item['path']:
+            return []
+        task = self.db.one("SELECT * FROM tasks WHERE hash=? AND show_id=? AND status='complete' AND purpose='episode'",
+                           (episode['hash'], item.get('show_id')))
+        if not task:
+            return []
+        try:
+            from .releases import bdecode
+            selection = json.loads(task['selection'])
+            h, manifest = bdecode((self.db.path.parent / 'torrents' / (task['hash']+'.torrent')).read_bytes())
+            if h != task['hash'] or manifest != selection['files']:
+                return []
+            video = selection['selected'][str(item['episode'])]
+            root = Path(task['save_path']).resolve()
+            media = (root / video['name']).resolve()
+            if not media.is_relative_to(root) or media != Path(item['path']).resolve() or video['size'] != item['size']:
+                return []
+            result = []
+            for f in manifest:
+                p = (root / f['name']).resolve()
+                suffix = p.suffix.lower()
+                if f['index'] not in selection['ids'] or suffix not in ('.ass', '.ssa', '.srt'):
+                    continue
+                if p.parent != media.parent or not p.is_relative_to(root) or not p.stem.startswith(media.stem + '.'):
+                    continue
+                if not p.is_file() or p.stat().st_size != f['size'] or not 0 < f['size'] <= 8*1024*1024:
+                    continue
+                chinese = p.stem[len(media.stem)+1:].lower() in ('sc','chs','zh-hans','tc','cht','zh-hant')
+                simplified = p.stem[len(media.stem)+1:].lower() in ('sc','chs','zh-hans')
+                ai = 'AI翻译' in task['title']
+                result.append({'index': -20000-f['index'], 'codec': 'ass' if suffix in ('.ass','.ssa') else 'subrip',
+                    'language': 'chi' if chinese else 'und', 'label': ('简体中文' if simplified else '繁體中文' if chinese else '随包字幕') + (' · AI翻译' if ai else ''),
+                    'supported': True, 'rank': 0 if simplified else 1 if chinese else 3,
+                    'origin': 'sidecar', 'file_name': p.name, '_path': str(p)})
+            return result
+        except (OSError, ValueError, KeyError, TypeError):
+            return []
+
     def tracks(self, item):
+        embedded = self.embedded_tracks(item)
+        sidecars = [{k:v for k,v in t.items() if k != '_path'} for t in self.sidecars(item)]
+        return sorted(embedded + sidecars, key=lambda t: (t['rank'], t['index']))
+
+    def embedded_tracks(self, item):
         with self.lock:
             key = self.fingerprint(item)
             if key in self.probes:
@@ -78,19 +125,30 @@ class Subtitles:
             raise ValueError('该轨道不支持原样式字幕')
         with self.lock:
             key = self.fingerprint(item)
+            sidecar = next((t for t in self.sidecars(item) if t['index'] == index), None)
+            if index <= -20000 and not sidecar:
+                raise ValueError('随包字幕已变化，请重新打开')
+            if sidecar:
+                data = Path(sidecar['_path']).read_bytes()
+                key += '-' + hashlib.sha256(data).hexdigest()
             self.cache.mkdir(parents=True, exist_ok=True)
             target = self.cache / f'{key}-{index}.{format}'
             if target.exists():
                 return target
             # Pipe output prevents a failed extraction from leaving a partial cache file.
-            data = self.run([self.tool('ffmpeg'), '-nostdin', '-v', 'error', '-protocol_whitelist',
-                             'file,pipe', '-i', item['path'], '-map', f'0:{index}',
+            data = data if sidecar and format == 'ass' else self.run([self.tool('ffmpeg'), '-nostdin', '-v', 'error', '-protocol_whitelist',
+                             'file,pipe', '-i', sidecar['_path'] if sidecar else item['path'], '-map', '0:0' if sidecar else f'0:{index}',
                              '-c:s', 'copy' if format == 'ass' else 'webvtt',
                              '-f', 'ass' if format == 'ass' else 'webvtt', 'pipe:1'], 90)
             header = b'[Script Info]' if format == 'ass' else b'WEBVTT'
             if not data.lstrip(b'\xef\xbb\xbf\r\n ').startswith(header) or len(data) > 8 * 1024 * 1024:
                 raise ValueError('字幕内容无效或过大，请用弹弹play打开')
-            if key != self.fingerprint(item):
+            expected = self.fingerprint(item)
+            if sidecar:
+                current = next((t for t in self.sidecars(item) if t['index'] == index), None)
+                if not current:raise ValueError('随包字幕已变化，请重新打开')
+                expected += '-' + hashlib.sha256(Path(current['_path']).read_bytes()).hexdigest()
+            if key != expected:
                 raise ValueError('文件已变化，请重新打开')
             target.write_bytes(data)
             return target

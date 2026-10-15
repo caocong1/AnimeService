@@ -50,7 +50,25 @@ def patch():
         if source.count(old) != 1:
             raise RuntimeError('Pinned Bilibili search changed; review patch before applying')
         source = source.replace(old, new, 1)
+    # Search already includes the public uploader; preserve it without N detail requests.
+    for old, new in [
+        ('title: cleanedTitle,', 'title: cleanedTitle,\n          uploader: searchType === "video" && typeof item.author === "string" ? item.author.slice(0, 100) : "",\n          danmaku_total: searchType === "video" && Number.isSafeInteger(item.video_review) && item.video_review >= 0 ? item.video_review : null,'),
+        ('bangumiId: anime.mediaId,', 'bangumiId: anime.mediaId,\n            uploader: anime.uploader || "",\n            danmaku_total: anime.danmaku_total ?? null,'),
+    ]:
+        if new in source:continue
+        if source.count(old) != 1:raise RuntimeError('Pinned Bilibili uploader fields changed')
+        source = source.replace(old, new, 1)
     path.write_text(source, encoding='utf-8')
+    model = base / 'models/dandan-model.js'
+    text = model.read_text(encoding='utf-8')
+    for old, new in [
+        ('mergedChildren = [], isHiddenChild = false } = {})', 'mergedChildren = [], isHiddenChild = false, uploader = "", danmaku_total = null } = {})'),
+        ('episodeCount, rating, isFavorited, source, mergedChildren, isHiddenChild  });', 'episodeCount, rating, isFavorited, source, mergedChildren, isHiddenChild, uploader, danmaku_total  });'),
+    ]:
+        if new in text:continue
+        if text.count(old) != 1:raise RuntimeError('Pinned Anime uploader model changed')
+        text = text.replace(old, new, 1)
+    model.write_text(text, encoding='utf-8')
 
 
 if __name__ == '__main__':

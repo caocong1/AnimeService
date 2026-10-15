@@ -1,7 +1,7 @@
 """Private-device access. Pairing can only be started from the loopback UI."""
 import hashlib,secrets,threading,time
 from fastapi import HTTPException,Request
-from fastapi.responses import JSONResponse,FileResponse
+from fastapi.responses import JSONResponse,FileResponse,RedirectResponse
 from .db import ROOT
 
 COOKIE='anime_device'
@@ -37,7 +37,9 @@ class RemoteAccess:
 
 def register_access(app,access):
     @app.get('/login')
-    def login_page():return FileResponse(ROOT/'static/login.html')
+    def login_page(request:Request):
+        if access.valid(request):return RedirectResponse('/',status_code=303)
+        return FileResponse(ROOT/'static/login.html')
     @app.post('/api/access/pair')
     def pair(request:Request):
         if not request.state.local:raise HTTPException(403,'请在家中电脑生成配对码')
@@ -47,7 +49,8 @@ def register_access(app,access):
         days=SESSION_DAYS.get(payload.get('device'),30)
         session=access.exchange(payload.get('code',''),days)
         response=JSONResponse({'ok':True})
-        response.set_cookie(COOKIE,session,max_age=days*86400,secure=not request.state.lan,httponly=True,samesite='strict')
+        response.set_cookie(COOKIE,session,max_age=days*86400,expires=days*86400,
+                            secure=not request.state.lan,httponly=True,samesite='strict')
         return response
     @app.post('/api/access/logout')
     def logout(request:Request):

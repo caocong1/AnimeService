@@ -17,6 +17,7 @@ def torrent(episodes=(1,),season=1):
     return encode({b'announce':b'https://example.invalid/announce',b'info':{b'name':b'Example',b'piece length':16384,b'pieces':b'x'*20,b'files':[{b'length':100,b'path':[f'Example S{season:02}E{e:02}.mkv'.encode()]} for e in episodes]}})
 class FakeQbit:
     def __init__(self):self.tasks={};self.fs={};self.adds=0;self.starts=[];self.stops=[];self.online=True;self.ambiguous=False
+    def check_storage(self):pass
     def info(self,h=None):
         if not self.online:raise ConnectionError('offline')
         return [dict(t) for k,t in self.tasks.items() if h is None or k==h]

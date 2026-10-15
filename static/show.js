@@ -3,7 +3,7 @@
 (() => {
   shell('home');
   const sid = Number(location.pathname.split('/').pop());
-  let d = null, epOpen = false;
+  let d = null, epOpen = false, stopObserving;
 
   const RES = [['1080', '1080p'], ['720', '720p'], ['2160', '2160p'], ['', '不限']];
   const SUB = [['any_zh', '简繁均可'], ['chs', '简体'], ['cht', '繁体']];
@@ -11,6 +11,7 @@
   const label = (list, v) => (list.find(([k]) => k === v) || [, v])[1];
 
   function epInfo(e, raw) {
+    if (e.release) return '自制字幕 · ' + FinishedReleases.label(e.release) + (e.s === 'resume' ? ` · 看到 ${clock(e.position)}` : '');
     if (e.s === 'resume') return `<span class="track" style="--p:${Math.round(e.position / e.duration * 100)}%"><i></i></span><span class="num">${clock(e.position)} / ${clock(e.duration)}</span>`;
     if (e.s === 'downloading') return `<span class="track" style="--p:${e.progress}%"><i></i></span><span class="num">${e.progress}%</span>`;
     if (e.s === 'future') return e.date ? `${airDate(e.date)} 播出` : '';
@@ -23,11 +24,12 @@
   function epRow(e) {
     const raw = d.episodes.find(x => x.episode === e.n);
     const isNext = d.board.next?.n === e.n;
-    const play = e.media ? `<a class="btn small${isNext ? ' primary' : ''}" href="${watchHref(e)}" aria-label="第 ${e.n} 集${e.s === 'resume' ? '续播' : e.s === 'watched' ? '重播' : '播放'}">${icon('play')}<span class="lbl">${e.s === 'resume' ? '续播' : e.s === 'watched' ? '重播' : '播放'}</span></a>` : '';
+    const play = e.media || e.release ? `<a class="btn small${isNext ? ' primary' : ''}" href="${watchHref(e)}" aria-label="第 ${e.n} 集${e.s === 'resume' ? '续播' : e.s === 'watched' ? '重播' : '播放'}">${icon('play')}<span class="lbl">${e.s === 'resume' ? '续播' : e.s === 'watched' ? '重播' : '播放'}</span></a>` : '';
+    const versions = (e.release_versions || []).filter(r => r.id !== e.release?.id).map(r => `<a class="btn small quiet" href="${r.player_url}" title="${FinishedReleases.label(r)}" aria-label="第 ${e.n} 集 ${FinishedReleases.label(r)}">${r.edition || 'v' + r.version}</a>`).join('');
     const tick = e.s === 'future' ? '' : e.s === 'watched'
       ? `<button class="btn small quiet" type="button" data-watch="${e.n}" data-finished="false" aria-label="第 ${e.n} 集改为未看">${icon('check')}<span class="lbl">已看</span></button>`
       : `<button class="btn small" type="button" data-watch="${e.n}" data-finished="true" aria-label="第 ${e.n} 集标记看完">${icon('check')}<span class="lbl">看完</span></button>`;
-    return `<div class="ep-row" data-s="${e.s}"${isNext ? ' data-next' : ''}><span class="no"><span>${e.n}</span></span><span class="st">${EP_LABEL[e.s]}</span><span class="info">${epInfo(e, raw)}</span><span class="acts">${play}${tick}</span></div>`;
+    return `<div class="ep-row" data-s="${e.s}"${isNext ? ' data-next' : ''}><span class="no"><span>${e.n}</span></span><span class="st">${EP_LABEL[e.s]}</span><span class="info">${epInfo(e, raw)}</span><span class="acts">${play}${versions}${tick}</span></div>`;
   }
 
   function episodes() {
@@ -84,6 +86,62 @@
     </div></details>`;
   }
 
+  function sourceReview() {
+    const r = d.source_review, p = r?.policy || {};
+    if (!r) return '';
+    const samples = (r.samples || []).filter(s => !s.source_blocker), reviewed = samples.filter(s => (r.recommendation || []).includes(s.family));
+    const candidates = [...new Map((r.candidates || []).map(c => [c.family.key,c])).values()];
+    const names = keys => keys.map(k => samples.find(s => s.family === k)?.family_info.label || k).join('；');
+    const status = {preparing:'核验种子',queued:'等待下载',analyzing:'提取证据',ready:'待评审',excluded:'已排除',error:'核验失败',analysis_error:'分析失败'};
+    const options = (value, blank = true) => `${blank ? '<option value="">不设置</option>' : ''}${reviewed.map(s => `<option value="${s.family}"${s.family === value ? ' selected' : ''}>${esc(s.family_info.label)}</option>`).join('')}`;
+    return `<details class="more" id="source-review"><summary>首集选源评测<span class="aside">${p.mode === 'selected' ? '主源已确认' : p.mode === 'sampling' ? (p.playback_family ? '首集可播放 · 评测中' : '评测中') : '半自动'}</span>${icon('chevron')}</summary><div class="body">
+      <p>画质优先，其次更新及时性，最后字幕翻译。每种片源与压制版本取一集，简繁同版只取一次。正片仍一集一版。</p>
+      <p>想看的新番通过作品、季集和旧文件核验后，后台自动找首集样本、提取字幕并由定时评审选主源和替补。证据不足会继续待评；旧番或首集不在授权范围时不会自动补首集。</p>
+      ${p.playback_family ? '<p>首集完成后即可在追番播放，后续先沿用这一片源；评分完成后再确认主源和替补。</p>' : ''}
+      ${r.sampling_limit?.available_families > 12 ? `<p>当前发现 ${r.sampling_limit.available_families} 种首集版本，自动取样最多12种、20GiB；超出范围的版本尚未比较，可在下方指定本次取样。</p>` : ''}
+      ${r.fidelity === 'original' ? '<p><b>原片保真优先</b> 排除声明了超分、补帧或AI画面修复的版本；优先官方原始发布、保留帧率与纹理。1080p标签本身不证明原生制作。</p>' : ''}
+      ${p.context ? `<p><b>原作核对重点</b> ${esc(p.context)}</p>` : ''}
+      ${p.primary ? `<p><b>主源</b> ${esc(names([p.primary]))}<br><b>替补</b> ${esc(names(p.backups || []) || '未设置')}<br>等待主源 ${p.wait_hours} 小时后才用已评审替补补缺集。</p>` : ''}
+      <button class="btn small" id="sample-sources" type="button"${!safelyEligible() ? ' disabled' : ''}>${samples.length ? '补查首集样本' : '开始首集多源评测'}</button>
+      <button class="btn small quiet" id="refresh-source-review" type="button">刷新评测</button>
+      <p><a class="link" href="/subtitle-reviews?show_id=${sid}">字幕对比记录</a> · <a class="link" href="/subtitle-reviews">全部字幕评审</a></p>
+      ${candidates.length > 12 ? `<p>首集片源超过12种，请选择本次取样；已取样片源也计入12种上限。</p><div class="form-grid">${candidates.map(c => `<label class="check wide"><input type="checkbox" data-review-candidate="${c.id}"${samples.some(s => s.family === c.family.key) ? ' checked' : ''}>${esc(c.family.label)}</label>`).join('')}</div>` : ''}
+      <p class="muted">评测下载保留单独副本，不计已看。字幕提取、截图和可用的本机OCR自动执行；翻译与画质评分需核对实物和日语/原作依据后记录。</p>
+      ${samples.map(s => { const e = s.evidence || {}, v = (e.probe?.streams || []).find(x => x.codec_type === 'video');
+        const file = name => `/api/shows/${sid}/source-review/${s.candidate_id}/file/${name}`;
+        const pending = s.state === 'queued' ? (s.download?.status === 'complete' ? '下载完成 · 待分析' : s.download?.status === 'downloading' ? `${s.download.provider === 'qbit' ? 'qB' : '迅雷'}下载中` : s.download?.status === 'review' ? '下载待核查' : '等待下载提交') : status[s.state] || s.state;
+        return `<details class="more"><summary>${esc(s.family_info.label)}<span class="aside">${s.processing_blocker ? '保真规则排除' : s.review?.decision === 'excluded' || s.review?.recommendation_eligible === false || s.review?.fidelity_qualification?.eligible === false ? '已排除' : s.review?.visual !== undefined ? `画质 ${s.review.visual} · 字幕 ${s.review.translation}` : esc(pending)}</span></summary><div class="body">
+          <p>${esc(s.title)}</p><p class="muted">${esc(s.download?.status ? TASKS[s.download.status] || s.download.status : '')}${s.published ? ' · 发布 ' + ago(s.published) : ' · 发布时间未取得'}${s.release_delay_hours != null ? ` · 首播后 ${s.release_delay_hours} 小时发布` : ' · 首播延迟待核实'}${v ? ` · ${v.width}×${v.height} ${esc(v.codec_name)} · 平均总码率 ${(e.average_total_bitrate / 1e6).toFixed(2)} Mbps` : ''}</p>
+          ${s.error || s.download?.error ? `<p class="warn-line">${esc(s.error || s.download.error)}</p>` : ''}
+          ${s.processing_blocker ? `<p class="warn-line">${esc(s.processing_blocker)}。旧评分保留作历史，不参与当前选源。</p>` : ''}
+          ${s.review?.evidence ? `<p><b>实评依据</b> ${esc(s.review.evidence)}</p><p class="muted">${esc(s.review.original_basis || '')} · ${s.review.confidence === 'high' ? '完整评测' : s.review.confidence === 'medium' ? '抽样评测，不能代表整季质量' : '资格核查'}</p>` : ''}
+          ${s.state === 'ready' ? `<p>${(e.tracks || []).map(t => t.file ? `<a class="link" href="${file(t.file)}" target="_blank">${esc(t.label)} · ${t.metrics.cues}条字幕${t.metrics.chinese_cues ? ` · ${t.metrics.chinese_cues}条中文候选` : ''}</a>` : esc(t.label) + '（图形字幕）').join(' · ')}</p>
+            <p>${(e.frames || []).map((f, i) => `<a class="link" href="${file(f.file)}" target="_blank">画面${i + 1}（${clock(f.seconds)}）</a>`).join(' · ')} · <a class="link" href="${file('packet.json')}" target="_blank">完整证据</a></p>
+            ${e.ocr ? `<p class="muted">${e.ocr.file ? `<a class="link" href="${file(e.ocr.file)}" target="_blank">OCR字幕（估计时间，待校对）</a> · ` : ''}${esc(typeof e.ocr === 'string' ? e.ocr : e.ocr.note)}</p>` : ''}
+            <form class="form-grid" data-source-review="${s.candidate_id}">
+              <label class="field"><span>画质实评（0–100）</span><input name="visual" type="number" min="0" max="100" required value="${s.review.visual ?? ''}"></label>
+              <label class="field"><span>翻译实评（0–100）</span><input name="translation" type="number" min="0" max="100" required value="${s.review.translation ?? ''}"></label>
+              <label class="field wide"><span>画面、时间点、字幕差异证据</span><textarea name="evidence" rows="3" required>${esc(s.review.evidence || '')}</textarea></label>
+              <label class="field wide"><span>日语原声/台词及原作依据（含来源）</span><textarea name="original_basis" rows="3" required>${esc(s.review.original_basis || '')}</textarea></label>
+              <label class="check wide"><input type="checkbox" name="chinese_verified" required${s.review.chinese_verified ? ' checked' : ''}>已实际核对中文字幕及翻译</label>
+              <label class="field"><span>置信度</span><select name="confidence"><option value="medium">中：抽样评测</option><option value="high"${s.review.confidence === 'high' ? ' selected' : ''}>高：完整评测</option></select></label>
+              <div class="wide"><button class="btn small" type="submit">保存实物评审</button><button class="btn small quiet" type="button" data-exclude-source="${s.candidate_id}">按上述依据排除</button></div>
+            </form>` : ''}
+        </div></details>`; }).join('')}
+      ${reviewed.length ? `<form id="choose-source" class="form-grid"><label class="field wide"><span>主源</span><select name="primary" required>${options(p.primary || r.recommendation[0],false)}</select></label>
+        ${[0,1,2,3].map(i => `<label class="field wide"><span>替补 ${i + 1}</span><select name="backup${i}">${options(p.backups?.[i])}</select></label>`).join('')}
+        <label class="field"><span>等主源最长小时数</span><input name="wait_hours" type="number" min="1" max="168" value="${p.wait_hours || 24}" required></label>
+        <div class="wide"><button class="btn primary" type="submit">确认来源并自动追更</button></div></form>` : ''}
+      ${!samples.length ? `<p class="muted">目前有 ${r.candidates.length} 个经作品、季集核验的首集候选。</p>` : ''}
+    </div></details>`;
+  }
+
+  function safelyEligible() {
+    const s = d.show, m = s.mapping;
+    return s.selected && s.authorized && !s.cleanup_hold && m.confirmed && m.inventory_checked &&
+      (['trial','watching'].includes(s.state) || (s.state === 'wish' && s.auto_download)) && (m.start || 1) === 1;
+  }
+
   function render() {
     const s = d.show, m = s.mapping || {}, b = d.board;
     document.title = s.title + ' · 番屿';
@@ -100,11 +158,11 @@
           <div class="facts">${s.score ? `<a class="bgm-score" href="https://bgm.tv/subject/${s.id}" target="_blank" rel="noopener" title="在 Bangumi 查看">Bangumi <b>${s.score}</b></a>` : ''}${s.air_date ? `<span>${esc(s.air_date)} 首播</span>` : ''}<span>${s.total ? `共 <b>${s.total}</b> 集` : '集数未定'}</span></div>
           <div class="tags">${(s.tags || []).slice(0, 6).map(t => `<span class="chip">${esc(t.name || t)}</span>`).join('')}</div>
         </div>
-        <div class="aside">${nextState(b)}${autoDl(s, m)}</div>
+        <div class="aside"><div id="next-availability">${nextState(b)}</div>${autoDl(s, m)}</div>
         <div class="states"><div class="seg" role="group" aria-label="追番状态">${Object.entries(STATES).map(([k, v]) => `<button type="button" data-state="${k}" aria-pressed="${!!(s.selected && s.state === k)}">${v}</button>`).join('')}</div></div>
       </section>
       <div class="show-grid">
-        <section aria-labelledby="eps-title">
+        <section id="episode-availability" aria-labelledby="eps-title">
           <h2 class="group-head" id="eps-title"><b>分集</b><span class="count">已看 ${watched}/${s.total || b.eps.length}${ready ? ' · 待看 ' + ready : ''}</span></h2>
           ${episodes()}
         </section>
@@ -120,6 +178,7 @@
             </form>
           </section>
           ${download(s, m)}
+          ${sourceReview()}
           ${files.length ? `<details class="more"><summary>文件<span class="aside">${files.length} 个</span>${icon('chevron')}</summary><div class="body">${files.map(e => `<div class="inventory-item" style="grid-template-columns:56px minmax(0,1fr) auto"><span class="num">第 ${e.episode} 集</span><span>${esc(e.path.split(/[\\/]/).pop())}</span><button class="btn small quiet" type="button" data-copy="${e.episode}">复制路径</button></div>`).join('')}</div></details>` : ''}
           ${d.candidates.length ? `<details class="more"><summary>候选记录<span class="aside">${d.candidates.length}</span>${icon('chevron')}</summary><div class="body"><table class="cand"><tbody>${d.candidates.slice(0, 40).map(c => `<tr><td>${esc(c.title)}</td><td class="nowrap">${esc(c.status)}${c.reason ? '<br><span class="muted">' + esc(c.reason) + '</span>' : ''}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
           <details class="more"><summary>简介与链接${icon('chevron')}</summary><div class="body">
@@ -130,13 +189,28 @@
         </div>
       </div>`;
     if (location.hash === '#download') $('#download').open = true;
+    if (location.hash === '#source-review') $('#source-review').open = true;
   }
 
   async function load() {
     try {
       await boot();
-      d = await api('/shows/' + sid);
+      const [detail, releases] = await Promise.all([api('/shows/' + sid),
+        FinishedReleases.load({verifyMedia: true}).catch(e => { toast(e.message); return []; })]);
+      d = detail;
+      applyAiringSchedule(d);
+      const baseline = d.board;
+      d.board = FinishedReleases.applyBoard(d.show, baseline, releases);
       render();
+      stopObserving?.();
+      stopObserving = FinishedReleases.observe(next => {
+        epOpen = !!$('.ep-fold')?.open;
+        d.board = FinishedReleases.applyBoard(d.show, baseline, next);
+        const watched = d.board.eps.filter(e => e.s === 'watched').length;
+        const ready = d.board.eps.filter(e => e.s === 'ready' || e.s === 'resume').length;
+        $('#episode-availability').innerHTML = `<h2 class="group-head" id="eps-title"><b>分集</b><span class="count">已看 ${watched}/${d.show.total || d.board.eps.length}${ready ? ' · 待看 ' + ready : ''}</span></h2>${episodes()}`;
+        $('#next-availability').innerHTML = nextState(d.board);
+      }, {initial: releases});
     } catch (e) {
       $('#main').innerHTML = `<div class="empty"><h2>${/404|没有此条目/.test(e.message) ? '没有这部作品' : '读取失败'}</h2><p>${esc(e.message)}</p><a class="btn" href="/">回到追番</a></div>`;
     }
@@ -152,6 +226,13 @@
     const b = e.target.closest('button, a[href="#download"]');
     if (!b) return;
     if (b.matches('a[href="#download"]')) { $('#download').open = true; return; }
+    if (b.dataset.excludeSource) return act(b, async () => {
+      const f = b.closest('form'), data = Object.fromEntries(new FormData(f));
+      if (!data.evidence.trim() || !data.original_basis.trim()) throw Error('请填写排除依据和实际核查来源');
+      await api(`/shows/${sid}/source-review/review`, {candidate_id:Number(b.dataset.excludeSource),review:{
+        decision:'excluded',evidence:data.evidence,original_basis:data.original_basis,reviewer:'用户手动评审'}});
+      await load(); $('#source-review').open = true; toast('已排除此样本，不纳入主源或替补');
+    });
     if (b.dataset.state) return act(b, () => setState(b.dataset.state, d.show.selected ? d.show.state : null));
     if (b.dataset.watch) return act(b, async () => {
       const n = Number(b.dataset.watch), fin = b.dataset.finished === 'true';
@@ -180,6 +261,14 @@
       b.disabled = true;
     });
     switch (b.id) {
+      case 'sample-sources': return act(b, async () => {
+        const choices = $$('[data-review-candidate]');
+        const ids = choices.filter(x => x.checked).map(x => Number(x.dataset.reviewCandidate));
+        if (choices.length && !ids.length) throw Error('请至少选择一种首集片源');
+        await api(`/shows/${sid}/source-review/start`, choices.length ? {candidate_ids:ids} : {});
+        await load(); $('#source-review').open = true; toast('已核验首集并加入迅雷评测队列');
+      });
+      case 'refresh-source-review': return act(b, async () => { await load(); $('#source-review').open = true; });
       case 'refresh': return act(b, async () => { await api(`/shows/${sid}/refresh`, {}); toast('正在更新资料'); });
       case 'prepare': return act(b, async () => {
         $('#prepare-out').innerHTML = '<p class="muted">正在查找来源…</p>';
@@ -216,6 +305,16 @@
   document.addEventListener('submit', e => {
     e.preventDefault();
     const f = e.target, data = Object.fromEntries(new FormData(f)), btn = f.querySelector('[type=submit]');
+    if (f.dataset.sourceReview) return act(btn, async () => {
+      await api(`/shows/${sid}/source-review/review`, {candidate_id:Number(f.dataset.sourceReview),review:{
+        visual:Number(data.visual),translation:Number(data.translation),evidence:data.evidence,original_basis:data.original_basis,
+        chinese_verified:f.chinese_verified.checked,confidence:data.confidence,reviewer:'用户手动评审'}});
+      await load(); $('#source-review').open = true; toast('评审已保存，可确认主源和替补');
+    });
+    if (f.id === 'choose-source') return act(btn, async () => {
+      await api(`/shows/${sid}/source-review/choose`, {primary:data.primary,backups:[0,1,2,3].map(i=>data['backup'+i]).filter(Boolean),wait_hours:Number(data.wait_hours)});
+      await load(); $('#source-review').open = true; toast('主源和替补已确认，后续自动补缺集');
+    });
     if (f.id === 'feedback') return act(btn, async () => {
       await api(`/shows/${sid}/feedback`, { rating: data.rating ? Number(data.rating) : null, feedback: data.feedback, drop_reason: data.drop_reason || '' });
       toast('已保存');
@@ -234,4 +333,5 @@
   });
 
   load();
+  addEventListener('pageshow', e => { if (e.persisted) load(); });
 })();

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>熟肉成品 · 番屿</title><link rel="icon" href="/static/icon.svg"><link rel="stylesheet" href="/static/tokens.css"><link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/finished-player.css"><script src="/static/theme.js"></script></head>
+<body><main id="main"><header class="page-head"><a class="link" href="/subtitle-library">返回字幕库</a><h1 id="release-title">正在打开成品…</h1><p class="muted" id="release-info" role="status"></p></header>
+<section id="finished-player" aria-label="成品播放器" hidden>
+<video id="video" controls playsinline preload="metadata" aria-label="完整字幕视频"></video>
+<div class="finished-controls" id="controls" hidden>
+<input id="seek" type="range" min="0" max="1" value="0" step="0.1" aria-label="播放位置">
+<div class="finished-buttons"><button class="btn" id="play" type="button">播放</button><button class="btn quiet" id="back" type="button">−5秒</button><button class="btn quiet" id="forward" type="button">+5秒</button><span id="clock">00:00 / 00:00</span><button class="btn quiet" id="mute" type="button" aria-label="静音">声音开</button><input id="volume" type="range" min="0" max="1" value="0.8" step="0.05" aria-label="音量"><select id="rate" aria-label="播放速度"><option value="1">原速</option><option value="1.25">1.25倍</option><option value="1.5">1.5倍</option><option value="2">2倍</option></select><button class="btn quiet" id="fullscreen" type="button">全屏</button></div>
+</div></section>
+<p id="release-links" class="finished-links" hidden><button class="btn small" id="watch-toggle" type="button">标记看完</button><a class="link" id="show-link">返回作品分集</a><a class="link" href="/">返回追番</a><a class="link" id="download-video" download>下载整集视频</a><a class="link" id="download-subtitles" download>下载字幕和字体</a><a class="link" id="release-notes">版本说明</a></p>
+<p class="muted" id="tracking-status" role="status"></p>
+<p class="muted" id="message" role="status">字幕已经合成在视频里，点击播放即可观看。</p>
+</main><script src="/static/core.js?v=20261015-finished-playback"></script><script src="/static/finished-releases.js?v=20261015-tracking"></script><script src="/static/finished-player.js?v=20261015-tracking"></script></body></html>

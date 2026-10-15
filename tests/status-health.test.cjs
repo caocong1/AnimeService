@@ -22,9 +22,29 @@ test('quarantined task keeps review warning without stale network error', () => 
 });
 
 test('recovered/completed tasks do not keep health in error while history remains', () => {
-  for (const status of ['complete', 'cleaned', 'downloading']) {
+  for (const status of ['complete', 'cleaned', 'linked', 'downloading']) {
     assert.equal(problems([{ hash: 'abc', status, error: '' }], [error]).error, undefined);
   }
+});
+
+test('review count uses the complete review list rather than recent history', () => {
+  const reviews = [{ hash: 'older', status: 'review', error: 'uncertain submit' }];
+  const result = context.statusProblems({ tasks: [], events: [], task_reviews: reviews }, 10000);
+  assert.equal(result.reviews.length, 1);
+  assert.equal(result.reviews[0].hash, 'older');
+  assert.equal(context.statusProblems({ tasks: reviews, events: [], task_reviews: [] }, 10000).reviews.length, 0);
+});
+
+test('uncertain submissions use a concise summary and preserve raw task evidence', () => {
+  const reviews = [{ hash: 'a', submission_uncertain: 1, error: 'Computer Use click timeout' },
+    { hash: 'b', submission_uncertain: 1, error: 'old timeout' }];
+  const result = context.statusProblems({ tasks: [], events: [], task_reviews: reviews }, 10000);
+  assert.equal(result.reviewMessage, '2 项提交待确认 · 自动核对台账，暂不重复下载');
+  assert.equal(result.reviews[0].error, 'Computer Use click timeout');
+  reviews[1].submission_uncertain = 0;
+  assert.equal(context.statusProblems({ task_reviews: reviews }, 10000).reviewMessage,
+    '2 项下载待核查 · 详见下方任务记录');
+  assert.equal(context.statusProblems({ task_reviews: [] }, 10000).reviewMessage, '');
 });
 
 test('active task and service failures still show errors alongside reviews', () => {
@@ -39,4 +59,15 @@ test('foreground API errors remain in history without changing worker health', (
   assert.equal(problems([], [requestError]).error, undefined);
   const serviceError = { ...error, scope: 'service' };
   assert.equal(problems([], [requestError, serviceError]).error, serviceError);
+});
+
+test('later successful history sync resolves only its own old failure', () => {
+  const failure = { ...error, scope: 'dandan-history' };
+  const s = { events: [failure], dandan_history: { ok: true, success: 10000 } };
+  assert.equal(context.statusProblems(s, 10001).error, undefined);
+  for (const health of [undefined, { ok: false, success: 10000 }, { ok: true, success: 9998 }]) {
+    assert.equal(context.statusProblems({ ...s, dandan_history: health }, 10001).error, failure);
+  }
+  const serviceFailure = { ...failure, scope: 'service' };
+  assert.equal(context.statusProblems({ ...s, events: [failure, serviceFailure] }, 10001).error, serviceFailure);
 });

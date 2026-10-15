@@ -33,7 +33,7 @@ class Qbit:
                         continue
                     if not r.ok:raise NetworkError(f'qBittorrent {endpoint} HTTP {r.status_code}')
                     try:return r.json()
-                    except ValueError:return r.text()
+                    except ValueError:return r.text
                 except requests.RequestException:raise NetworkError('qBittorrent请求超时或连接不可达') from None
             raise NetworkError('qBittorrent认证失败')
     def info(self,hash=None):return self.call('torrents/info',params={'hashes':hash} if hash else {})

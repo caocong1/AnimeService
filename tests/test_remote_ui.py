@@ -1,4 +1,5 @@
-import hashlib,time
+import hashlib,re,time
+from email.utils import parsedate_to_datetime
 import pytest
 from unittest.mock import Mock
 from fastapi.testclient import TestClient
@@ -29,7 +30,8 @@ def test_ui_revalidates_on_normal_and_conditional_reload(tmp_path):
         assert conditional.status_code==(304 if path.startswith('/static/') else 200)
         assert conditional.headers['cache-control']==cache
     html=client.get('/manage').text
-    assert '/static/core.js?v=2' in html and '/static/manage.js?v=2' in html
+    for script in ('core.js', 'manage.js'):
+        assert re.search(r'/static/' + re.escape(script) + r'\?v=\d+"', html)
     assert client.get('/api/bootstrap').headers['cache-control']=='no-store'
 
 
@@ -196,7 +198,56 @@ def test_tv_box_pairs_for_a_year_and_others_for_thirty_days(tmp_path,device,days
     payload={'code':code,**({'device':device} if device else {})}
     res=remote.post('/api/access/login',headers={'Origin':'https://anime.example.test'},json=payload)
     assert res.status_code==200 and f'max-age={days*86400}' in res.headers['set-cookie'].lower()
+    cookie_expires=parsedate_to_datetime(res.headers['set-cookie'].split('expires=',1)[1].split(';',1)[0]).timestamp()
     left=db.one('SELECT expires FROM remote_sessions')['expires']-time.time()
     assert days*86400-60<left<=days*86400
+    assert abs(cookie_expires-db.one('SELECT expires FROM remote_sessions')['expires'])<2
     assert local.post('/api/access/revoke',headers={'X-Anime-Token':token},json={}).status_code==200
     assert remote.get('/api/bootstrap').status_code==401
+
+
+def paired_client(tmp_path):
+    app,db=app_at(tmp_path)
+    local=TestClient(app,base_url='http://127.0.0.1:4871')
+    remote=TestClient(app,base_url='https://anime.example.test')
+    token=local.get('/api/bootstrap').json()['token']
+    code=local.post('/api/access/pair',headers={'X-Anime-Token':token},json={}).json()['code']
+    assert remote.post('/api/access/login',headers={'Origin':'https://anime.example.test'},json={'code':code}).status_code==200
+    return remote,db
+
+
+def test_saved_device_pairing_survives_service_and_browser_restart(tmp_path):
+    remote,db=paired_client(tmp_path)
+    old_token=remote.get('/api/bootstrap').json()['token']
+    before=db.rows('SELECT * FROM remote_sessions')
+    # Reopen the database and create a fresh application, then restore only the
+    # browser cookie jar. No pairing code or in-memory application state survives.
+    restarted_db=Store(db.path)
+    app=create_app(restarted_db,Mock(),start_worker=False)
+    fresh_browser=TestClient(app,base_url='https://anime.example.test')
+    fresh_browser.cookies.update(remote.cookies)
+    bootstrap=fresh_browser.get('/api/bootstrap')
+    assert bootstrap.status_code==200
+    assert bootstrap.json()['token']!=old_token
+    assert fresh_browser.get('/',follow_redirects=False).status_code==200
+    login=fresh_browser.get('/login',follow_redirects=False)
+    assert login.status_code==303 and login.headers['location']=='/'
+    assert login.headers['cache-control']=='no-store'
+    assert restarted_db.rows('SELECT * FROM remote_sessions')==before
+    assert fresh_browser.post('/api/access/logout',headers={
+        'Origin':'https://anime.example.test','X-Anime-Token':old_token},json={}).status_code==403
+    assert fresh_browser.get('/api/bootstrap').status_code==200
+
+
+@pytest.mark.parametrize('invalid',['expired','revoked','missing','wrong'])
+def test_login_restore_never_accepts_invalid_device_pairing(tmp_path,invalid):
+    remote,db=paired_client(tmp_path)
+    if invalid=='expired':db.execute('UPDATE remote_sessions SET expires=?',(time.time()-1,))
+    elif invalid=='revoked':db.execute('DELETE FROM remote_sessions')
+    elif invalid=='missing':remote.cookies.clear()
+    else:
+        remote.cookies.clear();remote.cookies.set('anime_device','invalid-test-session')
+    before=db.rows('SELECT * FROM remote_sessions')
+    assert remote.get('/login',follow_redirects=False).status_code==200
+    assert remote.get('/api/bootstrap').status_code==401
+    assert db.rows('SELECT * FROM remote_sessions')==before

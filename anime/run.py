@@ -1,6 +1,29 @@
 """Single local uvicorn process; startup supervisor handles process restarts."""
-import logging,logging.handlers,os
+import contextlib,logging,logging.handlers,os,socket
 from .db import ROOT
+@contextlib.contextmanager
+def listen_sockets(config):
+    """Keep the configured listener and serve localhost's IPv6 loopback as well."""
+    primary=config.bind_socket();sockets=[primary]
+    try:
+        if primary.family==socket.AF_INET:
+            extra=None
+            try:
+                extra=socket.socket(socket.AF_INET6,socket.SOCK_STREAM)
+                extra.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_V6ONLY,1)
+                extra.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+                extra.bind(('::1',primary.getsockname()[1]))
+                extra.set_inheritable(True)
+            except OSError:
+                if extra is not None:extra.close()
+                logging.getLogger(__name__).warning('IPv6 loopback unavailable; keeping configured listener')
+            else:
+                sockets.append(extra)
+                logging.getLogger(__name__).info('Localhost IPv6 loopback listener enabled')
+        yield sockets
+    finally:
+        for sock in sockets:sock.close()
+
 def main():
     import ctypes
     kernel=ctypes.WinDLL('kernel32',use_last_error=True)
@@ -14,6 +37,7 @@ def main():
     logging.basicConfig(handlers=[handler],level=logging.INFO)
     import uvicorn
     from .deployment import load as load_deployment
-    uvicorn.run('anime.app:app',host=load_deployment().get('bind_host','127.0.0.1'),port=4871,access_log=False,log_config=None,
-                proxy_headers=True,forwarded_allow_ips='127.0.0.1')
+    config=uvicorn.Config('anime.app:app',host=load_deployment().get('bind_host','127.0.0.1'),port=4871,
+                access_log=False,log_config=None,proxy_headers=True,forwarded_allow_ips='127.0.0.1')
+    with listen_sockets(config) as sockets:uvicorn.Server(config).run(sockets=sockets)
 if __name__=='__main__':main()

@@ -15,6 +15,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Frontend behavior regressions
+        shell: pwsh
+        run: |
+          $nodeTests = @(Get-ChildItem tests -Filter '*.test.cjs' | ForEach-Object { $_.FullName })
+          node --test @nodeTests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/subtitle-delivery-model.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - shell: pwsh
         run: |
           Get-ChildItem static/*.js | ForEach-Object {

@@ -8,6 +8,7 @@
 | artplayer-plugin-danmuku | 同上 · 5.3.0 | MIT |
 | libass-wasm / SubtitlesOctopus | https://github.com/libass/JavascriptSubtitlesOctopus · 4.1.0 | libass LGPL-2.1-or-later 等组合许可；完整清单位于安装目录 COPYRIGHT |
 | Noto Sans CJK SC | https://github.com/notofonts/noto-cjk · Sans2.004 | SIL Open Font License 1.1 |
+| Noto Sans CJK JP | https://github.com/notofonts/noto-cjk · Sans2.004 | SIL Open Font License 1.1 |
 | danmuapi | https://github.com/canmo101/danmuapi · 28673ac764485b0f37966779bc3b14e2b97d31aa | AGPL-3.0，见上游 LICENSE |
 | Chromaprint / fpcalc | https://github.com/acoustid/chromaprint · 1.6.1 | LGPL-2.1-or-later；官方 Windows 二进制及其依赖许可随工具保留 |
 | yt-dlp | https://github.com/yt-dlp/yt-dlp · 2026.08.19 | Unlicense，依赖保留各自许可 |

@@ -14,20 +14,22 @@
 <body>
 <main id="main">
   <header class="page-head"><h1>追番</h1><p class="meta" id="summary"></p></header>
-  <div class="board">
+  <div class="board" id="watch-board">
     <section class="screens" id="screens" aria-label="可以看的"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></section>
     <aside class="side" id="side" aria-label="其他"></aside>
   </div>
-  <section id="shelf-section" aria-labelledby="shelf-title">
-    <h2 class="group-head" id="shelf-title" style="margin-top:var(--s-7)"><b>全部追番</b><span class="count" id="shelf-count"></span></h2>
+  <section id="shelf-section" aria-label="全部追番" hidden>
     <div class="shelf-tools">
       <div class="seg" id="state-filter" role="group" aria-label="按状态筛选"></div>
       <label class="search"><span class="sr">搜索追番</span><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input id="q" type="search" placeholder="搜索" autocomplete="off"></label>
     </div>
+    <nav class="following-pager" data-pager aria-label="追番分页（顶部）"></nav>
     <div class="shelf" id="shelf"></div>
+    <nav class="following-pager" data-pager aria-label="追番分页（底部）"></nav>
   </section>
 </main>
-<script src="/static/core.js?v=2"></script>
-<script src="/static/home.js"></script>
+<script src="/static/core.js?v=20261015-finished-playback"></script>
+<script src="/static/finished-releases.js?v=20261015-tracking"></script>
+<script src="/static/home.js?v=20261015-tracking"></script>
 </body>
 </html>

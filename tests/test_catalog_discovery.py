@@ -6,6 +6,19 @@ from anime.db import Store
 from anime.app import create_app
 from anime.releases import validate_title,Rejected
 
+def test_special_chapters_do_not_inflate_regular_episode_total(tmp_path):
+    db=Store(tmp_path/'a.db')
+    db.upsert_subject({'id':1,'name':'Example','eps':12,'total_episodes':13,
+                       'infobox':[{'key':'话数','value':'12'}]})
+    db.execute("UPDATE shows SET selected=1,state='watching',watched=12,mapping='{}' WHERE id=1")
+    assert db.show(1)['total']==12
+    # A compact result can clear eps while retaining the detailed wiki count.
+    db.upsert_subject({'id':1,'name':'Example','eps':0,'total_episodes':13})
+    s=db.show(1)
+    assert s['total']==12
+    assert (s['selected'],s['state'],s['watched'],s['mapping'])==(1,'watching',12,'{}')
+    assert json.loads(s['metadata'])['total_episodes']==13
+
 def test_compact_search_preserves_total_and_detail_fields(tmp_path):
     db=Store(tmp_path/'a.db')
     db.upsert_subject({'id':1,'name':'Example','total_episodes':24,'infobox':[{'key':'别名','value':[{'v':'Alias'}]}]},'2026-10')
@@ -53,3 +66,49 @@ def test_quarter_fetch_enriches_search_with_subject_details(tmp_path):
                            Mock(json=lambda:{'id':9,'name':'アニメ','platform':'TV','total_episodes':13})]
     assert Catalog(db,web).sync_quarter(2026,10)==1
     assert db.show(9)['total']==13 and db.show(9)['quarter']=='2026-10'
+
+
+def test_quarter_uses_actual_page_length_and_preserves_tracking(tmp_path):
+    from urllib.parse import urlparse,parse_qs
+    from anime.sources import Catalog
+    db=Store(tmp_path/'a.db');web=Mock();offsets=[]
+    for sid,state in [(1,'dropped'),(2,'paused'),(3,'completed')]:
+        db.upsert_subject({'id':sid,'name':'Old title'},'2026-07')
+        db.execute('UPDATE shows SET state=?,selected=1,authorized=0,cleanup_hold=1,mapping=? WHERE id=?',
+                   (state,'{"confirmed":true}',sid))
+    def fetch(url,**kwargs):
+        query=parse_qs(urlparse(url).query);offset=int(query['offset'][0]);offsets.append(offset)
+        assert query['limit']==['20']
+        # Model an upstream cap smaller than the requested size, including a final short page.
+        ids=list(range(1,6))[offset:offset+2]
+        return Mock(json=lambda:{'total':5,'limit':2,'offset':offset,
+                                'data':[{'id':sid,'name':'Updated','platform':'其他'} for sid in ids]})
+    web.fetch.side_effect=fetch
+    assert Catalog(db,web).sync_quarter(2026,7)==5
+    assert offsets==[0,2,4]
+    assert {s['id'] for s in db.rows('SELECT id FROM shows')}==set(range(1,6))
+    assert db.get('catalog_2026-07')['complete'] is True
+    for sid,state in [(1,'dropped'),(2,'paused'),(3,'completed')]:
+        s=db.show(sid)
+        assert (s['state'],s['selected'],s['authorized'],s['cleanup_hold'],s['mapping'])==(state,1,0,1,'{"confirmed":true}')
+    assert db.show(4)['selected']==db.show(4)['authorized']==0
+
+
+@pytest.mark.parametrize('second_page',[
+    {'total':3,'offset':2,'data':[]},
+    {'total':3,'offset':2,'data':[{'id':1},{'id':2}]},
+    {'total':3,'offset':0,'data':[{'id':3}]},
+    {'offset':2,'data':[{'id':3}]},
+    {'total':3,'offset':2,'data':[{'id':2}]},
+])
+def test_incomplete_quarter_never_records_success(tmp_path,second_page):
+    from anime.sources import Catalog
+    from anime.net import NetworkError
+    db=Store(tmp_path/'a.db');db.set('catalog_2026-07',{'success':123,'count':1})
+    web=Mock();web.fetch.side_effect=[
+        Mock(json=lambda:{'total':3,'offset':0,'data':[{'id':1,'name':'A'},{'id':2,'name':'B'}]}),
+        Mock(json=lambda:second_page)]
+    with pytest.raises(NetworkError):Catalog(db,web).sync_quarter(2026,7)
+    status=db.get('catalog_2026-07')
+    assert status['success']==123 and status['complete'] is False and status['error']
+    assert db.get('catalog_job')['status']=='error'

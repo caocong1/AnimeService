@@ -1,9 +1,9 @@
 /* Original ASS styling via libass; WebVTT markup is rendered through a safe DOM. */
 'use strict';
 class SubtitleRenderer {
-  constructor(art, note, fontsUrl) {
+  constructor(art, note, fontsUrl, onState = () => {}) {
     this.art = art; this.note = note; this.fontsUrl = fontsUrl;
-    this.revision = 0; this.renderer = null; this.timer = null;
+    this.revision = 0; this.renderer = null; this.timer = null; this.onState = onState;
     this.pending = Promise.resolve();
     art.on('subtitleAfterUpdate', cues => {
       const root = art.template.$subtitle;
@@ -49,11 +49,13 @@ class SubtitleRenderer {
   async select(track) {
     this.clear();
     const rev = this.revision;
-    if (!track) { this.note.textContent = ''; return; }
+    if (!track) { this.note.textContent = ''; this.onState({status:'off',track:null}); return; }
     const request = this.request = new AbortController();
+    this.onState({status:'loading',track});
     this.note.textContent = track.ass_url ? '加载原样式字幕…' : '加载字幕…';
     const fallback = async () => {
       if (rev !== this.revision) return;
+      this.onState({status:'loading',track});
       clearTimeout(this.timer);
       this.release();
       // Serialize ArtPlayer's non-cancellable switches so old responses cannot win.
@@ -66,9 +68,10 @@ class SubtitleRenderer {
         this.art.subtitle.show = true;
         this.art.subtitle.update();
         this.note.textContent = '';
+        this.onState({status:'active',track});
       });
       try { await this.pending; } catch (e) {
-        if (rev === this.revision) this.note.textContent = e.message;
+        if (rev === this.revision) { this.note.textContent = e.message; this.onState({status:'error',track}); }
       }
     };
     if (!track.ass_url || typeof SubtitlesOctopus !== 'function') { await fallback(); return; }
@@ -99,6 +102,7 @@ class SubtitleRenderer {
           clearTimeout(this.timer);
           this.renderer?.setCurrentTime(this.art.currentTime);
           this.note.textContent = '原样式字幕 · 缺失字体使用思源黑体替代';
+          this.onState({status:'active',track});
         },
         onError: fail,
       });

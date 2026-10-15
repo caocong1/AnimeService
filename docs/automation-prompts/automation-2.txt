@@ -1,0 +1,20 @@
+模板快照（2026-10-15）：先读 ../PROJECT-RULES.md 和 ../AUTOMATION.md；占位符须按实时台账绑定。
+不自动创建任务或继承原部署授权。
+
+2026-10-15卡住修复：本会话已通过应用原生压缩清理活动上下文，原聊天和审计历史保留。先读docs/CODEX-DISPATCH-HEALTH.md。本任务是一次有界检查：通常3–10分钟完成准备/派发/跟踪动作后结束本轮；等外部素材、下次时点或活动owner时只保存快照和下一动作，不在同轮常驻等待，不反复读取旧报告或图片。真实整集评审有进展可继续；字幕单集owner的v0→v1连续制作、六项质量义务不受调度轮次限制。独立本机守卫仅对这两条调度会话的定时轮次，20分钟无日志进展且无运行工具时按expectedTurnId中断，不释放租约或重复派发；命中后下轮先读data/diagnostics/codex-dispatch-guard/actions.jsonl末条和实时队列，保存已完成动作后续做，不能重放整轮。
+
+在D:/AnimeService按用户2026-10-15最新授权执行在追字幕准备、唯一整集会话派发与v0→v1连续交付跟踪。先读AGENTS.md最新顶部、docs/SUBTITLE-TWO-PASS.md、docs/SUBTITLE-DELIVERY.md和最新PROGRESS/HANDOFF短交接，按需读实际新证据，不重放旧rollout/图集或已应用脚本。
+
+每集先完整交付v0观看版，紧接着由同一负责人完成v1精校细调。画面字主动查漏补译、主动寻找并制作本集实际版本OP/ED歌词、字幕位置避让、必要动效和非排印改写/时轴回查是v1必做，不能为快整项省略；常规预算v0 60–90分钟、随后v1另60–90分钟，预算不是跳过工作的理由。集中按场景取帧、复用同曲歌词/术语/字体和未变检查。具体疑难首轮限时，真实无解保留已试方法/证据/现版表达与下一条件，归档统一issues.json后继续，不再卡几天或反复装模型。
+
+已看集不自动生产/回修/experience；refresh/status后按每集watches.finished复核，领取、继续和输出前均核。制作中变已看，负责人保存进度后安全停止，保留原字幕和历史。选择当前selected/watching、无cleanup_hold且原独立授权/映射盘点/本集边界有效的未看集；保留已有明确用户作品优先序，同一集v0之后的v1优先于开启另一集。原广告黑名单/保真/manifest/归属/未知下载回执保护不变。
+
+使用.venv/Scripts/python.exe scripts/subtitle_delivery_queue.py refresh/status读取实时任务，kind=episode制作v0→v1，kind=refinement增量细调已交付基础稿。旧基础稿目录即使叫v1也不覆盖；观看索引edition=v0，精校新产物edition=v1、物理version递增。已有未看基础稿可refine建立去重任务，复用其原会话；旧blocked-stopped/unknown/committing以及已停止魔王大图正文聊天01a13370-fa22-7101-b69c-9b1c9e88954e不得自动唤醒或抢占，精确保存待核控制回执。
+
+就绪先begin当前job_id/revision持久意图，再只按返回dispatch_action：create先list_projects核AnimeService、本地环境、默认模型创建单集会话，完整使用session_prompt；resume仅send_message_to_thread恢复返回responsible_thread_id。用户已授权就绪单集独立会话及原会话增量恢复，无需逐集再问。保存真实threadId并confirm；未知结果unknown保护、先list/read/wait对账，不重复创建或重发。整体一集主生产，active不重复催继续。
+
+v0实际输出、播放暂停跳转下载和完整中文覆盖通过即上架；finished命令若返回continue_refinement=true，同一writer仍production/acknowledged，立即继续v1，不能结束或只给报告。v1必须有绑定确切媒体和v0基线的refinement-review.json，六项screen_text/op/ed/placement/effects/semantics逐项提供实际work_done及path/SHA证据；未决项必须真实归档issue_ids。finish/publish与宿主finished复核v1文件、报告和实际播放器回执通过才释放槽。v0和v1均有观看入口，用户可自己选择，活动播放器不强换。正式accepted只记真实四阶段，不以报告/ASR/静音技术检查冒充亲听。
+
+wait_threads用cursor有界跟踪并记录私有回执，持续会话不等heartbeat小批。本调度不写逐句正文、不运行模型研究、不新下载已有文件或反复做旧字体样片。每周automation-4仅复盘有新条件的单点未决，不承担v1正常制作，也不能因旧已看问题唤醒writer。qB4870唯一后台执行，不自动启动切换、不第二Engine/服务重启、不Computer Use/桌面、不付费/音视频外传/公开分享；原媒体/原稿/default/观看和并发工作保留。无变化安静，通知去重，仅真实版本交付、新实质失败或需要用户操作时通知。
+
+停止owner的受控例外：若refinement任务明确isolated_owner_required=true且没有thread_id，说明宿主已核旧writer明确停止及既有成品基线，按begin返回create新建单独私有修订负责人；不恢复旧停止聊天，不读取旧rollout/图片或写旧共享稿。unknown/committing及未确认停止者仍不得接管。

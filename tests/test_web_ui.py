@@ -14,8 +14,47 @@ def deployment_settings(monkeypatch):
 def client_at(tmp_path):
     db=Store(tmp_path/'data/test.db');engine=Mock();engine.gaps.return_value={'missing':[3],'unverified_files':[],'active':True}
     app=create_app(db,engine,start_worker=False)
+    engine.source_review.status.return_value={'policy':{},'samples':[],'candidates':[],'recommendation':[]}
     client=TestClient(app,base_url='http://127.0.0.1:4871')
     return client,db,{'X-Anime-Token':client.get('/api/bootstrap').json()['token'],'Origin':'http://127.0.0.1:4871'}
+
+
+def test_status_reviews_include_old_tasks_beyond_history_limit(tmp_path):
+    client,db,_=client_at(tmp_path)
+    for n in range(105):
+        db.execute('INSERT INTO tasks(hash,status,created,updated,error) VALUES(?,?,?,?,?)',
+            (f'{n:040x}','complete',n+100,n+100,''))
+    db.execute("INSERT INTO tasks(hash,status,created,updated,error) VALUES('old-review','review',1,1,'uncertain submit')")
+    s=client.get('/api/status').json()
+    assert len(s['tasks'])==100 and s['tasks'][0]['hash']=='old-review'
+    assert [t['hash'] for t in s['task_reviews']]==['old-review']
+
+
+def test_status_exposes_uncertain_submission_checks_without_leases(tmp_path):
+    client,db,_=client_at(tmp_path)
+    db.execute("INSERT INTO tasks(hash,provider,status,created,updated,error) VALUES('uncertain','thunder','review',1,1,'original click timeout')")
+    db.execute("INSERT INTO thunder_queue(hash,action,state,committing,lease) VALUES('uncertain','submit','review',1,'secret lease')")
+    db.set('thunder_review_check_uncertain',{'time':123,'result':'no_match'})
+    review=client.get('/api/status').json()['task_reviews'][0]
+    assert review['submission_uncertain']==1 and review['reconciliation']=={'time':123,'result':'no_match'}
+    assert review['error']=='original click timeout' and 'lease' not in review
+
+
+@pytest.mark.parametrize('health,recovered',[
+    ({'ok':True,'success':20},True),({'ok':True,'success':9},False),
+    ({'ok':False,'success':20},False),({},False)])
+def test_history_error_health_requires_later_success_and_keeps_event(tmp_path,health,recovered):
+    client,db,_=client_at(tmp_path)
+    db.execute("INSERT INTO events(time,scope,message,level) VALUES(10,'dandan-history','history read failed','error')")
+    db.execute("INSERT INTO events(time,scope,message,level) VALUES(11,'service','worker failed','error')")
+    db.set('dandan_history_health',health)
+    events=client.get('/api/status').json()['events']
+    history=next(e for e in events if e['scope']=='dandan-history')
+    assert history['level']==('info' if recovered else 'error')
+    assert history.get('historical',False)==recovered
+    assert next(e for e in events if e['scope']=='service')['level']=='error'
+    assert db.one("SELECT level,message FROM events WHERE scope='dandan-history'")=={
+        'level':'error','message':'history read failed'}
 
 
 @pytest.mark.parametrize('day,expected',[
@@ -157,7 +196,7 @@ def test_sequel_airings_use_bangumi_season_numbering(tmp_path):
     from anime.engine import Engine
     from anime.board import episode_board
     db=Store(tmp_path/'test.db');web=Mock()
-    eps=[{'sort':48+n,'ep':n,'airdate':'2000-01-01' if n==1 else '2999-01-01','name':f'E{n}'} for n in range(1,13)]
+    eps=[{'id':42000+n,'type':0,'sort':48+n,'ep':n,'airdate':'2000-01-01' if n==1 else '2999-01-01','name':f'E{n}'} for n in range(1,13)]
     web.fetch.side_effect=[Mock(json=lambda:{'id':42,'name':'Example 第三季','total_episodes':12}),Mock(json=lambda:{'total':12,'data':eps})]
     Catalog(db,web).details(42)
     assert db.rows('SELECT episode FROM airings ORDER BY episode')[0]['episode']==49

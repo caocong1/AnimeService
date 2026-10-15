@@ -9,7 +9,8 @@
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="stylesheet" href="/static/tokens.css">
 <link rel="stylesheet" href="/static/app.css">
-<link rel="stylesheet" href="/static/watch-controls.css?v=9">
+<link rel="stylesheet" href="/static/watch-controls.css?v=13">
+<link rel="stylesheet" href="/static/clip-export.css?v=1">
 <script src="/static/theme.js"></script>
 </head>
 <body class="watch">
@@ -21,8 +22,20 @@
         <div class="what"><a id="parent" href="/library"></a><h1 id="title">放映室</h1></div>
         <div class="acts" id="acts"></div>
       </div>
-      <section class="playback-controls" aria-label="字幕与弹幕">
+      <details class="playback-source" open><summary>当前播放文件与字幕</summary><dl class="kv"><dt>视频文件</dt><dd id="playing-file">正在读取…</dd><dt>字幕来源</dt><dd id="playing-subtitle" role="status">正在读取…</dd></dl><a class="link" id="playing-subtitle-library" href="/subtitle-library">查看字幕库</a></details>
+      <section class="playback-controls" aria-label="音轨、字幕与弹幕">
         <div class="pc-row">
+          <h2 class="pc-label"><label for="picture-mode">画面</label></h2>
+          <div class="pc-body">
+            <div class="pc-inline"><select id="picture-mode" aria-describedby="picture-note"><option value="native">原片 · 原生显示</option><option value="pixel">原像素 · 不放大</option><option value="lanczos">精细缩放 · SDR</option></select><p class="pc-note" id="picture-note" role="status">原片播放</p></div>
+            <details class="picture-details"><summary>画质信息</summary><p id="picture-details"></p></details>
+          </div>
+        </div>
+        <div class="pc-row" id="audio-track-row" hidden>
+          <h2 class="pc-label"><label for="audio-track">音轨</label></h2>
+          <div class="pc-body pc-inline"><select id="audio-track" aria-describedby="audio-note" disabled><option value="">文件默认</option></select><p id="audio-note" class="pc-note" role="status">正在读取音轨…</p></div>
+        </div>
+        <div class="pc-row" id="subtitle-row" hidden>
           <h2 class="pc-label"><label for="subtitle">字幕</label></h2>
           <div class="pc-body pc-inline"><select id="subtitle" disabled><option value="">关闭</option></select><p id="sub-note" class="pc-note"></p></div>
         </div>
@@ -56,6 +69,7 @@
             <label class="check"><input type="checkbox" id="shot-danmu">包含弹幕</label>
             <div class="seg" id="shot-to" role="group" aria-label="截图保存方式"><button type="button" data-to="download" aria-pressed="true">下载图片</button><button type="button" data-to="clipboard" aria-pressed="false">复制到剪贴板</button></div>
             <button class="btn small" id="shot" type="button">截图</button>
+            <button class="btn small" id="open-clip" type="button">截取片段</button>
           </div>
         </div>
       </section>
@@ -89,16 +103,61 @@
   <div class="dm-view" id="danmu-detail-view" hidden><div id="danmu-episodes" class="dm-detail"></div></div>
 </dialog>
 <div class="dm-menu" id="danmu-menu" role="menu" aria-label="弹幕操作" tabindex="-1" hidden><p id="danmu-menu-text"></p><button type="button" role="menuitem" id="danmu-block-user">屏蔽此用户</button><button type="button" role="menuitem" id="danmu-find-user" hidden>查找 B站用户</button><div class="dm-uids" id="danmu-menu-uids" hidden></div></div>
+<dialog id="clip-dialog" class="clip-dialog" aria-labelledby="clip-title">
+  <header class="dm-dialog-head"><h2 id="clip-title">截取片段</h2><button class="btn quiet small" id="clip-close" type="button">关闭</button></header>
+  <div class="clip-body">
+    <p id="clip-loading" role="status">正在读取视频信息…</p>
+    <form id="clip-form" hidden>
+      <div class="clip-preview"><video id="clip-video" controls playsinline preload="metadata" aria-label="原片预览，不记录观看进度"></video><canvas id="clip-crop-canvas" hidden aria-label="拖动选择裁剪区域；也可在下方填写坐标"></canvas></div>
+      <p class="clip-hint">预览原片；导出保留片内硬字幕，不叠加网页软字幕、弹幕或画质处理。</p>
+      <div class="clip-times">
+        <label>开始时间<input id="clip-start" value="00:00:00.000" required inputmode="decimal" aria-describedby="clip-time-hint"></label>
+        <button class="btn quiet small" id="clip-mark-start" type="button">设为预览位置</button>
+        <label>结束时间<input id="clip-end" value="00:00:10.000" required inputmode="decimal" aria-describedby="clip-time-hint"></label>
+        <button class="btn quiet small" id="clip-mark-end" type="button">设为预览位置</button>
+      </div>
+      <p class="clip-hint" id="clip-time-hint">可填秒数、分:秒或时:分:秒，精确到毫秒。MP4最长5分钟，GIF最长30秒。</p>
+      <div class="clip-range"><label>开始位置<input type="range" id="clip-start-range" min="0" step="0.01" value="0"></label><label>结束位置<input type="range" id="clip-end-range" min="0" step="0.01" value="10"></label></div>
+      <div class="pc-inline"><button class="btn quiet small" id="clip-preview-range" type="button">播放所选片段</button><button class="btn quiet small" id="clip-main-position" type="button">使用播放器当前位置</button></div>
+      <div class="clip-fields">
+        <label>导出格式<select id="clip-format"><option value="mp4">MP4 视频</option><option value="gif">GIF 动图 · 无声</option></select></label>
+        <label>输出宽度<select id="clip-size"><option value="0">原尺寸</option><option value="1920">1920 px</option><option value="1280">1280 px</option><option value="960">960 px</option><option value="640">640 px</option><option value="480">480 px</option><option value="320">320 px</option><option value="custom">自定义</option></select></label>
+        <label id="clip-custom-label" hidden>自定义宽度（px）<input id="clip-width" type="number" min="64" max="3840" step="1" value="640"></label>
+        <label>帧率<select id="clip-fps"><option value="0">原帧率</option><option value="5">5 fps</option><option value="10">10 fps</option><option value="15">15 fps</option><option value="24">24 fps</option><option value="30">30 fps</option><option value="60">60 fps</option></select></label>
+        <label id="clip-quality-label">画质<select id="clip-quality"><option value="standard">标准</option><option value="high">高画质</option><option value="compact">较小文件</option></select></label>
+        <label id="clip-audio-label">音轨<select id="clip-audio-track"></select></label>
+      </div>
+      <div class="pc-inline"><label class="check"><input id="clip-audio" type="checkbox" checked>包含音频</label><label class="check" id="clip-loop-label" hidden><input id="clip-loop" type="checkbox" checked>GIF循环播放</label><label class="check"><input id="clip-crop" type="checkbox">裁剪画面区域</label><button class="btn quiet small" id="clip-crop-reset" type="button">恢复完整画面</button></div>
+      <div class="clip-fields" id="clip-crop-fields" hidden>
+        <label>左侧 X（px）<input id="clip-x" type="number" min="0" step="1" value="0"></label>
+        <label>顶部 Y（px）<input id="clip-y" type="number" min="0" step="1" value="0"></label>
+        <label>区域宽度（px）<input id="clip-cw" type="number" min="2" step="1"></label>
+        <label>区域高度（px）<input id="clip-ch" type="number" min="2" step="1"></label>
+      </div>
+      <p class="clip-hint" id="clip-crop-hint" hidden>暂停预览后拖动框选，或填写像素坐标；高度随宽度等比缩放。</p>
+      <p class="clip-summary" id="clip-summary" aria-live="polite"></p>
+      <button class="btn primary" id="clip-submit" type="submit">导出片段</button>
+    </form>
+    <div class="clip-job" id="clip-job" hidden>
+      <p id="clip-status" role="status" aria-live="polite"></p><progress id="clip-progress" max="100" value="0" aria-label="片段导出进度"></progress>
+      <button class="btn quiet small" id="clip-cancel" type="button">取消导出</button>
+      <div id="clip-result" hidden><video id="clip-result-video" controls playsinline hidden></video><img id="clip-result-gif" alt="导出的GIF片段" hidden><a id="clip-download" class="btn primary" download>下载片段</a></div>
+    </div>
+    <p class="clip-error" id="clip-error" role="alert"></p>
+  </div>
+</dialog>
 <script src="/static/core.js?v=2"></script>
 <script src="/static/vendor/artplayer.js"></script>
 <script src="/static/vendor/artplayer-plugin-danmuku.js"></script>
 <script src="/static/vendor/libass/subtitles-octopus.js"></script>
-<script src="/static/subtitle-renderer.js?v=2"></script>
-<script src="/static/danmu-timing.js?v=6"></script>
+<script src="/static/subtitle-renderer.js?v=3"></script>
+<script src="/static/danmu-timing.js?v=7"></script>
 <script src="/static/bili-uid.js?v=1"></script>
 <script src="/static/danmu-alignment.js?v=3"></script>
 <script src="/static/danmu-retry.js?v=1"></script>
 <script src="/static/screenshot.js?v=1"></script>
-<script src="/static/watch.js?v=20"></script>
+<script src="/static/clip-export.js?v=1"></script>
+<script src="/static/picture-quality.js?v=1"></script>
+<script src="/static/watch.js?v=30"></script>
 </body>
 </html>
