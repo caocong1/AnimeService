@@ -116,7 +116,11 @@ def build(config):
     (root / 'bilingual.ass').write_text('\n'.join(final) + '\n', encoding='utf-8-sig')
     if c.get('edition') == 'v1':
         shutil.copy2(c['refinement_review'], root / 'refinement-review.json')
-    shutil.copy2(root / 'bilingual.ass', root / 'static.ass')
+    if c.get('static_ass'):
+        assert digest(c['static_ass']) == c['static_ass_sha256'], 'Static ASS changed'
+        shutil.copy2(c['static_ass'], root / 'static.ass')
+    else:
+        shutil.copy2(root / 'bilingual.ass', root / 'static.ass')
     (root / 'fonts').mkdir()
     for font in c['fonts']:
         assert digest(font['path']) == font['sha256'], 'Font changed'

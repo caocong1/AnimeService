@@ -15,6 +15,85 @@ def split(setup):
     return db,q,e,r,c
 
 
+def test_continuing_subtitle_enrollment_preserves_ordinary_sources(setup):
+    from scripts.repair_subtitle_enrollment import enroll
+    from anime.viewing_workflow import scope_blocker
+    db,q,e,r,_=split(setup)
+    db.execute('DELETE FROM source_policies WHERE show_id=42')
+    before=db.show(42)
+    enroll(db,42,[2])
+    assert e.source_review.policy(42)['mode']=='subtitle_only'
+    assert e.source_review.policy(42)['primary']==''
+    assert not scope_blocker(db,42,2)
+    assert clean_required(db,42)
+    c=candidate(setup,0,'硬字幕 CHS')
+    assert e.source_review.permits(c)
+    e.source_review.start(42)
+    assert not db.rows('SELECT * FROM source_samples') and q.adds==0
+    e.sources.data=torrent((2,))
+    with pytest.raises(ValueError,match='生肉'):
+        e.subtitle_studio.queue(studio_candidate(e,c))
+    soft=studio_candidate(e,candidate(setup,1,'简繁内封'))
+    e.subtitle_studio.queue(soft)
+    task=db.one('SELECT * FROM tasks')
+    assert sample_allowed(db,task) and task['purpose']=='subtitle_sample'
+    assert db.show(42)==before and not db.rows('SELECT * FROM episodes')
+    assert not db.rows('SELECT * FROM watches')
+    policy=db.one('SELECT * FROM source_policies')
+    enroll(db,42,[2])
+    assert db.one('SELECT * FROM source_policies')==policy
+    db.set('native_indexes_enabled',True)
+    db.execute("UPDATE shows SET state='wish',auto_download=1 WHERE id=42")
+    from anime.native_indexes import eligible
+    assert not eligible(db,42)
+
+
+def test_explicit_enrollment_keeps_holds_and_independent_authorization(setup):
+    from scripts.repair_subtitle_enrollment import enroll
+    db,q,e,r,_=split(setup)
+    db.execute('DELETE FROM source_policies WHERE show_id=42')
+    db.execute('UPDATE shows SET authorized=0 WHERE id=42')
+    with pytest.raises(ValueError,match='authorization'):
+        enroll(db,42,[2])
+    assert not db.rows('SELECT * FROM source_policies')
+    db.execute('UPDATE shows SET authorized=1 WHERE id=42')
+    e.source_review.save(42,{'mode':'scope_hold'})
+    with pytest.raises(ValueError,match='hold'):
+        enroll(db,42,[2])
+    assert e.source_review.policy(42)['mode']=='scope_hold'
+
+
+def test_subtitle_only_unwatched_premiere_uses_episode_path(setup):
+    from scripts.repair_subtitle_enrollment import enroll
+    db,q,e,r,_=split(setup)
+    db.execute('DELETE FROM source_policies WHERE show_id=42')
+    enroll(db,42,[1])
+    candidate(setup,1,'简繁内封',1)
+    e.sources.data=torrent((1,))
+    e.subtitle_studio.discover()
+    assert not db.rows('SELECT * FROM source_samples')
+    assert db.one('SELECT * FROM subtitle_samples')['episode']==1 and q.adds==1
+    assert not db.rows('SELECT * FROM episodes') and not db.rows('SELECT * FROM watches')
+
+
+def test_subtitle_only_premiere_acquisition_api_does_not_silently_skip(setup):
+    from scripts.repair_subtitle_enrollment import enroll
+    from fastapi.testclient import TestClient
+    from anime.app import create_app
+    db,q,e,r,_=split(setup)
+    db.execute('DELETE FROM source_policies WHERE show_id=42')
+    enroll(db,42,[1])
+    c=candidate(setup,1,'简繁内封',1)
+    e.sources.data=torrent((1,))
+    with TestClient(create_app(db,e,False),base_url='http://127.0.0.1:4871') as client:
+        token=client.get('/api/bootstrap').json()['token']
+        response=client.post('/api/subtitle-studio/42/1/acquire',
+            json={'candidate_ids':[c['id']]},headers={'X-Anime-Token':token})
+        assert response.status_code==200
+    assert db.one('SELECT * FROM subtitle_samples')['episode']==1 and q.adds==1
+    assert not db.rows('SELECT * FROM source_samples')
+
+
 def candidate(setup,number=0,mode='RAW',episode=2):
     return setup[3](f'[Base{number}] Example S01E{episode:02} [1080p][{mode}]',
                     url=f'https://mikanani.me/base{number}.torrent')

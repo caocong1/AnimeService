@@ -55,7 +55,7 @@ def test_unrelated_audio_silence_and_repeated_scene_never_match():
 @pytest.mark.parametrize('url',[
     'http://www.bilibili.com/video/BV1EVap6yE6B', 'https://www.bilibili.com@127.0.0.1/video/BV1EVap6yE6B',
     URL+'&token=secret',URL+'&p=2',URL+'#foo','https://www.bilibili.com/video/BV1EVap6yE6B?p=0',
-    'https://ani.gamer.com.tw/animeVideo.php?sn=1'])
+    'https://ani.gamer.com.tw/animeVideo.php?sn=1&sn=2'])
 def test_source_boundary(url):assert a.canonical_source(url) is None
 
 

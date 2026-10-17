@@ -25,12 +25,19 @@ def install_season(app,db,engine,list_shows,prepare,save_mapping):
             shows.setdefault(s['id'],{**s,'quarter_kind':'new'})
         return shows
     def enroll_authorized_new_shows(today=None,sid=None):
+        # Watching subtitles are not restricted to new premieres, a quarter,
+        # or the ordinary auto-download switches. Recheck every existing gate.
+        from .subtitle_enrollment import reconcile
+        reconcile(db,sid)
         if not db.get('source_review_new_shows',False) or not db.get('auto_quarter_enabled',False):return
         start=db.get('auto_quarter_start','')
         if not start:return
         horizon=(today or datetime.date.today())+datetime.timedelta(days=21)
         for s in review_cohort(start,horizon).values():
             if sid is not None and s['id']!=sid:continue
+            # The watching path above preserves explicit policy holds.
+            from .viewing_workflow import enabled as split_enabled
+            if s['state']=='watching' and split_enabled(db):continue
             if s.get('quarter_kind')=='continuing' or re.search(r'特别篇|特別篇|剧场版|劇場版|\b(?:OVA|OAD)\b',s['title'],re.I):continue
             if not s['authorized'] or not db.review_wanted(s['id']):continue
             with db.gate:

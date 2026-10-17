@@ -31,6 +31,6 @@ def sample_allowed(db,task):
             if not production_wanted(db,task['show_id']) and not protected_sample(db,task):return False
             row=db.one('SELECT config FROM source_policies WHERE show_id=?',(task['show_id'],))
             return bool(db.get('subtitle_studio_enabled',False) and row and
-                        json.loads(row['config']).get('mode') in ('sampling','selected') and db.allowed(task['show_id'],1))
+                        json.loads(row['config']).get('mode') in ('sampling','selected','subtitle_only') and db.allowed(task['show_id'],1))
         return True
     except (ValueError,KeyError,TypeError):return False

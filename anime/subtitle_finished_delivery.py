@@ -84,4 +84,4 @@ def verify_release(project, release, player_report, sid, ep, target):
             'manifest_sha256': digest(manifest), 'release': str(root),
             'player_report': {'path': str(proof), 'sha256': digest(proof)},
             'video_sha256': expected_video,
-            'player_url': 'http://127.0.0.1:4871/static/finished-player.html?release=' + r['id']}
+            'player_url': 'http://127.0.0.1:4871/watch?release=' + r['id']}

@@ -86,11 +86,11 @@ class SourceReview:
         """
         for row in self.db.rows('SELECT show_id FROM source_policies'):
             sid=row['show_id']
-            if self.policy(sid).get('mode') not in ('sampling','selected'):continue
+            if self.policy(sid).get('mode') not in ('sampling','selected','subtitle_only'):continue
             try:self.ensure(sid,submission=False)
             except ValueError:continue
             with self.db.gate:
-                if self.policy(sid).get('mode') not in ('sampling','selected'):continue
+                if self.policy(sid).get('mode') not in ('sampling','selected','subtitle_only'):continue
                 try:self.ensure(sid,submission=False)
                 except ValueError:continue
                 show=self.db.show(sid);mapping=self.db.mapping(sid)
@@ -213,6 +213,9 @@ class SourceReview:
                 'sampling':sum(s['mode']=='sampling' for s in shows),'protected':sum(not s['eligible'] for s in shows)},
             'note':'仅用户已加入想看、试看或在追并核验授权的新番参与取样、实评与自动选源；季度默认授权不代表想看。记录持续累计，待下载/待评不会当已完成。'}
     def start(self,sid,candidate_ids=None):
+        # Continuing shows can join subtitle production without reopening the
+        # watched premiere or claiming that a primary source was reviewed.
+        if self.policy(sid).get('mode')=='subtitle_only':return
         self.ensure(sid)
         available=self.candidates(sid)
         available=sorted((c for c in available if not clean_blocker(self.db,c)),key=acquisition_priority)
@@ -649,9 +652,11 @@ class SourceReview:
                 self.store_premiere(con,(sid,t['hash'],f['index'],str(dest/f['name']),f['size'],time.time()),excluded_previous)
         self.db.event('source:'+str(sid),'完成首集已自动加入追番播放；评分继续，尚未确认最佳主源' if provisional else '已按明确操作切换首集至完成样本，原文件和观看历史保留' if old else '已确认主源；首集复用完成样本归库，未重复下载')
     def permits(self,c):
+        cfg=self.policy(c['show_id'])
+        if cfg.get('mode')=='subtitle_only':
+            return not fidelity_blocker(self.db,c['title'])
         if clean_blocker(self.db,c):return False
         if fidelity_blocker(self.db,c['title']):return False
-        cfg=self.policy(c['show_id'])
         if not cfg:return True
         if cfg.get('mode')=='sampling':
             return bool(self.db.get('play_completed_premiere_enabled',False) and self.db.review_wanted(c['show_id'])

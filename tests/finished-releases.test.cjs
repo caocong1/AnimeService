@@ -94,8 +94,8 @@ test('home tickets and episode links open the delivered player before original m
   const context=vm.createContext({addEventListener(){},window:{fetch:async()=>{}},document:{addEventListener(){}},matchMedia:()=>({matches:false})});
   vm.runInContext(fs.readFileSync('static/core.js','utf8'),context);
   context.episode={n:2,s:'ready',media:'original',release:normalize({releases:[sample()]})[0]};
-  assert.equal(vm.runInContext('watchHref(episode)',context),'/static/finished-player.html?release=episode-v1');
-  assert.match(vm.runInContext('epStrip({eps:[episode],next:episode})',context),/href="\/static\/finished-player.html\?release=episode-v1"/);
+  assert.equal(vm.runInContext('watchHref(episode)',context),'/watch?release=episode-v1');
+  assert.match(vm.runInContext('epStrip({eps:[episode],next:episode})',context),/href="\/watch\?release=episode-v1"/);
 });
 
 test('a future newly published episode needs no per-show code or episode download row',()=>{

@@ -32,7 +32,7 @@ def clean_required(db,sid):
     if not (db.get('subtitle_clean_media_preferred',False) and
             db.get('subtitle_studio_enabled',False) and db.review_wanted(sid)):return False
     row=db.one('SELECT config FROM source_policies WHERE show_id=?',(sid,))
-    return bool(row and json.loads(row['config']).get('mode') in ('sampling','selected'))
+    return bool(row and json.loads(row['config']).get('mode') in ('sampling','selected','subtitle_only'))
 
 
 def clean_blocker(db,candidate):
@@ -79,7 +79,10 @@ def candidate_mapping(mapping,candidate):
 def eligible(db,sid,kind=None):
     if not db.get('native_indexes_enabled',False) or not db.review_wanted(sid) or not db.allowed(sid,1):return False
     row=db.one('SELECT config FROM source_policies WHERE show_id=?',(sid,))
-    valid=bool(row and json.loads(row['config']).get('mode') in ('sampling','selected'))
+    valid=bool(row and json.loads(row['config']).get('mode') in ('sampling','selected','subtitle_only'))
+    if valid and json.loads(row['config']).get('mode')=='subtitle_only':
+        from .viewing_workflow import lane
+        valid=lane(db,sid)=='watching'
     if valid and kind in ('bt4g','1337x'):
         from .general_indexes import platform_basis
         valid=bool(db.get('general_indexes_enabled',False) and platform_basis(db,sid))

@@ -120,6 +120,28 @@ def test_metadata_discovery_tracks_midseason_start_without_download(setup):
     assert not db.rows('SELECT * FROM tasks') and q.adds==0
 
 
+def test_discovery_does_not_reopen_watched_episodes(setup,monkeypatch):
+    db,q,e,r,_=ready(setup)
+    db.execute('INSERT INTO watches(show_id,episode,finished) VALUES(42,1,1)')
+    setup[3]('[Late] Example S01E02 [1080p][CHS]',url='https://mikanani.me/ep2.torrent')
+    submitted=[]
+    monkeypatch.setattr(e.subtitle_studio,'queue',lambda c:submitted.append(c['episode']))
+    monkeypatch.setattr(e.source_review,'start',lambda *args:pytest.fail('watched premiere sampled'))
+    e.subtitle_studio.discover()
+    assert submitted==[2]
+    assert not db.one('SELECT 1 FROM subtitle_studio_jobs WHERE show_id=42 AND episode=1')
+
+
+def test_watched_change_prevents_new_subtitle_submission(setup):
+    db,q,e,r,_=ready(setup)
+    setup[3]('[Late] Example S01E02 [1080p][CHS]',url='https://mikanani.me/ep2.torrent')
+    c=next(c for c in e.subtitle_studio.candidates(42) if c['episode']==2)
+    db.execute('INSERT INTO watches(show_id,episode,finished) VALUES(42,2,1)')
+    with pytest.raises(ValueError,match='已看'):
+        e.subtitle_studio.queue(c)
+    assert not db.rows('SELECT * FROM tasks') and q.adds==0
+
+
 def test_banned_subtitle_provenance_revokes_authored_default_on_clean_video(setup):
     import hashlib,struct,zlib
     db,q,e,r,_=ready(setup);core=lab_core();a=archive_for(db)

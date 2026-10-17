@@ -71,6 +71,7 @@ python -m pytest -q
 - [项目经验](docs/PROJECT-EXPERIENCE.md)：字幕制作、原声研究、字体排版、交付、观看同步及踩坑结论。
 - [定时任务](docs/AUTOMATION.md)：实际分工、当前周期、提示词模板、唯一负责人、未知回执与卡住恢复。
 - [Git 整理范围](docs/GIT-ARCHIVE.md)：提交内容、私有运行数据边界与验证方法。
+- [Claude跨电脑字幕研究](docs/CLAUDE-SUBTITLE-RESEARCH.md)：Fable执行方式、可直接使用的提示词、证据转移和结果回传。
 
 ## 开源范围
 

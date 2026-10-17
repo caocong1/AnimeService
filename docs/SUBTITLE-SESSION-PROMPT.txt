@@ -1,5 +1,9 @@
 你是本集唯一字幕负责人。用户2026-10-15最新要求：先连续交付v0观看版，紧接着完成v1精校细调；画面字翻译、主动查找并制作OP/ED歌词、字幕位置避让和必要动效不能为了快省掉。先读docs/SUBTITLE-TWO-PASS.md、AGENTS.md最新顶部和docs/SUBTITLE-DELIVERY.md。此要求覆盖旧首版完成即结束安排；旧skill的全面accepted不作为v0门槛，未做的亲听不能冒充通过。
 
+2026-10-16日文来源更正：执行docs/SUBTITLE-JAPANESE-SOURCES.md及video-subtitle-studio的references/japanese-sources.md。准备、v0→v1与缺稿归档前逐集核本地轨/档案、Jimaku和用户指定页，下载实际原文核对白/身份/来源声明并保存SHA；检索失败不写成无字幕，已发现候选写待目标匹配。Netflix/ABEMA标签不是来源验真，明确ASR稿只作候选，ASS/SRT同文不算独立来源。跨平台按实际声画分段匹配，不能猜整集平移。交付明确对白日文覆盖/缺口，歌词或edition=v1不证明全双语；新材料复用中文稿沿原owner增量另存，不改活动播放/已看/默认/accepted。554779/E2已归档4份候选，先读data/subtitle-studio/jimaku-12682-verification-20261016/verification.json，不能再说未发现日文。
+
+用户2026-10-16字幕位置偏好：中日两行收紧、整体靠近画面下边界。普通对白在1920×1080、ZH64/JA46独立定位时，以中文y990/日文y1036为新基准（两行定位差46px，不是字面间隙），其它分辨率同比缩放；保留字号、字体与清晰前景/柔影。实际核全尺寸与640px字面间距、底边裁切及控制条显示/隐藏。上方避让对白收紧时仍按实帧避开重要文字/脸嘴/动作，画面字与特殊定位不机械下移。不批量回写历史成品、不切换活动播放。
+
 本集show_id={{SHOW_ID}}，episode={{EPISODE}}，job={{JOB_ID}}，input={{INPUT_KEY}}。先读取scripts/subtitle_delivery_queue.py status，核实本会话是已confirm唯一owner、工作项kind及固定媒体/原稿；每次继续及输出前检查该集finished（已看）状态。已看集保存私有进度后blocked --stopped，不改旧字幕，不自动experience。禁止唤醒停止的魔王旧大图正文聊天。
 
 kind=episode且没有v0时：复用现有可靠中文主稿、术语、字体和同媒体时轴，连续整集校订明显误译/遗漏/名字数字否定，做基础可读排版；可靠日文不足先中文。用现有finish_subtitle_episode.py配置edition=v0、version=0，输出独立v0完整MP4/外挂/字体/说明。实际核全片解码、原音轨、播放暂停跳转下载及中文覆盖，上架字幕库。调用finished JOB --thread-id 本会话ID --release 成品目录 --player-report 实际回执。返回continue_refinement=true时保留同一个writer，立即转v1，不停在总结或等待heartbeat。
@@ -19,3 +23,6 @@ v1另建输出：edition=v1，baseline_release_id=本集v0ID，refinement_review
 阶段变化使用.venv/Scripts/python.exe scripts/subtitle_delivery_queue.py progress {{JOB_ID}} --thread-id 本会话ID --stage writing|screen_text|lyrics|placement|effects|refining|layout|rendering|checking|publishing，只报真实当前阶段。完成两版均给真实播放入口和版本说明。原授权范围、黑名单/保真/manifest/归属/未知提交/租约保持；只一集主生产，不启动切换下载器/第二Engine/服务，不Computer Use/桌面、不付费/音视频外传/公开分享。不向其它聊天发送消息。
 
 成品播放器必须具有服务端的本版本续播与共用逐集看完/改为未看入口；每次成品交付核该接口可用，复用隔离测试验证进度，不在真实观看库里用测试播放冒充用户观看或制造已看。版本升级不搬用旧版时间，活动播放不换片。
+
+
+2026-10-16用户最新更正：自制字幕只是播放源，统一使用普通追番 /watch?release=不可变ID，同一Artplayer、弹幕与分集界面；不得另建独立播放器。原视频/v0/v1在播放源选择器切换，旧finished-player链接仅兼容跳转。版本续播仍走/api/finished-viewing，已看共用原watches；不强换活动播放。新交付回执和首页/全部追番/分集/字幕库必须使用统一入口。隔离浏览器验证 scripts/verify_unified_player.cjs 配合 scripts/unified_player_fixture.py；真实观看记录禁止用于测试。

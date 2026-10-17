@@ -3,6 +3,7 @@
 !/.gitignore
 !/.gitattributes
 !/README.md
+!/CLAUDE.md
 !/LICENSE
 !/CONTRIBUTING.md
 !/SECURITY.md
@@ -47,6 +48,10 @@
 !/scripts/stop_https.py
 /docs/*
 !/docs/SUBTITLE-ISSUE-REVIEW.md
+!/docs/CLAUDE-SUBTITLE-RESEARCH.md
+!/docs/SUBTITLE-RESEARCH-BASELINE.md
+!/docs/SUBTITLE-JAPANESE-SOURCES.md
+!/docs/SUBTITLE-SOURCE-CATALOG.md
 !/docs/DEVELOPMENT.md
 !/docs/SUBTITLE-STUDIO.md
 !/docs/SUBTITLE-DELIVERY-FIRST.md
@@ -99,4 +104,18 @@
 **/.DS_Store
 
 !/scripts/codex_dispatch_guard.py
+!/scripts/verify_research_bundle.py
 !/scripts/codex_dispatch_control.cjs
+!/scripts/deploy_unified_player.py
+!/scripts/unified_player_fixture.py
+!/scripts/verify_unified_player.cjs
+!/scripts/verify_unified_player_live.cjs
+!/scripts/repair_subtitle_enrollment.py
+!/scripts/deploy_subtitle_enrollment.py
+!/docs/SUBTITLE-ENROLLMENT.md
+
+!/scripts/deploy_bahamut_alignment.py
+
+!/scripts/verify_bahamut_alignment.py
+
+!/scripts/verify_danmu_alignment_controls.cjs

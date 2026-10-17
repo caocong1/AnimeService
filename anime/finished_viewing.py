@@ -41,6 +41,18 @@ class FinishedViewing:
         if row is None: raise HTTPException(404, '成品不存在或作品季集归属已变化')
         return row
 
+    def media(self, identity):
+        """Expose a delivery to the existing player without inserting an episode."""
+        record = self.item(identity)
+        index = json.loads((self.root / 'static/finished-media/index.json').read_text(encoding='utf-8-sig'))
+        release = next(r for r in index['releases'] if r['id'] == identity)
+        path = self.root / 'static/finished-media' / identity / 'episode.mp4'
+        return {'id': 'finished:' + identity, 'release_id': identity, 'name': identity + '.mp4',
+                'folder': self.db.show(record['show_id'])['title'], 'path': str(path),
+                'size': path.stat().st_size, 'legacy': False, 'show_id': record['show_id'],
+                'episode': record['episode'], 'progress': record['progress'],
+                'finished': record['finished'], 'release': release}
+
     def progress(self, identity, p):
         row = self.item(identity)
         try: pos, duration = float(p['position']), float(p['duration'])
@@ -68,6 +80,7 @@ class FinishedViewing:
 def register_finished_viewing(app, db, mark_watch):
     viewing = FinishedViewing(db)
     app.state.finished_viewing = viewing
+    app.state.webplayer.finished_viewing = viewing
 
     @app.get('/api/finished-viewing')
     def catalog(): return {'releases': viewing.catalog()}

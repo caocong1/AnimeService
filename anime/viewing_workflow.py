@@ -7,6 +7,7 @@ import json
 KEY = 'viewing_workflow_policy'
 POLICY = {'version': 1, 'enabled': True, 'auto_clean_bases': 2,
           'chinese_comparison_target': 3, 'runbook': 'docs/VIEWING-WORKFLOW.md'}
+RESEARCH_MODES = ('sampling', 'selected', 'subtitle_only')
 
 
 def enabled(db):
@@ -33,7 +34,7 @@ def scope_blocker(db, sid, episode=1):
     if not db.allowed(sid, 1) or not db.allowed(sid, episode):
         return '独立授权、映射/盘点或逐集边界未满足'
     row = db.one('SELECT config FROM source_policies WHERE show_id=?', (sid,))
-    if not row or json.loads(row['config']).get('mode') not in ('sampling', 'selected'):
+    if not row or json.loads(row['config']).get('mode') not in RESEARCH_MODES:
         return '尚无有效的个人首集/字幕研究政策'
     return ''
 
@@ -117,6 +118,23 @@ def queue_snapshot(db):
         cfg = db.one('SELECT config FROM source_policies WHERE show_id=?', (show['id'],))
         cfg = json.loads(cfg['config']) if cfg else {}
         finished = {r['episode'] for r in db.rows('SELECT episode FROM watches WHERE show_id=? AND finished=1', (show['id'],))}
+        # An older blocked episode must not hide later material that is already
+        # available. Discover work only from existing ledgers, never the whole
+        # season range; authorization and production readiness remain separate.
+        if route == 'watching':
+            available = {r['episode'] for r in db.rows(
+                "SELECT episode FROM episodes WHERE show_id=? AND status='complete'", (show['id'],))}
+            for task in db.rows("SELECT selection FROM tasks WHERE show_id=? AND status IN ('complete','linked')", (show['id'],)):
+                try:
+                    available.update(int(ep) for ep in json.loads(task['selection']).get('selected', {}) if str(ep).isdigit())
+                except (ValueError, TypeError, AttributeError):
+                    continue
+            known = {job['episode'] for job in jobs}
+            for ep in sorted(available - finished - known):
+                if ep > 0 and db.allowed(show['id'], ep):
+                    jobs.append({'episode': ep, 'state': 'pending_inventory',
+                                 'scope_blocker': scope_blocker(db, show['id'], ep)})
+            jobs.sort(key=lambda job: job['episode'])
         queues[route].append({**show, 'scope_blocker': scope_blocker(db, show['id']),
                               'source_mode': cfg.get('mode'), 'primary': cfg.get('primary'),
                               'wait_hours': cfg.get('wait_hours', 24),

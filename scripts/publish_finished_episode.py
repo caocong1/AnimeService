@@ -101,7 +101,7 @@ def publish(root, series_title, library):
         os.replace(tmp, index_path)
         receipt = {'at': datetime.now().astimezone().isoformat(), 'status': 'registered_for_viewing',
                    'links': links, 'library_url': 'http://127.0.0.1:4871/subtitle-library?show=' + str(r['show_id']),
-                   'player_url': 'http://127.0.0.1:4871/static/finished-player.html?release=' + r['id'],
+                   'player_url': 'http://127.0.0.1:4871/watch?release=' + r['id'],
                    'formal_review_complete': False, 'production_database_changed': False, 'default_changed': False}
         receipt_path=root / 'publish-receipt.json'
         if not receipt_path.exists():

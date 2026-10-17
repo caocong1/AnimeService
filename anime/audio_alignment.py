@@ -43,6 +43,11 @@ FAILURES = {
     'budget': ('来源音轨读取已达到流量上限，请换来源或手动调时', False),
     'timeout': ('音频对齐超时，可重试', True),
     'busy': ('音频对齐正在忙，稍后可重试', True),
+    'bahamut_limited': ('巴哈姆特限制了当前音轨访问（1018），已暂停尝试30分钟，保留原偏移', False),
+    'bahamut_access': ('巴哈姆特未开放当前音轨访问，可能需要原站登录或地区权限；保留原偏移', False),
+    'bahamut_ad': ('巴哈姆特要求先完成原站广告访问流程，本轮保留原偏移', False),
+    'bahamut_playlist': ('巴哈姆特音轨格式暂不能可靠取样，保留原偏移', False),
+    'bahamut_proxy': ('巴哈姆特本机代理配置不可用，保留原偏移', False),
 }
 
 
@@ -65,7 +70,13 @@ class Cancelled(Exception):
 def canonical_source(url):
     try:
         u = urlsplit(url)
-        if u.scheme != 'https' or u.netloc != 'www.bilibili.com': return None
+        if u.scheme != 'https' or u.fragment: return None
+        if u.netloc == 'ani.gamer.com.tw' and u.path == '/animeVideo.php':
+            q = parse_qs(u.query, strict_parsing=True)
+            if set(q) == {'sn'} and len(q['sn']) == 1 and re.fullmatch(r'[1-9][0-9]{0,11}', q['sn'][0]):
+                return 'https://ani.gamer.com.tw/animeVideo.php?sn=' + q['sn'][0]
+            return None
+        if u.netloc != 'www.bilibili.com': return None
         if not re.fullmatch(r'/video/BV[0-9A-Za-z]{10}/?', u.path) or u.fragment: return None
         q = parse_qs(u.query, strict_parsing=True) if u.query else {}
         if set(q) - {'p'} or len(q.get('p', ['1'])) != 1: return None
@@ -75,14 +86,24 @@ def canonical_source(url):
     except (ValueError, TypeError): return None
 
 
+def validate_public_host(host, allow_proxy_dns=False):
+    ips = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    # A configured loopback proxy resolves the CONNECT hostname itself. Local
+    # Clash fake-IP answers are routing markers, never direct destinations.
+    fake = ipaddress.ip_network('198.18.0.0/15')
+    def public(value):
+        address = ipaddress.ip_address(value)
+        return address.is_global or allow_proxy_dns and address.version == 4 and address in fake
+    if not ips or any(not public(a[4][0]) for a in ips): raise Unavailable()
+
+
 def validate_cdn(url):
     try:
         u = urlsplit(url)
         host = u.hostname or ''
         if u.scheme != 'https' or u.username or u.password or u.port not in (None, 443): raise Unavailable()
         if not any(host.endswith('.' + d) or host == d for d in ('bilivideo.com', 'bilivideo.cn')): raise Unavailable()
-        ips = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-        if not ips or any(not ipaddress.ip_address(a[4][0]).is_global for a in ips): raise Unavailable()
+        validate_public_host(host)
     except (OSError, ValueError): raise Unavailable() from None
 
 
@@ -456,6 +477,8 @@ class AlignmentService:
             with self.lock:
                 self._check(job);self._cache_write(ref_path,{'fingerprint':reference.tolist()})
         job['stage']='source_info'
+        if urlsplit(job['url']).hostname == 'ani.gamer.com.tw':
+            return self._align_bahamut(job, reference, duration, result_path)
         url,headers,remote_duration,remote_id=self._source_audio(job)
         common=min(duration,remote_duration)
         starts=[common*x for x in (.22,.48,.75)]
@@ -485,6 +508,35 @@ class AlignmentService:
         with self.lock:
             self._check(job);self._cache_write(result_path,{**result,'remote_id':remote_id})
         return result
+
+    def _align_bahamut(self, job, reference, duration, result_path):
+        from .bahamut_alignment import BahamutReference
+        source = BahamutReference(job['url'], lambda:self._check(job))
+        try:
+            source.prepare()
+            common = min(duration, source.duration)
+            anchors = []
+            for fraction in (.22, .48, .75):
+                job['stage'] = 'source_audio'
+                data, start = source.sample(common*fraction)
+                if start < 120 or start+35 > common-30: return {'status':'unreliable'}
+                pcm = self._run(job, [self.ffmpeg,'-nostdin','-v','error','-protocol_whitelist','pipe',
+                    '-f','mpegts','-i','pipe:0','-t','35','-map','0:a:0','-vn',
+                    '-ac','1','-ar','11025','-f','s16le','pipe:1'], data, cap=11025*2*36)
+                del data
+                if len(pcm) < 11025*2*30: raise Unavailable('source_audio')
+                job['stage'] = 'fingerprint'
+                anchor = locate_fingerprint(reference, self._fingerprint(job, pcm))
+                anchor['source_time'] = start; anchors.append(anchor)
+                if not anchor.get('reliable'): return {'status':'unreliable'}
+            offset = decide_alignment(anchors, duration)
+            if offset is None: return {'status':'unreliable'}
+            result = {'status':'matched','offset':offset,'anchors':anchors,'algorithm':ALGORITHM}
+            with self.lock:
+                self._check(job);self._cache_write(result_path,result)
+            return result
+        finally:
+            source.close()
 
     def _work(self):
         while True:

@@ -103,3 +103,24 @@ def test_finished_player_lease_protects_same_show_episode(finished):
     args = engine.subtitle_studio.production_targets.lease.call_args.args
     assert args[0]['show_id'] == 42 and args[0]['episode'] == 2
     assert args[0]['id'].startswith('finished:')
+
+
+def test_delivery_uses_normal_player_media_without_replacing_original_episode(finished):
+    client, db, engine, _ = finished
+    before = db.rows('SELECT * FROM episodes')
+    key = 'finished:test-v0'
+    media = client.get('/api/web/media/' + key).json()
+    assert media['release_id'] == 'test-v0' and media['show_id'] == 42 and media['episode'] == 2
+    assert 'path' not in media and media['progress'] is None
+    assert client.get('/api/web/media/' + key + '/subtitles').json() == {
+        'tracks': [], 'default': None, 'burned_in': True}
+    stream = client.get('/api/web/media/' + key + '/stream', headers={'Range': 'bytes=0-3'})
+    assert stream.status_code == 206 and stream.content == b'test'
+    assert client.post('/api/web/media/' + key + '/progress', json=packet()).status_code == 200
+    assert client.get('/api/web/media/' + key).json()['progress']['position'] == 123
+    assert client.get('/api/web/media/finished:test-v1').json()['progress'] is None
+    assert not client.post('/api/web/media/' + key + '/progress', json={'position':500,'duration':1420}).is_success
+    client.post('/api/web/media/' + key + '/viewing-session', json={'session':'test-session-00000002'})
+    assert engine.subtitle_studio.production_targets.lease.call_args.args[0]['episode'] == 2
+    assert db.rows('SELECT * FROM episodes') == before
+    assert client.get('/api/web/media/finished:missing').status_code == 404

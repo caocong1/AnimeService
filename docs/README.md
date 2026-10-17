@@ -9,6 +9,7 @@
 3. [项目经验](PROJECT-EXPERIENCE.md)：为什么这样做、哪些证据不能互相替代。
 4. [定时任务](AUTOMATION.md)：谁准备、谁制作、谁复盘，以及中断后的恢复。
 5. [开发与部署](DEVELOPMENT.md)、[Git 整理范围](GIT-ARCHIVE.md)：代码入口、测试与保存边界。
+6. [Claude跨电脑研究](CLAUDE-SUBTITLE-RESEARCH.md)、[问题基线](SUBTITLE-RESEARCH-BASELINE.md)：另一台电脑的执行方式、完整提示词和研究回传。
 
 ## 字幕与观看交付
 
@@ -24,6 +25,8 @@
 | [审校通道](SUBTITLE-REVIEW-CHANNELS.md) | 实际可用能力与未通过的能力 |
 | [原声研究](AUDIO-REVIEW-LAB.md)、[音频对齐可行性](AUDIO-ALIGNMENT-FEASIBILITY.md) | 隔离实验、控制样本、失败与证据边界 |
 | [遗留问题](SUBTITLE-ISSUE-REVIEW.md) | 具体问题归档及有新条件才验证 |
+| [日文来源核查](SUBTITLE-JAPANESE-SOURCES.md)、[来源目录](SUBTITLE-SOURCE-CATALOG.md) | 逐集实际查源，区分候选、故障、映射和原声审校 |
+| [字幕自动登记](SUBTITLE-ENROLLMENT.md) | 已授权在追作品幂等补登记，不扩大授权或抢owner |
 
 ## 选源、播放器与集数
 

@@ -9,7 +9,7 @@
       (r.edition == null || ['v0','v1'].includes(r.edition)) &&
       Number.isFinite(r.duration_seconds) && r.duration_seconds > 0
     ).map(r => ({...r, title: String(r.title || ''),
-      player_url: '/static/finished-player.html?release=' + encodeURIComponent(r.id),
+      player_url: '/watch?release=' + encodeURIComponent(r.id),
       video_url: '/static/finished-media/' + r.id + '/episode.mp4',
       subtitles_url: '/static/finished-media/' + r.id + '/subtitles.zip',
       notes_url: '/static/finished-media/' + r.id + '/notes.txt'}));

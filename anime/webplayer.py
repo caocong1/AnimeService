@@ -89,7 +89,8 @@ class WebPlayer:
         return rows
 
     def item(self,key):
-        row=self.media().get(key)
+        row=(self.finished_viewing.media(key.removeprefix('finished:'))
+             if key.startswith('finished:') and hasattr(self,'finished_viewing') else self.media().get(key))
         if not row:
             from .subtitle_targets import retained_item
             row=retained_item(self.db,key)
@@ -298,10 +299,13 @@ def register_webplayer(app,db):
         rows=sorted(player.media().values(),key=lambda x:(x['legacy'],x['folder'],x['name']))
         return [{k:v for k,v in r.items() if k!='path'} for r in rows
             if (not show_id or r.get('show_id')==show_id) and q.lower() in (r['name']+' '+r['folder']).lower()][max(0,offset):max(0,offset)+min(500,max(1,limit))]
+    @app.get('/api/web/alignment-capabilities')
+    def alignment_capabilities():
+        return {'sites':['bilibili','bahamut'], 'bahamut_reference':'bounded-hls-v1'}
     @app.get('/api/web/media/{key}')
     def item(key:str):
         r=player.item(key)
-        return {**{k:v for k,v in r.items() if k!='path'},'progress':db.one('SELECT * FROM web_progress WHERE media_id=?',(key,)),
+        return {**{k:v for k,v in r.items() if k!='path'},'progress':r.get('progress') if r.get('release_id') else db.one('SELECT * FROM web_progress WHERE media_id=?',(key,)),
                 'viewing_session_supported':True}
     @app.post('/api/web/media/{key}/viewing-session')
     def viewing_session(key:str,p:dict):
@@ -329,6 +333,7 @@ def register_webplayer(app,db):
                             headers={'Cross-Origin-Resource-Policy':'same-origin'})
     @app.post('/api/web/media/{key}/progress')
     def progress(key:str,p:dict):
+        if key.startswith('finished:'):return player.finished_viewing.progress(key.removeprefix('finished:'),p)
         player.item(key);pos=float(p.get('position',0));duration=float(p.get('duration',0))
         if not all(math.isfinite(x) and 0<=x<=86400 for x in (pos,duration)) or pos>duration+1:raise ValueError('播放进度无效')
         now=time.time();played=now if p.get('playing') is True and pos>0 else None
@@ -379,6 +384,7 @@ def register_webplayer(app,db):
     @app.get('/api/web/media/{key}/subtitles')
     def subtitles(key:str):
         item=player.item(key)
+        if item.get('release_id'):return {'tracks':[],'default':None,'burned_in':True}
         tracks=player.subtitles.tracks(item)
         from .subtitle_studio import authored
         selected=authored(db,item)

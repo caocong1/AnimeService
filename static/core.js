@@ -250,7 +250,7 @@ async function applyListAiringSchedules(list, fetchDetail = id => api('/shows/' 
   return list;
 }
 const watchHref = e => e.release
-  ? '/static/finished-player.html?release=' + encodeURIComponent(e.release.id)
+  ? '/watch?release=' + encodeURIComponent(e.release.id)
   : `/watch?media=${e.media}${e.s === 'resume' ? '&resume=1' : ''}`;
 
 const coarse = matchMedia('(pointer: coarse)').matches;

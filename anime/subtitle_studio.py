@@ -11,7 +11,7 @@ from .subtitles import Subtitles
 from .net import safe_error
 from .native_indexes import candidate_mapping,clean_blocker,acquisition_priority
 from .viewing_workflow import (enabled as split_enabled,production_wanted,base_remaining,
-                              require_base_slot,require_reference_slot,queue_snapshot)
+                              require_base_slot,require_reference_slot,queue_snapshot,RESEARCH_MODES)
 
 
 def lab_core():
@@ -75,10 +75,12 @@ class SubtitleStudio:
         if not self.db.get('subtitle_studio_enabled',False):raise ValueError('逐集字幕制作未启用')
         if not production_wanted(self.db,sid):raise ValueError('逐集自制字幕只在个人在追流程执行；原稿和历史保留')
         row=self.db.one('SELECT config FROM source_policies WHERE show_id=?',(sid,))
-        if not row or json.loads(row['config']).get('mode') not in ('sampling','selected'):
+        if not row or json.loads(row['config']).get('mode') not in RESEARCH_MODES:
             raise ValueError('不在想看新番字幕研究范围')
         if not self.db.review_wanted(sid) or not self.db.allowed(sid,1) or not self.db.allowed(sid,ep):
             raise ValueError('个人意愿、独立授权、映射/盘点或季集门禁未满足')
+        if submission and self.db.one('SELECT 1 FROM watches WHERE show_id=? AND episode=? AND finished=1',(sid,ep)):
+            raise ValueError('已看集保持原字幕，不自动新增制作取样')
         if submission:require_submission_ready(self.db)
 
     def candidates(self,sid):
@@ -97,7 +99,9 @@ class SubtitleStudio:
     def queue(self,c,role='clean_base'):
         sid,ep=c['show_id'],c['episode'];self.ensure(sid,ep,True)
         if role not in ('clean_base','subtitle_reference'):raise ValueError('未知研究角色')
-        if ep==1 and role=='clean_base':return  # Existing premiere sampler retains these.
+        if (ep==1 and role=='clean_base'
+                and self.engine.source_review.policy(sid).get('mode')!='subtitle_only'):
+            return  # Existing premiere sampler retains these.
         if role=='subtitle_reference':require_reference_slot(self.db,sid,ep)
         elif clean_blocker(self.db,c):raise ValueError(clean_blocker(self.db,c))
         data=self.engine.sources.torrent(c);h,files=bdecode(data)
@@ -108,6 +112,8 @@ class SubtitleStudio:
         selection={'files':files,'ids':ids,'selected':{str(ep):selected[ep]}}
         with self.db.gate:
             self.ensure(sid,ep,True);self.engine.check_legacy_owner(sid)
+            if (ep==1 and role=='clean_base'
+                    and self.engine.source_review.policy(sid).get('mode')!='subtitle_only'):return
             blocked=fidelity_blocker(self.db,c['title'],selection)
             if blocked:raise ValueError(blocked)
             if self.db.one('SELECT 1 FROM tasks WHERE hash=?',(h,)):return
@@ -145,8 +151,11 @@ class SubtitleStudio:
             sid=row['show_id']
             try:self.ensure(sid,1)
             except ValueError:continue
+            watched={r['episode'] for r in self.db.rows('SELECT episode FROM watches WHERE show_id=? AND finished=1',(sid,))}
+            subtitle_only=self.engine.source_review.policy(sid).get('mode')=='subtitle_only'
             fresh=[c['id'] for c in sorted(self.engine.source_review.candidates(sid),key=acquisition_priority)
                    if not clean_blocker(self.db,c) and not self.db.one('SELECT 1 FROM source_samples WHERE candidate_id=?',(c['id'],))]
+            if 1 in watched or subtitle_only:fresh=[]
             if split_enabled(self.db):fresh=fresh[:base_remaining(self.db,sid,1)]
             if fresh and can_submit and attempted<limit:
                 attempted+=1
@@ -154,7 +163,8 @@ class SubtitleStudio:
                 except Exception as ex:self.db.set('subtitle_studio_premiere_'+str(sid),{'time':time.time(),'error':safe_error(ex)})
             # Premiere samples keep their current source-review history and protection.
             choices={}
-            current=sorted(self.candidates(sid),key=acquisition_priority)
+            current=[c for c in sorted(self.candidates(sid),key=acquisition_priority)
+                     if c['episode'] not in watched]
             archive=archive_for(self.db)
             seen_jobs=set()
             for c in current:
@@ -166,7 +176,7 @@ class SubtitleStudio:
                     con.execute('INSERT OR IGNORE INTO discoveries VALUES(?,?,?,?)',(identity,key,value,time.time()))
                 if c['episode'] not in seen_jobs:
                     self.refresh_job(sid,c['episode'],archive);seen_jobs.add(c['episode'])
-                if c['episode']==1:continue
+                if c['episode']==1 and not subtitle_only:continue
                 if clean_blocker(self.db,c):continue
                 choices.setdefault((c['episode'],c['family']['key']),c)
             for (ep,fam),c in sorted(choices.items()):
@@ -563,7 +573,9 @@ def register_subtitle_studio(app,engine):
         available={c['id']:c for c in studio.candidates(sid) if c['episode']==ep}
         if set(ids)-available.keys():raise ValueError('候选身份、季集、来源或授权不符')
         for cid in dict.fromkeys(ids):
-            if ep==1 and role=='clean_base':engine.source_review.start(sid,[cid])
+            if (ep==1 and role=='clean_base'
+                    and engine.source_review.policy(sid).get('mode')!='subtitle_only'):
+                engine.source_review.start(sid,[cid])
             else:studio.queue(available[cid],role)
         return {'ok':True,'show_id':sid,'episode':ep,'role':role}
     @app.get('/api/subtitle-studio')

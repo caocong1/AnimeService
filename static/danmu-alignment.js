@@ -1,6 +1,19 @@
 /* Background alignment never overwrites a manual edit or a removed source. */
 (function(root) {
   'use strict';
+  function sourceSite(source = {}) {
+    const sites = ['bilibili', 'bahamut', 'iqiyi', 'youku', 'tencent'];
+    if (sites.includes(source.site)) return source.site;
+    try {
+      const site = {'www.bilibili.com':'bilibili', 'ani.gamer.com.tw':'bahamut',
+        'www.iqiyi.com':'iqiyi', 'v.youku.com':'youku', 'v.qq.com':'tencent'}[new URL(source.source_url).hostname];
+      if (site) return site;
+    } catch (_) {}
+    const title = source.title || '';
+    if (/bilibili|B站/i.test(title)) return 'bilibili';
+    if (/bahamut|巴哈/i.test(title)) return 'bahamut';
+    return sites.find(site => new RegExp(site, 'i').test(title)) || '';
+  }
   function preferences(value = {}) {
     const out = {};
     for (const key of ['alignmentManual', 'alignmentEnabled'])
@@ -74,7 +87,7 @@
     }
     return {start, cancel, manual};
   }
-  const api = {preferences, create};
+  const api = {preferences, sourceSite, create};
   if (typeof module !== 'undefined') module.exports = api;
   else root.DanmuAlignment = api;
 })(globalThis);

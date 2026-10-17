@@ -1,8 +1,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const {create, preferences} = require('../static/danmu-alignment.js');
+const {create, preferences, sourceSite} = require('../static/danmu-alignment.js');
 const {savedSources} = require('../static/danmu-timing.js');
 const deferred = () => { let resolve; const promise = new Promise(r => resolve=r); return {promise,resolve}; };
+test('source recognition survives plain titles and reload, with legacy title fallback', () => {
+  const source = {id:'key',source_identity:'stable',site:'bilibili',title:'第15集'};
+  assert.equal(sourceSite(source), 'bilibili');
+  assert.equal(sourceSite(savedSources([source])[0]), 'bilibili');
+  assert.equal(sourceSite({source_url:'https://www.bilibili.com/video/BV1EVap6yE6B?p=2',title:'第15集'}), 'bilibili');
+  assert.equal(sourceSite({title:'节目 from bilibili'}), 'bilibili');
+  assert.equal(sourceSite({site:'bahamut',title:'B站版本比较'}), 'bahamut');
+  assert.equal(sourceSite({title:'未知来源'}), '');
+});
 function fixture(request, wait) {
   const source={id:'registered',source_identity:'stable',title:'Bilibili',offset:0};
   const selected=[source], saved=[], applied=[];

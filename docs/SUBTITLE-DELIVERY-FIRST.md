@@ -46,3 +46,6 @@ python scripts/publish_finished_episode.py 本集成品目录 --series-title 作
 每一集v0/v1都必须通过`publish_finished_episode.py`登记统一成品清单，自动接入字幕库、追番首页/全部追番和作品分集播放入口。仅编码完成或只挂字幕库不能报告观看交付完成。单集负责人须只读核本集首页/分集状态不再错误缺集、按钮实际可打开；v1优先且v0保留，不能伪造accepted或修改原片/default/已看来凑状态。
 
 已打开观看列表在可见时每60秒及重新显示/聚焦时自动检查清单与文件，仅有变化才更新观看区域；分集页未保存表单保持，活动播放器不切换。新页面直接读取最新成品，无需服务重启或逐作品手工配置。暂时网络/5xx故障保留当前显示并重试，文件实际404则不能新增播放入口。具体实现与核验见`static/finished-releases.js`、`scripts/verify_finished_auto_delivery.cjs`与`data/finished-viewing-repair-20261015/auto-delivery-proof.json`。
+
+
+2026-10-16用户最新更正：自制字幕只是播放源，统一使用普通追番 /watch?release=不可变ID，同一Artplayer、弹幕与分集界面；不得另建独立播放器。原视频/v0/v1在播放源选择器切换，旧finished-player链接仅兼容跳转。版本续播仍走/api/finished-viewing，已看共用原watches；不强换活动播放。新交付回执和首页/全部追番/分集/字幕库必须使用统一入口。隔离浏览器验证 scripts/verify_unified_player.cjs 配合 scripts/unified_player_fixture.py；真实观看记录禁止用于测试。

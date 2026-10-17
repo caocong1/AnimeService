@@ -72,6 +72,55 @@ def test_refresh_is_idempotent_and_never_changes_media_or_watch(delivery):
     assert scheduler.get('episode:42:1')['state'] == 'ready'
 
 
+def test_later_completed_episode_enters_queue_while_first_is_blocked(delivery):
+    db, scheduler, ready, now = delivery
+    db.execute('DELETE FROM subtitle_studio_jobs WHERE show_id=42')
+    db.execute('DELETE FROM subtitle_delivery_jobs WHERE show_id=42')
+    ready.values[(42, 1)] = {**ready(db, 42, 1, {}), 'material_ready': False}
+    db.execute("INSERT INTO episodes(show_id,episode,status,path) VALUES(42,3,'complete','fixture.mkv')")
+    protected = {t: db.rows(f'SELECT * FROM {t}') for t in ('episodes', 'watches', 'tasks')}
+    scheduler.refresh()
+    assert scheduler.get('episode:42:1')['state'] == 'preparing'
+    assert scheduler.get('episode:42:3')['state'] == 'ready'
+    assert not db.one("SELECT id FROM subtitle_delivery_jobs WHERE id='episode:42:2'")
+    assert scheduler.refresh()['changed'] == 0
+    assert all(db.rows(f'SELECT * FROM {t}') == rows for t, rows in protected.items())
+
+
+def test_subtitle_only_policy_supports_transactional_delivery_claim(delivery):
+    db, scheduler, ready, now = delivery
+    db.execute('UPDATE source_policies SET config=? WHERE show_id=42', (json.dumps({'mode':'subtitle_only'}),))
+    scheduler.refresh()
+    identity, intent = begin(scheduler)
+    assert intent['id']==identity and intent['dispatch_state']=='committing'
+
+
+def test_completed_material_discovery_preserves_scope_and_watched(delivery):
+    db, scheduler, ready, now = delivery
+    db.execute('DELETE FROM subtitle_studio_jobs WHERE show_id=42')
+    db.execute('DELETE FROM subtitle_delivery_jobs WHERE show_id=42')
+    db.execute('INSERT INTO watches(show_id,episode,finished) VALUES(42,1,1)')
+    for ep in (1, 2, 3, 4):
+        db.execute("INSERT INTO episodes(show_id,episode,status) VALUES(42,?,'complete')", (ep,))
+    # A later completed research task also creates a preparation item even if
+    # no ordinary episode row exists. Malformed manifests add no work.
+    db.execute('DELETE FROM episodes WHERE show_id=42 AND episode=3')
+    for identity, selection in [('done', '{"selected":{"3":{}}}'), ('bad', '{')]:
+        db.execute("INSERT INTO tasks(hash,show_id,status,selection) VALUES(?,42,'complete',?)", (identity, selection))
+    scheduler.refresh()
+    eps = {r['episode'] for r in db.rows("SELECT episode FROM subtitle_delivery_jobs WHERE show_id=42")}
+    assert eps == {2, 3}
+    # Missing policy is healed for independently authorized watching scope.
+    db.execute('DELETE FROM source_policies WHERE show_id=42')
+    scheduler.refresh()
+    assert scheduler.get('episode:42:3')['state'] == 'ready'
+    assert json.loads(db.one('SELECT config FROM source_policies WHERE show_id=42')['config'])['mode']=='subtitle_only'
+    # Independent authorization remains a hard gate even after enrollment.
+    db.execute('UPDATE shows SET authorized=0 WHERE id=42')
+    scheduler.refresh()
+    assert scheduler.get('episode:42:3')['state'] == 'blocked'
+
+
 @pytest.mark.parametrize('field', ['material_ready', 'clean_review_ready', 'capability_ready'])
 def test_ready_requires_every_actual_material_and_capability_gate(delivery, field):
     db, scheduler, ready, now = delivery

@@ -2,12 +2,18 @@
 /* 放映室: the picture first; mark watched and go to the next episode without leaving. */
 (() => {
   shell('');
-  const params = new URLSearchParams(location.search), id = params.get('media');
+  const params = new URLSearchParams(location.search), releaseId = params.get('release');
+  const id = releaseId ? 'finished:' + releaseId : params.get('media');
   if (!id) return location.replace('/library');
+  const finishedEndpoint = releaseId ? '/api/finished-viewing/' + encodeURIComponent(releaseId) : null;
+  let releases = [], sourceBoard = null, sequence = 0, progressQueue = Promise.resolve(), moved = false;
+  let sourceOnly = false;
+  let alignmentSites = ['bilibili'];
+  const tracking = text => { $('#tracking-status').textContent = text; };
   // Paused/background pages also keep the old media/build alive during publication.
   const viewingSession = crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(24)), x => x.toString(16).padStart(2, '0')).join('');
   let viewingLeaseTimer = null;
-  const viewingLease = (closed = false) => media?.viewing_session_supported ? fetch(`/api/web/media/${id}/viewing-session`, {
+  const viewingLease = (closed = false) => media?.viewing_session_supported ? fetch(finishedEndpoint ? finishedEndpoint + '/viewing-session' : `/api/web/media/${id}/viewing-session`, {
     method: 'POST', keepalive: closed,
     headers: { 'Content-Type': 'application/json', 'X-Anime-Token': App.token },
     body: JSON.stringify({ session: viewingSession, closed }),
@@ -68,7 +74,8 @@
     render: () => { if (!document.activeElement?.matches('#danmu-selected input')) renderSelected(); }, apply: applyDanmu,
   });
   function alignSource(source, options) {
-    if (/bilibili|B站/i.test(source.title) && source.count > 0) alignment.start(source, options);
+    if (sourceOnly) return;
+    if (alignmentSites.includes(DanmuAlignment.sourceSite(source)) && source.count > 0) alignment.start(source, options);
   }
   window.addEventListener('pagehide', () => selected.forEach(source => alignment.cancel(source)));
 
@@ -79,9 +86,19 @@
 
   /* ---------- episodes of this show (or files of this folder) ---------- */
 
-  const resumable = () => { const p = media?.progress; return !!p && p.position > 5 && p.position < (p.duration || 0) - 30; };
-  const current = () => show?.board.eps.find(e => e.media === id);
-  const nextEp = () => { const c = current(); return c && show.board.eps.find(e => e.n > c.n && e.media); };
+  const resumable = () => { const p = media?.progress; return !media?.finished && !!p && p.position > 5 && p.position < (p.duration || 0) - 30; };
+  const isCurrent = e => releaseId ? e.n === media?.episode : e.media === id;
+  const current = () => show?.board.eps.find(isCurrent);
+  const nextEp = () => { const c = current(); return c && show.board.eps.find(e => e.n > c.n && (e.media || e.release)); };
+
+  function renderSources() {
+    const row = sourceBoard?.eps.find(e => e.n === media.episode), options = [];
+    if (row?.media) options.push({url:'/watch?media=' + row.media, label:'原视频', active:!releaseId});
+    const versions = releases.filter(r => r.show_id === media.show_id && r.season === Number(show.show.mapping?.season || 1) && r.episode === media.episode).sort((a,b) => FinishedReleases.compare(b,a));
+    for (const r of versions) options.push({url:r.player_url,label:'自制字幕 · ' + FinishedReleases.label(r),active:r.id === releaseId});
+    $('#playback-source-row').hidden = !options.length;
+    $('#playback-source').innerHTML = options.map(o => `<option value="${esc(o.url)}"${o.active ? ' selected' : ''}>${esc(o.label)}</option>`).join('');
+  }
 
   function renderActs() {
     const c = current(), n = nextEp(), pos = media?.progress?.position || 0;
@@ -91,7 +108,7 @@
       : `<button class="btn" type="button" data-mark="true">${icon('check')}标记看完</button>`);
     if (n) parts.push(`<a class="btn primary" href="${watchHref(n)}">${icon('next')}第 ${n.n} 集</a>`);
     if (resumable()) parts.push(`<button class="btn quiet" type="button" id="restart">从头播放</button>`);
-    if (App.local) parts.push(`<button class="btn quiet" type="button" id="desktop" title="用本机播放器打开">${icon('desktop')}<span>本机播放器</span></button>`);
+    if (App.local && !sourceOnly) parts.push(`<button class="btn quiet" type="button" id="desktop" title="用本机播放器打开">${icon('desktop')}<span>本机播放器</span></button>`);
     $('#acts').innerHTML = parts.join('');
   }
 
@@ -104,6 +121,10 @@
 
   async function loadShow() {
     show = await api('/shows/' + media.show_id);
+    sourceBoard = show.board;
+    show.board = FinishedReleases.applyBoard(show.show, sourceBoard, releases);
+    if (releaseId) media.finished = current()?.s === 'watched';
+    renderSources();
     $('#parent').innerHTML = icon('back') + esc(show.show.title);
     $('#parent').href = '/show/' + show.show.id;
     const c = current();
@@ -112,16 +133,16 @@
     renderActs();
     const eps = show.board.eps.filter(e => e.s !== 'future');
     let run = 0;
-    while (run < eps.length && eps[run].s === 'watched' && eps[run].media !== id) run++;
+    while (run < eps.length && eps[run].s === 'watched' && !isCurrent(eps[run])) run++;
     const row = e => {
-      const here = e.media === id, seen = e.s === 'watched';
+      const here = isCurrent(e), seen = e.s === 'watched';
       const sub = here ? '正在播放' : e.s === 'resume' ? '看到 ' + clock(e.position) : e.s === 'downloading' ? `下载中 ${e.progress}%` : EP_LABEL[e.s];
       const body = `<b>第 ${e.n} 集</b><span>${sub}</span>`;
       const mark = seen
         ? `<button class="btn small quiet mark" type="button" data-ep="${e.n}" data-finished="false" aria-pressed="true" aria-label="第 ${e.n} 集已看，改为未看" title="改为未看">${icon('check')}</button>`
         : `<button class="btn small mark" type="button" data-ep="${e.n}" data-finished="true" aria-label="第 ${e.n} 集标记看完">看完</button>`;
       return `<div class="pl-item" data-s="${e.s}"${here ? ' aria-current="true"' : ''}><span class="no">${here ? icon('play') : ''}</span>
-        ${e.media && !here ? `<a class="go" href="${watchHref(e)}">${body}</a>` : `<span class="go">${body}</span>`}${mark}</div>`;
+        ${(e.media || e.release) && !here ? `<a class="go" href="${watchHref(e)}">${body}</a>` : `<span class="go">${body}</span>`}${mark}</div>`;
     };
     renderList((run > 1 ? `<details class="pl-fold"><summary class="pl-item"><span class="no">${icon('check')}</span><span class="go"><b>第 1–${run} 集</b><span>已看</span></span>${icon('chevron')}</summary>${eps.slice(0, run).map(row).join('')}</details>` : eps.slice(0, run).map(row).join(''))
       + eps.slice(run).map(row).join(''));
@@ -138,10 +159,16 @@
   }
 
   async function mark(n, finished) {
-    const r = await api(`/shows/${show.show.id}/watch`, { episode: n, finished });
+    await progressQueue;
+    const r = await api(releaseId && n === media.episode ? `/finished-viewing/${encodeURIComponent(releaseId)}/watch` : `/shows/${show.show.id}/watch`, { episode: n, finished });
+    try { releases = await FinishedReleases.load(); }
+    catch (e) {
+      releases = releases.map(r => r.show_id === media.show_id && r.episode === n ? {...r,finished} : r);
+      tracking(e.message);
+    }
     await loadShow();
     const nx = nextEp();
-    toast(`第 ${n} 集${finished ? '已看' : '改为未看'}${r.state ? ' · 已设为' + STATES[r.state] : ''}`, finished && nx && current()?.n === n ? { label: `播放第 ${nx.n} 集`, run: () => location.assign('/watch?media=' + nx.media) } : null);
+    toast(`第 ${n} 集${finished ? '已看' : '改为未看'}${r.state ? ' · 已设为' + STATES[r.state] : ''}`, finished && nx && current()?.n === n ? { label: `播放第 ${nx.n} 集`, run: () => location.assign(watchHref(nx)) } : null);
   }
 
   /* ---------- player ---------- */
@@ -149,6 +176,19 @@
   /* Only real playback moves the stored position; opening or leaving the page never does. */
   async function saveProgress(keepalive = false) {
     if (audioSwitching || !played || !art || !Number.isFinite(art.duration) || art.duration <= 0) return;
+    if (finishedEndpoint) {
+      const body = {position:art.currentTime,duration:art.duration,playing:moved,session:viewingSession,sequence:++sequence};
+      moved = false;
+      const run = async () => {
+        try {
+          const response = await fetch(finishedEndpoint + '/progress', {method:'POST',keepalive,headers:{'Content-Type':'application/json','X-Anime-Token':App.token},body:JSON.stringify(body)});
+          if (!response.ok) throw Error('观看记录未同步，请稍后重试');
+          tracking('续播进度已同步 · ' + clock(body.position));
+        } catch (e) { moved ||= body.playing; tracking(e.message); }
+      };
+      if (keepalive) return run();
+      progressQueue = progressQueue.then(run); return progressQueue;
+    }
     const delta = art.currentTime - lastPosition, playing = !art.video.paused && delta > 0 && delta < 35;
     lastPosition = art.currentTime;
     await fetch(`/api/web/media/${id}/progress`, {
@@ -159,7 +199,7 @@
   }
 
   function desktopButton() {
-    return App.local ? `<button class="btn" type="button" id="desktop">${icon('desktop')}用本机播放器打开</button>` : '';
+    return App.local && !sourceOnly ? `<button class="btn" type="button" id="desktop">${icon('desktop')}用本机播放器打开</button>` : '';
   }
   function playbackFailure() {
     const compatible = !audioCurrent && audioCopySupported && audioTracks.length;
@@ -175,7 +215,7 @@
     const accent = getComputedStyle(document.documentElement).getPropertyValue('--signal').trim();
     art = new Artplayer({
       container: '#screen',
-      url: `/api/web/media/${id}/stream`,
+      url: releaseId ? `/static/finished-media/${encodeURIComponent(releaseId)}/episode.mp4` : `/api/web/media/${id}/stream`,
       type: media.name.toLowerCase().endsWith('.mp4') ? 'mp4' : 'mkv',
       volume: 0.7, theme: accent, lang: 'zh-cn', setting: true, playbackRate: true, fullscreen: true, fullscreenWeb: true, hotkey: false, gesture: false,
       subtitle: { escape: true, style: { color: '#fff', fontSize: 'clamp(16px, 2.2vw, 28px)', textShadow: '0 1px 3px #000, 1px 0 2px #000' } },
@@ -191,9 +231,13 @@
       e.preventDefault(); e.stopPropagation(); openMenu(hit, e.clientX, e.clientY);
     }, true);
     art.controls.add({ name: 'shot', position: 'right', index: 20, html: art.icons.screenshot, tooltip: '截图', click: screenshot });
-    const clip = ClipExport.mount({id, player: () => art, audio: () => audioCurrent, request: (path, body) => web(path, body)});
-    art.on('destroy', () => clip.close());
-    const picture = PictureQuality.mount(art, {request: () => web(`/media/${id}/picture`),
+    if (!sourceOnly) {
+      const clip = ClipExport.mount({id, player: () => art, audio: () => audioCurrent, request: (path, body) => web(path, body)});
+      art.on('destroy', () => clip.close());
+    } else { $('#open-clip').disabled = true; $('#open-clip').title = '片段工具暂不可用'; }
+    const picture = PictureQuality.mount(art, {request: () => sourceOnly
+      ? Promise.resolve({width:media.release.width,height:media.release.height,dynamic_range:'unknown'})
+      : web(`/media/${id}/picture`),
       select: $('#picture-mode'), note: $('#picture-note'), details: $('#picture-details')});
     art.on('destroy', () => picture.close());
     renderDisplay();
@@ -252,19 +296,25 @@
       // If audible autoplay is blocked, wait for the viewer to press play without muting.
       art.play().catch(() => {});
     });
-    art.on('video:playing', () => { played = true; });
+    art.on('video:playing', () => { if (!releaseId) played = true; });
+    art.on('video:seeked', () => { if (releaseId) lastPosition = art.currentTime; });
     art.on('video:error', () => { if (!audioSwitching) playbackFailure(); });
-    art.on('video:timeupdate', () => { followList(); if (Date.now() - lastSave > 15000) { lastSave = Date.now(); saveProgress().catch(() => {}); } });
+    art.on('video:timeupdate', () => {
+      if (releaseId) { const delta = art.currentTime-lastPosition; lastPosition = art.currentTime;
+        if (!art.video.seeking && !art.video.paused && delta > 0 && delta < 35) { played = true; moved = true; } }
+      followList(); if (Date.now() - lastSave > 15000) { lastSave = Date.now(); saveProgress().catch(() => {}); }
+    });
     art.on('video:pause', () => saveProgress().catch(() => {}));
     art.on('video:ended', () => {
       saveProgress().catch(() => {});
       const c = current(), n = nextEp();
       if (!c || c.s === 'watched') return;
       screenState(`<b>第 ${c.n} 集放完了</b><div class="links" style="justify-content:center">
-        ${n ? `<button class="btn primary" type="button" data-end-next="${n.media}">${icon('check')}看完，播放第 ${n.n} 集</button>` : ''}
+        ${n ? `<button class="btn primary" type="button" data-end-next="${n.n}">${icon('check')}看完，播放第 ${n.n} 集</button>` : ''}
         <button class="btn" type="button" data-mark="true">${icon('check')}标记看完</button><button class="btn quiet" type="button" id="dismiss">不标记</button></div>`);
     });
     addEventListener('pagehide', () => saveProgress(true).catch(() => {}));
+    document.addEventListener('visibilitychange', () => { if (document.hidden) saveProgress(true).catch(() => {}); });
     loadSubtitles();
     loadAudioTracks();
     restoreDanmu();
@@ -295,6 +345,7 @@
     else art.setting.add(option);
   }
   async function loadAudioTracks() {
+    if (sourceOnly) return;
     const note = $('#audio-note'), sel = $('#audio-track');
     try {
       const d = await web(`/media/${id}/audio-tracks`);
@@ -392,6 +443,10 @@
 
   async function loadSubtitles() {
     const note = $('#sub-note'), sel = $('#subtitle');
+    if (releaseId) {
+      $('#playing-subtitle').textContent = '系统自制 · ' + FinishedReleases.label(media.release) + ' · 已烧录在画面中';
+      return;
+    }
     try {
       const d = await web(`/media/${id}/subtitles`);
       tracks = d.tracks;
@@ -406,7 +461,7 @@
   let subtitleRenderer = null;
   async function changeSubtitle() {
     const value = $('#subtitle').value, note = $('#sub-note');
-    if (!art) return;
+    if (!art || releaseId) return;
     subtitleRenderer ??= new SubtitleRenderer(art, note, `/api/web/media/${id}/subtitle-fonts`, ({status,track}) => {
       const source = track?.origin === 'authored' ? '系统自制' : track?.origin === 'embedded' ? '视频自带 · 内嵌软字幕' : track?.origin === 'sidecar' ? '发布包外挂字幕' : '来源未核实';
       const label = track?.label.replace(/^系统自制\s*·\s*/, '');
@@ -596,13 +651,16 @@
   function renderSelected() {
     if (document.activeElement?.matches('#danmu-selected input')) return;
     $('#danmu-selected').innerHTML = selected.map((x, i) => {
-      const p = sourceLabel(x.title), busy = ['queued','running','retrying'].includes(x.alignmentStatus);
+      const site = DanmuAlignment.sourceSite(x), p = sourceLabel(site || x.title), busy = ['queued','running','retrying'].includes(x.alignmentStatus);
+      const unavailable = !['bilibili','bahamut'].includes(site) ? '自动对轴目前支持 B站视频和巴哈姆特来源，可用提前／延后手动调整'
+        : !alignmentSites.includes(site) ? '巴哈姆特自动对轴等待服务空闲更新，原偏移保持'
+        : sourceOnly ? '服务更新等待播放空闲，暂不能自动对轴，可先手动调整' : '';
       const status = x.loading ? '加载中…' : x.error ? '获取失败' : x.count > 0 ? `${x.count} 条` : x.count === 0 ? '暂无弹幕' : '尚未加载';
-      const alignStatus = x.alignmentEnabled === false ? '自动对齐已关闭' : x.alignmentManual ? '手动调时' : ({queued:'等待音频对齐…', running:'正在音频对齐…', retrying:x.alignmentMessage || '稍后自动重试音频对齐', matched:`已自动对齐 ${x.offset > 0 ? '+' : ''}${x.offset || 0} 秒`, unreliable:'音频未能可靠匹配', unavailable:x.alignmentMessage || '自动对齐不可用'}[x.alignmentStatus] || '');
+      const alignStatus = unavailable || (x.alignmentEnabled === false ? '自动对齐已关闭' : x.alignmentManual ? '手动调时' : ({queued:'等待音频对齐…', running:'正在音频对齐…', retrying:x.alignmentMessage || '稍后自动重试音频对齐', matched:`已自动对齐 ${x.offset > 0 ? '+' : ''}${x.offset || 0} 秒`, unreliable:'音频未能可靠匹配', unsupported:'此来源暂不支持音频对齐，可手动调整', unavailable:x.alignmentMessage || '自动对齐不可用'}[x.alignmentStatus] || ''));
       const acts = [
         sourceLink(x.source_url),
-        p.name === 'Bilibili' ? `<button class="dm-act" type="button" data-align-source="${i}"${busy ? ' disabled' : ''}>${x.alignmentManual || x.alignmentEnabled === false ? '改用自动对齐' : '重新对齐'}</button>` : '',
-        p.name === 'Bilibili' && x.alignmentEnabled !== false ? `<button class="dm-act" type="button" data-disable-alignment="${i}">关闭自动对齐</button>` : '',
+        `<button class="dm-act" type="button" data-align-source="${i}"${busy || unavailable ? ' disabled' : ''}${unavailable ? ` title="${esc(unavailable)}"` : ''}>${busy ? '自动对轴中…' : x.alignmentStatus && !x.alignmentManual && x.alignmentEnabled !== false ? '重新自动对轴' : '自动对轴'}</button>`,
+        !unavailable && x.alignmentEnabled !== false ? `<button class="dm-act" type="button" data-disable-alignment="${i}">关闭自动对齐</button>` : '',
         `<button class="dm-act dm-act-remove" type="button" data-remove="${i}">移除</button>`,
       ].join('');
       return `<article class="dm-source"><span class="dm-mark" aria-hidden="true">${p.mark}</span>
@@ -747,7 +805,9 @@
     note.title = '临时失败会自动重试，最多三次';
     const searchVersion = searchRev;
     try {
-      const d = await web(`/media/${id}/danmu`);
+      const d = sourceOnly
+        ? await DanmuMatch.match(show.show, media.episode, web)
+        : await web(`/media/${id}/danmu`);
       if (rev !== danmuRev) return;
       if (searchVersion === searchRev && d.candidates) renderDanmuResults(d.candidates, '本集推荐');
       if (d.status === 'matched') {
@@ -766,7 +826,7 @@
     if (!b) return;
     if (b.dataset.mark) return act(b, async () => { screenState(''); await mark(current().n, b.dataset.mark === 'true'); });
     if (b.dataset.ep) return act(b, () => mark(Number(b.dataset.ep), b.dataset.finished === 'true'));
-    if (b.dataset.endNext) return act(b, async () => { await api(`/shows/${show.show.id}/watch`, { episode: current().n, finished: true }); location.assign('/watch?media=' + b.dataset.endNext); });
+    if (b.dataset.endNext) return act(b, async () => { const next = nextEp(); await mark(current().n, true); if (next) location.assign(watchHref(next)); });
     if (b.dataset.remove) { ++danmuRev; const i=Number(b.dataset.remove); alignment.cancel(selected[i]); removedSources.add(selected[i].source_identity); saveRemoved(); selected.splice(i, 1); saveSources(); renderSelected(); applyDanmu().catch(e => toast(e.message)); (document.querySelector(`[data-timing="${Math.min(i,selected.length-1)}"][data-field="offset"]`) || $('#open-danmu-search')).focus(); return; }
     if (b.dataset.nudge !== undefined) {
       const x = selected[Number(b.dataset.nudge)];
@@ -779,6 +839,7 @@
     if (b.dataset.reloadSource !== undefined) return loadSource(selected[Number(b.dataset.reloadSource)]);
     if (b.dataset.alignSource !== undefined) {
       const source=selected[Number(b.dataset.alignSource)];
+      if (!source || sourceOnly || !alignmentSites.includes(DanmuAlignment.sourceSite(source))) return;
       source.alignmentEnabled=true; source.alignmentManual=false; saveTiming(source);
       return alignment.start(source,{force:true,confirmed:true});
     }
@@ -824,7 +885,10 @@
         if (selected.length >= 5) return toast('最多使用 5 个来源，先移除一个再添加');
         ++danmuRev;
         const source=restoreTiming({ id: ep.source_key, source_identity: ep.source_identity, source_url: ep.source_url, site: ep.site, uploader: ep.uploader || activeDanmu.uploader || '', title: activeDanmu.animeTitle + ' · ' + ep.episodeTitle });
-        removedSources.delete(source.source_identity); saveRemoved(); source.alignmentConfirmed=true; selected.push(source); saveSources(); updateEpisodeLink(); toast('已添加，可以继续选择其他来源'); return loadSource(source);
+        removedSources.delete(source.source_identity); saveRemoved(); source.alignmentConfirmed=true; selected.push(source); saveSources(); updateEpisodeLink();
+        ++detailRev; clearTimeout(infoTimer); showDetail(false);
+        (document.querySelector(`[data-anime="${CSS.escape(String(activeDanmu.animeId))}"]`) || $('#danmu-q')).focus();
+        toast('已添加，可以继续选择其他来源'); return loadSource(source);
       }
       case 'load-danmu': return act(b, async () => {
         const rev = ++danmuRev, sources = [...selected];
@@ -935,17 +999,36 @@
   addEventListener('resize', renderRows);
   $('#close-danmu-search').innerHTML = icon('close'); $('#danmu-back').innerHTML = icon('back');
   renderDisplay(); renderBlocked(); renderShot();
+  $('#playback-source').addEventListener('change', async e => { await saveProgress(); location.assign(e.target.value); });
 
   (async () => {
     try {
       await boot();
-      media = await web('/media/' + id);
+      try {
+        const capabilities = await web('/alignment-capabilities');
+        if (Array.isArray(capabilities.sites)) alignmentSites = capabilities.sites.filter(site => ['bilibili','bahamut'].includes(site));
+      } catch (_) { /* An older worker can keep protecting active playback. */ }
+      try { releases = await FinishedReleases.load({verifyMedia:true}); }
+      catch (e) { if (releaseId) throw e; tracking(e.message); }
+      try { media = await web('/media/' + id); }
+      catch (e) {
+        if (!releaseId || e.status !== 404) throw e;
+        // Static UI can update while the previous worker protects an active movie.
+        // The established delivery API already validates current ownership and SHA.
+        const record = await api('/finished-viewing/' + encodeURIComponent(releaseId));
+        const release = releases.find(r => r.id === releaseId && r.video_sha256 === record.video_sha256);
+        if (!release) throw Error('成品版本无法核验，请刷新后重试');
+        sourceOnly = true;
+        media = {id,release_id:releaseId,name:releaseId+'.mp4',folder:release.title,
+          show_id:record.show_id,episode:record.episode,progress:record.progress,
+          finished:record.finished,release,viewing_session_supported:true};
+      }
       viewingLease();
       $('#playing-file').textContent = media.name;
       if (media.show_id) $('#playing-subtitle-library').href = '/subtitle-library?show=' + media.show_id;
       $('#danmu-q').value = media.show_id ? '' : media.folder;
-      openPlayer();
       if (media.show_id) { await loadShow(); $('#danmu-q').value = show.show.title; } else await loadFolder();
+      openPlayer();
     } catch (e) {
       screenState(`<b>${/404|未找到/.test(e.message) ? '找不到这个文件' : '打不开这个文件'}</b><span>${esc(e.message)}</span><a class="btn" href="/library">去片库</a>`);
     }

@@ -25,11 +25,10 @@
     const raw = d.episodes.find(x => x.episode === e.n);
     const isNext = d.board.next?.n === e.n;
     const play = e.media || e.release ? `<a class="btn small${isNext ? ' primary' : ''}" href="${watchHref(e)}" aria-label="第 ${e.n} 集${e.s === 'resume' ? '续播' : e.s === 'watched' ? '重播' : '播放'}">${icon('play')}<span class="lbl">${e.s === 'resume' ? '续播' : e.s === 'watched' ? '重播' : '播放'}</span></a>` : '';
-    const versions = (e.release_versions || []).filter(r => r.id !== e.release?.id).map(r => `<a class="btn small quiet" href="${r.player_url}" title="${FinishedReleases.label(r)}" aria-label="第 ${e.n} 集 ${FinishedReleases.label(r)}">${r.edition || 'v' + r.version}</a>`).join('');
     const tick = e.s === 'future' ? '' : e.s === 'watched'
       ? `<button class="btn small quiet" type="button" data-watch="${e.n}" data-finished="false" aria-label="第 ${e.n} 集改为未看">${icon('check')}<span class="lbl">已看</span></button>`
       : `<button class="btn small" type="button" data-watch="${e.n}" data-finished="true" aria-label="第 ${e.n} 集标记看完">${icon('check')}<span class="lbl">看完</span></button>`;
-    return `<div class="ep-row" data-s="${e.s}"${isNext ? ' data-next' : ''}><span class="no"><span>${e.n}</span></span><span class="st">${EP_LABEL[e.s]}</span><span class="info">${epInfo(e, raw)}</span><span class="acts">${play}${versions}${tick}</span></div>`;
+    return `<div class="ep-row" data-s="${e.s}"${isNext ? ' data-next' : ''}><span class="no"><span>${e.n}</span></span><span class="st">${EP_LABEL[e.s]}</span><span class="info">${epInfo(e, raw)}</span><span class="acts">${play}${tick}</span></div>`;
   }
 
   function episodes() {

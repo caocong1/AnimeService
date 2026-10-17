@@ -31,7 +31,7 @@ def test_ui_revalidates_on_normal_and_conditional_reload(tmp_path):
         assert conditional.headers['cache-control']==cache
     html=client.get('/manage').text
     for script in ('core.js', 'manage.js'):
-        assert re.search(r'/static/' + re.escape(script) + r'\?v=\d+"', html)
+        assert re.search(r'/static/' + re.escape(script) + r'\?v=[0-9][A-Za-z0-9._-]*"', html)
     assert client.get('/api/bootstrap').headers['cache-control']=='no-store'
 
 

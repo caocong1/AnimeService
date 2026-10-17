@@ -13,7 +13,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .viewing_workflow import lane, queue_snapshot, scope_blocker
+from .viewing_workflow import lane, queue_snapshot, scope_blocker, RESEARCH_MODES
 
 
 STATES = {'preparing', 'ready', 'production', 'blocked', 'accepted', 'finished', 'late-review'}
@@ -62,7 +62,7 @@ def _scope_transaction(c, sid, ep):
             or not mapping.get('start', 1) <= ep <= mapping.get('end', show['total'] or 999)):
         return 'Delivery authorization or episode bounds changed'
     policy = c.execute('SELECT config FROM source_policies WHERE show_id=?', (sid,)).fetchone()
-    if not policy or json.loads(policy['config']).get('mode') not in ('sampling', 'selected'):
+    if not policy or json.loads(policy['config']).get('mode') not in RESEARCH_MODES:
         return 'Delivery research policy changed'
     return ''
 
@@ -205,6 +205,8 @@ class SubtitleDelivery:
 
     def refresh(self, snapshot=None):
         """Prepare durable jobs from current gates; never dispatch or perform acquisition."""
+        from .subtitle_enrollment import reconcile
+        enrollment = reconcile(self.db)
         snapshot = snapshot or queue_snapshot(self.db)
         changes = 0
         present = set()
@@ -277,7 +279,7 @@ class SubtitleDelivery:
         if two_pass(self.db):
             for row in self.db.rows("SELECT id FROM subtitle_delivery_jobs WHERE kind='episode' AND state!='accepted' AND dispatch_state IN ('completed','blocked-stopped')"):
                 enqueue_refinement(self, row['id'])
-        return {'changed': changes, **self.snapshot()}
+        return {'changed': changes, 'enrollment': enrollment, **self.snapshot()}
 
     def record_preparation(self, sid, ep):
         """Assess one current episode without creating or claiming a chat."""
@@ -319,7 +321,11 @@ class SubtitleDelivery:
                 value['priority'] = -10
             jobs.append(value)
         jobs.sort(key=lambda job: (job['priority'], job['episode'], job['created'], job['id']))
-        return {'jobs': jobs, 'summary': {state: sum(job['state'] == state for job in jobs) for state in sorted(STATES)}}
+        from .subtitle_enrollment import coverage
+        return {'jobs': jobs, 'summary': {state: sum(job['state'] == state for job in jobs) for state in sorted(STATES)},
+                'enrollment_coverage': coverage(self.db),
+                'preparation_features': {'research_modes': list(RESEARCH_MODES), 'all_available_unwatched': True,
+                                         'watched_acquisition_guard': True, 'watching_auto_enrollment': True}}
 
     def reserve(self, identity, owner, expected_revision, lease_seconds=900, allow_experience=False,
                 resume_thread=None):

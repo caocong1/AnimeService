@@ -35,7 +35,7 @@
 
 ## 2026-10-15 成品在追番与分集页直接观看
 
-成品上架后，追番首页、全部追番和作品分集页也必须读取 `static/finished-media/index.json`，不能只凭 `episodes` 下载表把已交付集显示为缺集。`FinishedReleases.applyBoard/applyList`按作品ID、当前季号及本地集号合并只读观看投影，保留已看，更新可播放/待看/下一集；v1精校细调优先，v0首版可单独选择。入口使用现有成品播放器，不回填或覆盖原视频/下载/default/正式accepted。
+成品上架后，追番首页、全部追番和作品分集页也必须读取 `static/finished-media/index.json`，不能只凭 `episodes` 下载表把已交付集显示为缺集。`FinishedReleases.applyBoard/applyList`按作品ID、当前季号及本地集号合并只读观看投影，保留已看，更新可播放/待看/下一集；v1精校细调优先，v0首版可单独选择。入口统一使用普通追番放映室 /watch?release=不可变ID，不回填或覆盖原视频/下载/default/正式accepted。
 
 页面读取清单后用最多4路并发HEAD核验MP4存在、非空、类型正确；索引与核验共用8秒上限。失效版本不能新增播放按钮；v1失效且v0实存时可播放v0。独立成品不继承原片的续播位置。已有页面刷新加载，新成品在下一次读取时自动出现，无需重启服务。失败读取提示并保留原下载观看入口。
 
@@ -56,3 +56,6 @@
 `/{release}/watch` 校验当前作品季集后复用原 `/api/shows/{id}/watch`，因此已看、计数和追完边界与普通播放器一致；各版本共用该集已看。播放结束提示手动确认，跳到片尾不标已看。看完后重播从头开始，取消已看后可继续本版本原进度。`/{release}/viewing-session` 使用原播放租约保护，同一作品/本地集号阻止活动播放中更换原目标。
 
 首页和分集每次刷新/返回、每分钟检查时一并读取服务端记录；有可续播的成品时保留最近实际观看的版本，v1仍可另选。无续播时v1优先。版本归属已变化或视频已缺失时拒绝记录写入。首次上线前未保存的旧进度无法追补，不借用原片/其他版本时间。可复用 `tests/test_finished_viewing.py` 和 `scripts/verify_finished_tracking.cjs` 验证；后者仅对隔离4879临时DB写入，生产媒体只读。
+
+
+2026-10-16用户最新更正：自制字幕只是播放源，统一使用普通追番 /watch?release=不可变ID，同一Artplayer、弹幕与分集界面；不得另建独立播放器。原视频/v0/v1在播放源选择器切换，旧finished-player链接仅兼容跳转。版本续播仍走/api/finished-viewing，已看共用原watches；不强换活动播放。新交付回执和首页/全部追番/分集/字幕库必须使用统一入口。隔离浏览器验证 scripts/verify_unified_player.cjs 配合 scripts/unified_player_fixture.py；真实观看记录禁止用于测试。
