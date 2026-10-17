@@ -155,3 +155,14 @@ def test_video_ineligible_can_keep_subtitle_review_without_becoming_recommendati
     status=e.source_review.status(42)
     assert status['samples'][0]['review']['translation']==85 and status['recommendation']==[]
     with pytest.raises(ValueError):e.source_review.choose(42,s['family'],[])
+
+
+def test_media_keys_are_hashed_once_per_inventory_version_and_follow_file_changes(setup,tmp_path):
+    db,q,e,c=setup
+    inventory=db.path.parent/'inventory.json';inventory.write_text(json.dumps([{'path':str(tmp_path/'a.mp4'),'size':1},{'path':str(tmp_path/'b.mp4'),'size':2}]),encoding='utf-8')
+    player=WebPlayer(db)
+    first=player.media();assert len(first)==2 and player.inventory_rows() is player.inventory_rows()
+    assert player.media()==first
+    import os,time
+    inventory.write_text(json.dumps([{'path':str(tmp_path/'c.mp4'),'size':3}]),encoding='utf-8');os.utime(inventory,None)
+    changed=player.media();assert len(changed)==1 and next(iter(changed.values()))['name']=='c.mp4'
