@@ -7,6 +7,11 @@ wording can never be force-aligned to Japanese speech. The output is a proposal 
 lab's ``alignments`` schema with ``status=proposed``: a reviewer must inspect every
 reported cut, drift and low-confidence segment against actual picture and audio before
 changing it to ``accepted``. Temporal overlap is a pairing candidate, not acceptance.
+
+Coverage is the share of the target's dialogue time (the union of its valid dialogue
+intervals) that lies under candidate dialogue rows paired by overlap after mapping.
+Duplicate, nested and overlapping rows count once and archived control rows (music marks,
+bracketed sound cues) never count, so coverage can only fall when dialogue is missing.
 """
 import argparse
 import bisect
@@ -20,8 +25,8 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA = 'anime-subtitle-alignment-proposal/v1'
-REVISION = 'interval-overlap-dp-v1'
+SCHEMA = 'anime-subtitle-alignment-proposal/v2'
+REVISION = 'interval-overlap-dp-v2'
 # Frame-rate conversions; a 25 fps broadcast candidate drifts against 23.976 fps media.
 SCALES = (1.0, 25 / 23.976, 23.976 / 25, 24 / 23.976, 23.976 / 24, 25 / 24, 24 / 25)
 LYRIC_STYLE = re.compile(r'(?:^|[^a-z])(?:op|ed|opening|ending|song|lyrics?|karaoke|insert|ost|chorus)(?:[^a-z]|$)', re.I)
@@ -33,7 +38,10 @@ CAVEATS = [
     'A segment boundary is a hypothesis about an edit; inspect picture/audio at every cut before accepting.',
     'Pairs are temporal overlap candidates; speaker, wording and phrase boundaries still need review.',
     'status=proposed cannot enter an authored timeline; the reviewer sets accepted with evidence.',
+    'Coverage is target dialogue time under paired candidate rows; it proves neither wording, source independence nor audio acceptance.',
 ]
+COVERAGE_BASIS = ('union of valid target dialogue intervals intersected with the union of paired candidate '
+                  'dialogue rows after mapping, over the target union; control rows never count')
 
 
 def milliseconds(value):
@@ -54,7 +62,7 @@ def plaintext(text):
 
 
 def parse_cues(data, extension):
-    """Same text/time subset and 1-based ids as the lab archive; invalid timing rows are kept out of alignment."""
+    """Same text/time subset as the lab archive; ids follow ``number_rows``; invalid timing rows stay out of alignment."""
     text = data.decode('utf-8-sig')
     rows = []
     ext = extension.lower().lstrip('.')
@@ -97,16 +105,36 @@ def parse_cues(data, extension):
             start = int(row['start_ms']) if 'start_ms' in row else round(float(row['start']) * 1000)
             end = int(row['end_ms']) if 'end_ms' in row else round(float(row['end']) * 1000)
             rows.append({'start_ms': start, 'end_ms': end, 'text': str(row.get('text', '')),
-                         'style': str(row.get('style', '')), 'positioned': bool(row.get('positioned'))})
+                         'style': str(row.get('style', '')), 'positioned': bool(row.get('positioned')),
+                         'id': row.get('id')})
     else:
         raise ValueError('supported formats: UTF-8 ASS/SSA/SRT/VTT/parsed JSON')
     rows = [r for r in rows if r['text']]
-    for i, row in enumerate(rows):
-        row['id'] = i + 1
-        row['valid'] = row['start_ms'] >= 0 and row['end_ms'] > row['start_ms']
     if not rows:
         raise ValueError('empty subtitles')
+    number_rows(rows)
+    for row in rows:
+        row['valid'] = row['start_ms'] >= 0 and row['end_ms'] > row['start_ms']
     return rows
+
+
+def number_rows(rows):
+    """Archive numbering (1-based over text rows, like the lab parser) unless every JSON row carries its own id.
+
+    Explicit ids are evidence references and are kept verbatim. A layout that mixes rows with and
+    without ids, repeats an id, or uses anything but integers and non-empty strings is rejected
+    rather than silently renumbered.
+    """
+    ids = [row.get('id') for row in rows]
+    if all(i is None for i in ids):
+        for i, row in enumerate(rows):
+            row['id'] = i + 1
+    elif any(i is None for i in ids):
+        raise ValueError('cue ids must be present on every row or on none')
+    elif any(isinstance(i, bool) or not isinstance(i, (int, str)) or i == '' for i in ids):
+        raise ValueError('cue ids must be integers or non-empty strings')
+    elif len(set(ids)) != len(ids):
+        raise ValueError('duplicate cue ids')
 
 
 def classify(rows, by_style, dialogue_styles=None, exclude_styles=None):
@@ -148,7 +176,6 @@ class Timeline:
         self.starts = [a for a, _ in self.intervals]
         self.ends = sorted(b for _, b in self.intervals)
         self.max_len = max((b - a for a, b in self.intervals), default=0)
-        self.total = sum(b - a for a, b in self.intervals)
 
     def overlap(self, s, e):
         lo = bisect.bisect_left(self.starts, s - self.max_len)
@@ -168,22 +195,32 @@ def unit_score(timeline, unit, offset, tol):
 
 
 def offset_profile(timeline, units, window_ms, step_ms):
-    """Total overlap as a piecewise-linear function of a constant offset, evaluated on a grid."""
+    """Total overlap as a function of a constant offset, exact at every grid point ``k * step_ms - window_ms``.
+
+    The overlap of one unit with one target interval is a trapezoid in the offset, i.e. a sum of
+    hinges ``sign * max(0, d - b)``. A hinge whose break ``b`` lies before grid point ``j`` is worth
+    ``sign * (d_j - b)`` there and ``sign * step_ms`` more at each later point, so breaks need not sit
+    on the grid and overlap already present at the left edge of the window is counted.
+    """
     size = 2 * window_ms // step_ms + 1
-    slope = [0] * (size + 1)
+    slope = [0] * size
+    base = [0] * size
     for unit in units:
         s1, e1 = unit['s'], unit['e']
         lo = bisect.bisect_left(timeline.starts, s1 - window_ms - timeline.max_len)
         hi = bisect.bisect_right(timeline.starts, e1 + window_ms)
         for t1, t2 in timeline.intervals[lo:hi]:
             d1, d2 = sorted((t1 - s1, t2 - e1))
-            for d, sign in ((t1 - e1, 1), (d1, -1), (d2, -1), (t2 - s1, 1)):
-                slope[min(max((d + window_ms) // step_ms, 0), size)] += sign
+            for b, sign in ((t1 - e1, 1), (d1, -1), (d2, -1), (t2 - s1, 1)):
+                j = max(0, -((-(b + window_ms)) // step_ms))  # first grid point at or after the break
+                if j < size:
+                    slope[j] += sign
+                    base[j] += sign * (j * step_ms - window_ms - b)
     profile = []
     rate = value = 0
     for k in range(size):
+        value += rate * step_ms + base[k]
         rate += slope[k]
-        value += rate * step_ms
         profile.append(value)
     return profile
 
@@ -242,11 +279,16 @@ def refine(timeline, units, offset, tol, radius=600, step=10):
 
 
 def choose_scale(timeline, units, window_ms, step_ms):
-    """Prefer the frame-rate ratio whose best constant offset explains clearly more overlap."""
+    """Prefer the frame-rate ratio whose best constant offset explains clearly more overlap than chance.
+
+    Dense dialogue overlaps something at almost any offset, and the exact profile carries that
+    floor, so each peak is measured above the profile's median before the 15% margin is applied.
+    """
     results = {}
     for scale in SCALES:
         scaled = [{'s': round(u['start_ms'] * scale), 'e': round(u['end_ms'] * scale)} for u in units]
-        results[scale] = max(offset_profile(timeline, scaled, window_ms, step_ms))
+        profile = offset_profile(timeline, scaled, window_ms, step_ms)
+        results[scale] = max(profile) - sorted(profile)[len(profile) // 2]
     chosen = max(results, key=lambda s: (results[s], s == 1.0))
     if results[chosen] < 1.15 * results[1.0]:
         chosen = 1.0
@@ -376,6 +418,34 @@ def mapped(segments, start_ms, end_ms):
     return None
 
 
+def union(intervals):
+    merged = []
+    for a, b in sorted(intervals):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return merged
+
+
+def intersection_ms(first, second):
+    total = i = j = 0
+    while i < len(first) and j < len(second):
+        total += max(0, min(first[i][1], second[j][1]) - max(first[i][0], second[j][0]))
+        if first[i][1] < second[j][1]:
+            i += 1
+        else:
+            j += 1
+    return total
+
+
+def coverage(target, pairs):
+    """Covered and total target dialogue time, both over interval unions so no millisecond counts twice."""
+    target_union = union((r['start_ms'], r['end_ms']) for r in target)
+    covered = intersection_ms(target_union, union((p['mapped_start_ms'], p['mapped_end_ms']) for p in pairs))
+    return covered, sum(b - a for a, b in target_union)
+
+
 def nearest_gap(rows, starts, start_ms, end_ms):
     i = bisect.bisect_left(starts, start_ms)
     best = None
@@ -431,9 +501,9 @@ def align(target_rows, candidate_rows, window_ms=150000, step_ms=20, tol=200, pe
     cuts = [{'between_segments': [a['index'], b['index']], 'candidate_time_ms': a['source_end_ms'],
              'target_before_ms': a['target_end_ms'], 'target_after_ms': b['target_start_ms'],
              'offset_change_ms': b['offset_ms'] - a['offset_ms']} for a, b in zip(segments, segments[1:])]
-    # Pairing by temporal overlap after mapping.
+    # Pairing by temporal overlap after mapping; archived control rows are listed, never paired.
     target_partners = {r['id']: [] for r in target}
-    pairs, unreferenced, outside = [], [], []
+    pairs, unreferenced, outside, control = [], [], [], []
     target_sorted = sorted(target, key=lambda r: r['start_ms'])
     target_starts = [r['start_ms'] for r in target_sorted]
     for row in usable:
@@ -449,9 +519,12 @@ def align(target_rows, candidate_rows, window_ms=150000, step_ms=20, tol=200, pe
             overlap = min(me, other['end_ms']) - max(ms, other['start_ms'])
             if overlap >= max(120, 0.2 * min(me - ms, other['end_ms'] - other['start_ms'])):
                 partners.append((other, overlap))
+        if row['role'] == 'control':  # temporal overlap only: a music mark or sound cue is not dialogue support
+            control.append({'id': row['id'], 'mapped_start_ms': ms, 'mapped_end_ms': me, 'segment': index,
+                            'overlapping_target_ids': [o['id'] for o, _ in partners]})
+            continue
         if not partners:
-            entry = {'id': row['id'], 'kind': 'control_only' if row['role'] == 'control' else 'unreferenced',
-                     'mapped_start_ms': ms, 'mapped_end_ms': me, 'segment': index}
+            entry = {'id': row['id'], 'mapped_start_ms': ms, 'mapped_end_ms': me, 'segment': index}
             near = nearest_gap(target_sorted, target_starts, ms, me)
             if near and near[1] <= 600:  # a hint for review, never a pairing claim
                 entry.update(nearest_target_id=near[0], gap_ms=near[1])
@@ -477,28 +550,27 @@ def align(target_rows, candidate_rows, window_ms=150000, step_ms=20, tol=200, pe
     missing_runs = [{'target_start_ms': run[0]['start_ms'], 'target_end_ms': run[-1]['end_ms'], 'count': len(run),
                      'ids': [r['id'] for r in run]}
                     for run in consecutive_runs(target_sorted, lambda r: r['id'] in missing_ids, 3)]
-    extra_ids = {u['id'] for u in unreferenced if u['kind'] == 'unreferenced'}
+    extra_ids = {u['id'] for u in unreferenced}
     extra_runs = [{'candidate_start_ms': run[0]['start_ms'], 'candidate_end_ms': run[-1]['end_ms'], 'count': len(run),
                    'ids': [r['id'] for r in run]}
                   for run in consecutive_runs(sorted(usable, key=lambda r: r['start_ms']), lambda r: r['id'] in extra_ids, 3)]
-    mapped_intervals = Timeline([(p['mapped_start_ms'], p['mapped_end_ms']) for p in pairs]) if pairs else None
-    covered = sum(mapped_intervals.overlap(r['start_ms'], r['end_ms']) for r in target) if mapped_intervals else 0
-    covered = min(covered, timeline.total)
+    covered, total = coverage(target, pairs)
     lyrics = lyric_report(target_rows, usable, segments)
     summary = {'scale': round(scale, 6), 'drift_suspected': scale != 1.0, 'segments': len(segments), 'cuts': len(cuts),
                'target_dialogue_rows': len(target), 'candidate_rows': len(usable),
                'candidate_rows_invalid_timing': sum(1 for r in candidate_rows if not r['valid']),
                'pairs': {k: sum(1 for p in pairs if p['relation'] == k) for k in ('one_to_one', 'one_to_many', 'many_to_one')},
                'pair_confidence': {k: sum(1 for p in pairs if p['confidence'] == k) for k in ('high', 'medium', 'low')},
-               'unreferenced_candidate': len(extra_ids), 'control_only_candidate': len(unreferenced) - len(extra_ids),
+               'unreferenced_candidate': len(unreferenced), 'control_rows': len(control),
                'outside_target': len(outside), 'target_without_candidate': len(missing),
-               'target_dialogue_time_ms': timeline.total,
-               'target_time_covered_percent': round(100 * covered / timeline.total, 2) if timeline.total else 0}
+               'target_dialogue_time_ms': total, 'target_time_covered_ms': covered,
+               'target_time_covered_percent': round(100 * covered / total, 2) if total else 0,
+               'target_time_covered_basis': COVERAGE_BASIS}
     result = {'schema': SCHEMA, 'revision': REVISION, 'parameters': {'window_ms': window_ms, 'step_ms': step_ms,
               'boundary_tolerance_ms': tol, 'switch_penalty': penalty, 'chance_score': round(chance['score'], 4),
-              'chance_hit_rate': round(chance['hit_rate'], 4), 'scale_sweep_max_overlap_ms': sweep},
+              'chance_hit_rate': round(chance['hit_rate'], 4), 'scale_sweep_peak_above_median_ms': sweep},
               'summary': summary, 'segments': segments, 'cuts': cuts, 'pairs': pairs,
-              'unreferenced_candidate': unreferenced, 'outside_target': outside,
+              'unreferenced_candidate': unreferenced, 'control_rows': control, 'outside_target': outside,
               'target_without_candidate': missing, 'target_missing_runs': missing_runs,
               'candidate_extra_runs': extra_runs, 'lyrics': lyrics}
     if compare_text:
@@ -626,11 +698,24 @@ def run(target_path, candidate_path, draft_id='CANDIDATE_DRAFT_ID', dialogue_sty
     return result
 
 
+def output_path(out, inputs, overwrite=False):
+    """Never write over an input (aliases and symlinks included); an existing output needs ``overwrite``."""
+    path = Path(out)
+    for source in inputs:
+        source = Path(source)
+        if path.resolve() == source.resolve() or (path.exists() and source.exists() and path.samefile(source)):
+            raise FileExistsError(f'--out must not be an input file: {out}')
+    if path.exists() and not overwrite:
+        raise FileExistsError(f'--out already exists; choose a new path or pass --overwrite: {out}')
+    return path
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--target', required=True, help='exact-media cue list (ASS/SRT/VTT/parsed JSON)')
     parser.add_argument('--candidate', required=True, help='subtitle from another cut of the same episode')
     parser.add_argument('--out', required=True, help='proposal JSON to write (contains no subtitle text by default)')
+    parser.add_argument('--overwrite', action='store_true', help='replace an existing output file; inputs are never replaced')
     parser.add_argument('--draft-id', default='CANDIDATE_DRAFT_ID', help='lab draft id to key the alignments proposal')
     parser.add_argument('--dialogue-styles', help='comma separated target styles that are ordinary dialogue')
     parser.add_argument('--exclude-styles', help='comma separated target styles to leave out of alignment')
@@ -638,10 +723,15 @@ def main(argv=None):
     parser.add_argument('--text', action='store_true', help='also compare paired texts (same-language drafts only)')
     parser.add_argument('--include-text', action='store_true', help='copy candidate text into pairs (private output only)')
     args = parser.parse_args(argv)
+    try:
+        out = output_path(args.out, (args.target, args.candidate), args.overwrite)
+    except FileExistsError as exc:
+        parser.error(str(exc))
     split = lambda value: set(s.strip() for s in value.split(',') if s.strip()) if value else None
     result = run(args.target, args.candidate, args.draft_id, split(args.dialogue_styles), split(args.exclude_styles),
                  args.window_ms, args.text, args.include_text)
-    Path(args.out).write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding='utf-8')
+    with out.open('w' if args.overwrite else 'x', encoding='utf-8') as handle:
+        handle.write(json.dumps(result, ensure_ascii=False, indent=1))
     print(json.dumps(result['summary'], ensure_ascii=False))
 
 

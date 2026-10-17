@@ -1,4 +1,6 @@
 """Synthetic timelines only: no real subtitle text, media or private paths."""
+import contextlib
+import io
 import json
 import random
 
@@ -61,6 +63,25 @@ def candidate_rows(master, transform, seed=2, drop=0.04, split=0.04, merge=0.04,
     for i, row in enumerate(rows):
         row.update(id=i + 1, valid=True)
     return sa.classify(rows, False)
+
+
+def same_cut(spans, text='x'):
+    """Candidate rows copied from master spans without any offset, numbered like an SRT draft."""
+    rows = [{'start_ms': s, 'end_ms': e, 'text': text, 'style': '', 'positioned': False, 'id': i + 1, 'valid': True}
+            for i, (s, e) in enumerate(spans)]
+    return sa.classify(rows, False)
+
+
+def covered_percent_by_millisecond(target_spans, candidate_spans):
+    """Independent control for coverage: mark every target millisecond, count the ones under a candidate."""
+    end = max(e for _, e in target_spans + candidate_spans)
+    target, candidate = bytearray(end), bytearray(end)
+    for s, e in target_spans:
+        target[s:e] = b'\x01' * (e - s)
+    for s, e in candidate_spans:
+        candidate[s:e] = b'\x01' * (e - s)
+    total = sum(target)
+    return 100 * sum(t & c for t, c in zip(target, candidate)) / total, total
 
 
 def lab_map(segments, row):
@@ -189,9 +210,146 @@ def test_control_only_rows_are_not_reported_as_unreferenced_dialogue():
             for a, b in zip(master, master[1:]) if b['start_ms'] - a['end_ms'] >= 2900][:4]
     candidate = candidate_rows(master, lambda t: t + 1000, extra=gaps + [(1000, 1900, '♪～')])
     result = sa.align(master, candidate)
-    control = [u for u in result['unreferenced_candidate'] if u['kind'] == 'control_only']
-    assert control and all(candidate[u['id'] - 1]['role'] == 'control' for u in control)
-    assert result['summary']['candidate_rows'] == len(candidate)
+    control = result['control_rows']
+    assert len(control) == 4 and all(candidate[u['id'] - 1]['role'] == 'control' for u in control)
+    assert not any(u['overlapping_target_ids'] for u in control)
+    assert not {u['id'] for u in control} & {u['id'] for u in result['unreferenced_candidate']}
+    assert [o['role'] for o in result['outside_target']] == ['control']  # the pre-roll music mark maps before 0
+    assert result['summary']['control_rows'] == 4 and result['summary']['candidate_rows'] == len(candidate)
+
+
+def test_coverage_counts_each_target_millisecond_once():
+    """Review finding: summed candidate durations let duplicates compensate for missing dialogue."""
+    master = master_rows(count=80)
+    spans = [(r['start_ms'], r['end_ms']) for r in master]
+    first = spans[:40]
+    share, total = covered_percent_by_millisecond(spans, first)
+    assert 40 < share < 60
+    for name, candidate in (
+            ('duplicate', first * 2),
+            ('nested', first + [(s + (e - s) // 4, e - (e - s) // 4) for s, e in first]),
+            ('partial', [(s, s + (e - s) * 3 // 5) for s, e in first] + [(s + (e - s) * 2 // 5, e) for s, e in first])):
+        summary = sa.align(master, same_cut(candidate))['summary']
+        assert summary['target_time_covered_percent'] == pytest.approx(share, abs=0.01), name
+        assert summary['target_dialogue_time_ms'] == total
+        assert summary['target_time_covered_ms'] == round(share * total / 100)
+    assert summary['target_time_covered_basis'] == sa.COVERAGE_BASIS
+
+
+def test_coverage_denominator_is_the_union_of_overlapping_target_rows():
+    master = master_rows(count=80)
+    second = [{**r, 'start_ms': r['start_ms'] + (r['end_ms'] - r['start_ms']) // 2, 'end_ms': r['end_ms'] + 300,
+               'style': 'Top_CN'} for r in master[::3]]  # a second speaker overlapping every third row
+    for i, row in enumerate(second):
+        row['id'] = 1000 + i
+    target = sa.classify(master + second, True)
+    spans = [(r['start_ms'], r['end_ms']) for r in target]
+    candidate = [(r['start_ms'], r['end_ms']) for r in master[:40]]
+    share, total = covered_percent_by_millisecond(spans, candidate)
+    summary = sa.align(target, same_cut(candidate))['summary']
+    assert summary['target_dialogue_time_ms'] == total < sum(e - s for s, e in spans)
+    assert summary['target_time_covered_percent'] == pytest.approx(share, abs=0.01)
+
+
+def test_control_marker_does_not_fill_a_dialogue_gap():
+    """Review finding: a pure music mark in place of a spoken row paired as high-confidence dialogue."""
+    master = master_rows(count=80)
+    candidate = same_cut([(r['start_ms'], r['end_ms']) for r in master])
+    candidate[39]['text'] = '\u266a'
+    candidate[40]['text'] = '（物音）'
+    sa.classify(candidate, False)
+    assert [row['role'] for row in candidate[39:41]] == ['control', 'control']
+    result = sa.align(master, candidate)
+    assert {40, 41} <= {row['id'] for row in result['target_without_candidate']}
+    assert result['summary']['target_without_candidate'] == 2
+    assert result['summary']['target_time_covered_percent'] < 100
+    assert not any(p['candidate_id'] in (40, 41) for p in result['pairs'])
+    control = {row['id']: row for row in result['control_rows']}
+    assert control[40]['overlapping_target_ids'] == [40] and control[41]['overlapping_target_ids'] == [41]
+    assert result['summary']['control_rows'] == 2 and result['summary']['candidate_rows'] == 80
+
+
+def direct_profile(timeline, units, window_ms, step_ms):
+    """Independent control: intersect every shifted unit with every target interval at each grid offset."""
+    return [sum(max(0, min(u['e'] + d, b) - max(u['s'] + d, a)) for u in units for a, b in timeline.intervals)
+            for d in range(-window_ms, window_ms + 1, step_ms)]
+
+
+def test_offset_profile_equals_direct_interval_intersection():
+    """Review finding: the sweep started from zero overlap and emitted each grid value one step late."""
+    assert sa.offset_profile(sa.Timeline([(0, 1000)]), [{'s': 0, 'e': 1000}], 100, 100) == [900, 1000, 900]
+    assert sa.offset_profile(sa.Timeline([(50, 1000)]), [{'s': 0, 'e': 1000}], 100, 100) == [850, 950, 900]
+    rng = random.Random(3)
+    for _ in range(40):
+        intervals, t = [], rng.randint(0, 500)
+        for _ in range(rng.randint(1, 12)):
+            t += rng.randint(0, 900)
+            length = rng.randint(1, 1500)
+            intervals.append((t, t + length))
+            t += length
+        timeline = sa.Timeline(intervals)
+        units = [{'s': s, 'e': s + rng.randint(1, 1500)} for s in (rng.randint(-2000, t + 2000) for _ in range(rng.randint(1, 6)))]
+        window, step = rng.choice([(700, 20), (1000, 30), (1500, 7), (3000, 100), (90, 13)])
+        assert sa.offset_profile(timeline, units, window, step) == direct_profile(timeline, units, window, step)
+
+
+def test_cli_never_overwrites_inputs_or_an_existing_output(tmp_path, monkeypatch):
+    """Review finding: --out equal to --target replaced the source subtitle with the proposal."""
+    master = master_rows(count=60)
+    candidate = candidate_rows(master, lambda t: t + 1000)
+    target, cand = tmp_path / 'target.json', tmp_path / 'candidate.json'
+    target.write_text(json.dumps(master), encoding='utf-8')
+    cand.write_text(json.dumps(candidate), encoding='utf-8')
+    before = (target.read_bytes(), cand.read_bytes())
+    alias = tmp_path / 'alias.json'
+    alias.symlink_to(target)
+    monkeypatch.chdir(tmp_path)
+    base = ['--target', str(target), '--candidate', 'candidate.json']
+    for out in (str(target), 'target.json', str(alias), 'alias.json', str(tmp_path / 'missing' / '..' / 'candidate.json')):
+        for extra in ([], ['--overwrite']):
+            with pytest.raises(SystemExit) as refused, contextlib.redirect_stderr(io.StringIO()):
+                sa.main(base + ['--out', out] + extra)
+            assert refused.value.code == 2
+    assert (target.read_bytes(), cand.read_bytes()) == before
+    assert not (tmp_path / 'missing').exists()
+    out = tmp_path / 'proposal.json'
+    with contextlib.redirect_stdout(io.StringIO()):
+        sa.main(base + ['--out', str(out)])
+    first = out.read_bytes()
+    with pytest.raises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+        sa.main(base + ['--out', str(out)])
+    assert out.read_bytes() == first
+    with contextlib.redirect_stdout(io.StringIO()):
+        sa.main(base + ['--out', str(out), '--overwrite'])
+    assert json.loads(out.read_text(encoding='utf-8'))['schema'] == sa.SCHEMA
+    assert (target.read_bytes(), cand.read_bytes()) == before
+
+
+def test_json_ids_are_kept_or_rejected_and_ass_srt_numbering_is_unchanged():
+    """Review finding: explicit JSON ids [7, 19] came back as [1, 2], breaking evidence references."""
+    def cue(i, **extra):
+        return {'start_ms': 1000 * i, 'end_ms': 1000 * i + 800, 'text': f'line{i}', **extra}
+    parse = lambda rows: sa.parse_cues(json.dumps(rows).encode(), 'json')
+    assert [r['id'] for r in parse({'cues': [cue(1, id=7), cue(2, id=19)]})] == [7, 19]
+    assert [r['id'] for r in parse([cue(1, id='C12'), cue(2, id='C12.1'), cue(3, id='C13', text='')])] == ['C12', 'C12.1']
+    assert [r['id'] for r in parse([cue(1), cue(2, id=None)])] == [1, 2]
+    for layout in ([cue(1, id=7), cue(2, id=7)], [cue(1, id=7), cue(2)], [cue(1, id=None), cue(2, id=3)],
+                   [cue(1, id=1.5)], [cue(1, id=True)], [cue(1, id='')]):
+        with pytest.raises(ValueError):
+            parse(layout)
+    srt = b'10\n00:00:01,000 --> 00:00:02,000\na\n\n20\n00:00:03,000 --> 00:00:04,000\nb\n'
+    assert [r['id'] for r in sa.parse_cues(srt, 'srt')] == [1, 2]
+    ass = ('[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
+           'Dialogue: 0,0:00:01.00,0:00:02.00,Text_CN,,0,0,0,,a\nDialogue: 0,0:00:03.00,0:00:04.00,Text_CN,,0,0,0,,\n'
+           'Dialogue: 0,0:00:05.00,0:00:06.00,Text_CN,,0,0,0,,c\n').encode()
+    assert [r['id'] for r in sa.parse_cues(ass, 'ass')] == [1, 2]
+    master = master_rows(count=60)
+    target = sa.classify(parse([{**cue(0), **{k: r[k] for k in ('start_ms', 'end_ms', 'style')}, 'id': f'C{r["id"]}'} for r in master]), True)
+    candidate = sa.classify(parse([{**cue(0), 'start_ms': r['start_ms'] + 1000, 'end_ms': r['end_ms'] + 1000, 'id': 500 + r['id']}
+                                   for r in master]), False)
+    result = sa.align(target, candidate)
+    assert {p['primary_target_id'] for p in result['pairs']} <= {f'C{r["id"]}' for r in master}
+    assert all(p['candidate_id'] > 500 for p in result['pairs']) and json.dumps(result)
 
 
 def test_output_contains_no_subtitle_text_unless_requested(tmp_path):
