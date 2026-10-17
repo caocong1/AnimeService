@@ -120,10 +120,20 @@ class DandanHistory:
                 'seen_files':seen_count,'source_recent':len(recent),'source_seen':len(seen),'interval':60,
                 'account_scope':data.get('account_scope','unknown'),'synced_watched':synced}
 
+    def source_signature(self):
+        """Size and mtime of the player's history files; None when they cannot be seen."""
+        try:
+            root=Path(self.db.get('dandan_exe')).parent;source=root/'Cache/dandanplay.litedb'
+            return [[p.stat().st_size,p.stat().st_mtime_ns] if p.exists() else None for p in (source,source.with_name('dandanplay-log.litedb'))]
+        except (TypeError,OSError):return None
     def sync(self):
         if not self.lock.acquire(blocking=False):return {**(self.db.get('dandan_history_health') or {}),'busy':True}
         try:
-            result=self.merge(self.extract());self.db.set('dandan_history_health',result);return result
+            old=self.db.get('dandan_history_health') or {};signature=self.source_signature()
+            if signature and old.get('ok') is True and old.get('source_signature')==signature:
+                # Nothing was written by the player since the last import: no copy, no PowerShell.
+                result={**old,'checked':time.time(),'unchanged':True};self.db.set('dandan_history_health',result);return result
+            result={**self.merge(self.extract()),'source_signature':signature};self.db.set('dandan_history_health',result);return result
         except Exception as ex:
             old=self.db.get('dandan_history_health') or {}
             msg=str(ex) if isinstance(ex,ValueError) else '本机历史读取暂时失败，将自动重试'
