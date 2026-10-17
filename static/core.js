@@ -24,11 +24,12 @@ window.fetch = async (...args) => {
   return r;
 };
 
-async function api(path, body) {
+async function api(path, body, options = {}) {
   const init = body === undefined ? {} : {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Anime-Token': App.token },
     body: JSON.stringify(body),
+    keepalive: options.keepalive === true,  // lets a last write survive page hide
   };
   const res = await fetch('/api' + path, init);
   let data = {};
