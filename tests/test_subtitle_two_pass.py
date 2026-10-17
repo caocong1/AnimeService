@@ -43,6 +43,7 @@ def make_review(project, root, r, baseline):
     return path,report
 
 
+@pytest.mark.requires_lab
 def test_v0_keeps_single_writer_until_evidenced_v1(setup,monkeypatch):
     db,q,e,archive,old,new,freeze,target,record=prepared_candidate(setup,monkeypatch)
     before=(db.rows('SELECT * FROM episodes'),db.rows('SELECT * FROM watches'))
@@ -77,6 +78,7 @@ def test_v0_keeps_single_writer_until_evidenced_v1(setup,monkeypatch):
 
 
 @pytest.mark.parametrize('failure',['missing_section','missing_evidence','changed_evidence','missing_issue','wrong_baseline'])
+@pytest.mark.requires_lab
 def test_v1_rejects_unperformed_or_unbound_work(setup,monkeypatch,failure):
     db,q,e,archive,old,new,freeze,target,record=prepared_candidate(setup,monkeypatch)
     root,proof=release_fixture(db,target);r=json.loads((root/'release.json').read_text())
@@ -92,6 +94,7 @@ def test_v1_rejects_unperformed_or_unbound_work(setup,monkeypatch,failure):
 
 
 @pytest.mark.parametrize('legacy_state',['finished','blocked','ready'])
+@pytest.mark.requires_lab
 def test_existing_unwatched_basic_gets_one_same_chat_refinement_and_watched_is_frozen(setup,monkeypatch,legacy_state):
     db,q,e,archive,old,new,freeze,target,record=prepared_candidate(setup,monkeypatch)
     s=SubtitleDelivery(db);j=s.record_preparation(42,2)
@@ -109,6 +112,7 @@ def test_existing_unwatched_basic_gets_one_same_chat_refinement_and_watched_is_f
     assert len(db.rows("SELECT * FROM subtitle_delivery_jobs WHERE kind='refinement'"))==1 and q.adds==0
 
 
+@pytest.mark.requires_lab
 def test_explicit_stopped_owner_is_preserved_and_private_refinement_gets_no_old_chat(setup,monkeypatch):
     db,q,e,archive,old,new,freeze,target,record=prepared_candidate(setup,monkeypatch)
     s=SubtitleDelivery(db);j=s.record_preparation(42,2)

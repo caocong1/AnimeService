@@ -63,6 +63,7 @@ def test_explicit_enrollment_keeps_holds_and_independent_authorization(setup):
     assert e.source_review.policy(42)['mode']=='scope_hold'
 
 
+@pytest.mark.requires_lab
 def test_subtitle_only_unwatched_premiere_uses_episode_path(setup):
     from scripts.repair_subtitle_enrollment import enroll
     db,q,e,r,_=split(setup)

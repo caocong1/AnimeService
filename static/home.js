@@ -99,8 +99,10 @@
   function renderShelf() {
     const counts = {};
     for (const s of shows) counts[s.state] = (counts[s.state] || 0) + 1;
+    const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.f : undefined;
     $('#state-filter').innerHTML = [['', '全部', shows.length], ...Object.entries(STATES).map(([k, v]) => [k, v, counts[k] || 0])]
-      .filter(([k, , n]) => !k || n).map(([k, v, n]) => `<button type="button" data-f="${k}" aria-pressed="${filter === k}">${v} <span class="num">${n}</span></button>`).join('');
+      .map(([k, v, n]) => `<button type="button" data-f="${k}" aria-pressed="${filter === k}"${!k || n || filter === k ? '' : ' disabled'}>${v} <span class="num">${n}</span></button>`).join('');
+    if (focused !== undefined) { const again = document.querySelector(`#state-filter [data-f="${focused}"]`); if (again) again.focus(); }
     const q = query.trim().toLowerCase();
     const rows = shows.filter(s => (!filter || s.state === filter) && (!q || (s.title + ' ' + s.original).toLowerCase().includes(q)));
     const pages = Math.max(1, Math.ceil(rows.length / pageSize));

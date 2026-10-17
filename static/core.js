@@ -71,7 +71,7 @@ function airDate(s, withWeek = true) {
   const d = new Date(s.slice(0, 10) + 'T00:00:00');
   return s.slice(5, 10) + (withWeek ? ' ' + WEEK[d.getDay()] : '');
 }
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => new Intl.DateTimeFormat('en-CA', {year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());  // local date; UTC was a day behind before 08:00 CST
 const gib = b => b >= 1024 ** 3 ? (b / 1024 ** 3).toFixed(b >= 10 * 1024 ** 3 ? 0 : 1) + ' GB' : Math.max(1, Math.round(b / 1024 ** 2)) + ' MB';
 function quarterName(q) {
   const [y, m] = q.split('-');

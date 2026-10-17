@@ -57,6 +57,7 @@ def test_unwanted_or_wrong_episode_cannot_acquire(setup):
     with pytest.raises(ValueError):e.subtitle_studio.ensure(42,2,True)
 
 
+@pytest.mark.requires_lab
 def test_native_archiving_makes_pending_workbook_not_default(setup,monkeypatch):
     db,q,e,r,_=ready(setup);p=db.path.parent/'original.mkv';p.write_bytes(b'fixture')
     db.execute("INSERT INTO episodes(show_id,episode,path,status) VALUES(42,2,?,'complete')",(str(p),))
@@ -107,6 +108,7 @@ def test_uncertain_thunder_submission_cannot_fall_back(setup):
     assert q.adds==0 and db.one('SELECT provider FROM tasks')['provider']=='thunder'
 
 
+@pytest.mark.requires_lab
 def test_metadata_discovery_tracks_midseason_start_without_download(setup):
     db,q,e,r,_=ready(setup);db.set('downloader_preference','qbit')
     db.set('qbit_health',{'ok':False,'time':time.time()})
@@ -120,6 +122,7 @@ def test_metadata_discovery_tracks_midseason_start_without_download(setup):
     assert not db.rows('SELECT * FROM tasks') and q.adds==0
 
 
+@pytest.mark.requires_lab
 def test_discovery_does_not_reopen_watched_episodes(setup,monkeypatch):
     db,q,e,r,_=ready(setup)
     db.execute('INSERT INTO watches(show_id,episode,finished) VALUES(42,1,1)')
@@ -142,6 +145,7 @@ def test_watched_change_prevents_new_subtitle_submission(setup):
     assert not db.rows('SELECT * FROM tasks') and q.adds==0
 
 
+@pytest.mark.requires_lab
 def test_banned_subtitle_provenance_revokes_authored_default_on_clean_video(setup):
     import hashlib,struct,zlib
     db,q,e,r,_=ready(setup);core=lab_core();a=archive_for(db)

@@ -8,6 +8,7 @@ from anime.subtitle_studio import archive_for,lab_core
 from anime.subtitles import Subtitles
 from test_reliability import setup
 from test_subtitle_studio import ready
+import pytest
 
 
 def draft_job(setup):
@@ -21,6 +22,7 @@ def draft_job(setup):
     return db,q,engine,video,target
 
 
+@pytest.mark.requires_lab
 def test_library_draft_progress_and_history_are_read_only(setup):
     db,q,engine,video,target=draft_job(setup)
     payload=json.loads(db.one('SELECT payload FROM subtitle_studio_jobs')['payload'])
@@ -41,6 +43,7 @@ def test_library_draft_progress_and_history_are_read_only(setup):
     assert not db.rows('SELECT * FROM watches') and q.adds==0
 
 
+@pytest.mark.requires_lab
 def test_library_selected_version_requires_current_accessible_video(setup,monkeypatch):
     db,q,engine,video,target=draft_job(setup)
     selected={'id':'version-fixture','files':{'bilingual.ass':{'path':str(db.path.parent/'bilingual.ass')}}}
@@ -55,6 +58,7 @@ def test_library_selected_version_requires_current_accessible_video(setup,monkey
     assert result['entries'][0]['state']!='accepted'
 
 
+@pytest.mark.requires_lab
 def test_player_reports_embedded_and_authored_files_without_private_paths(setup,monkeypatch):
     db,q,engine,video,target=draft_job(setup)
     app=create_app(db,engine,start_worker=False)

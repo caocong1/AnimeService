@@ -10,6 +10,7 @@ from anime.subtitle_delivery import SubtitleDelivery
 from anime.subtitle_studio import archive_for, lab_core
 
 
+@pytest.mark.requires_lab
 def test_delivery_http_refresh_requires_session_and_ignores_claimed_ready(setup):
     from fastapi.testclient import TestClient
     from anime.app import create_app
@@ -26,6 +27,7 @@ def test_delivery_http_refresh_requires_session_and_ignores_claimed_ready(setup)
 
 
 @pytest.mark.parametrize('dispatch', ['acknowledged', 'unknown', 'blocked-stopped'])
+@pytest.mark.requires_lab
 def test_inventory_refresh_preserves_owned_editorial_input(setup, dispatch):
     db, q, e, _, _ = ready(setup)
     archive = archive_for(db)
@@ -73,6 +75,7 @@ def test_cli_public_output_never_exports_dispatch_or_lease_tokens():
 
 
 @pytest.mark.parametrize('classification', [None, 'songs_only', 'dialogue', 'stale_hash'])
+@pytest.mark.requires_lab
 def test_japanese_track_needs_real_dialogue_qualification_and_provisional_target(setup, classification):
     import hashlib
     from anime.subtitle_delivery_materials import readiness
@@ -188,6 +191,7 @@ def prepared_candidate(setup,monkeypatch):
     return db,q,e,archive,old,new,{**freeze,'base_review':candidate},target,record
 
 
+@pytest.mark.requires_lab
 def test_sample_only_candidate_dispatches_without_claiming_whole_acceptance(setup,monkeypatch):
     from anime.subtitle_delivery_materials import readiness
     db,q,e,archive,old,new,freeze,target,record=prepared_candidate(setup,monkeypatch)
@@ -205,6 +209,7 @@ def test_sample_only_candidate_dispatches_without_claiming_whole_acceptance(setu
     assert q.adds==0
 
 
+@pytest.mark.requires_lab
 def test_sample_only_review_remains_ineligible_for_formal_mother_freeze(setup,monkeypatch):
     from anime.subtitle_delivery_materials import readiness
     from anime.subtitle_targets import head
@@ -218,6 +223,7 @@ def test_sample_only_review_remains_ineligible_for_formal_mother_freeze(setup,mo
 
 
 @pytest.mark.parametrize('failure',['few','same_path','stale_sha','wrong_target','wrong_role','wrong_scope'])
+@pytest.mark.requires_lab
 def test_sample_candidate_review_cannot_claim_ready_with_invalid_frame_or_role_proofs(setup,monkeypatch,failure):
     from test_subtitle_targets import evidence
     from anime.subtitle_delivery_materials import readiness

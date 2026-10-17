@@ -105,3 +105,16 @@ test('retry after a list request failure restores the independent list view', as
   assert.equal(p.$('#shelf-section').hidden, false);
   assert.equal(p.ids().length, 20);
 });
+
+test('states without shows stay visible but disabled, and a requested empty state stays selectable', async () => {
+  const p = await page('?view=all');
+  const html = p.$('#state-filter').innerHTML;
+  assert.match(html, /data-f="watching" aria-pressed="false">在追 <span class="num">30<\/span>/);
+  assert.match(html, /data-f="dropped" aria-pressed="false" disabled>弃番 <span class="num">0<\/span>/);
+  assert.doesNotMatch(html, /data-f="" aria-pressed="false" disabled/);
+  const empty = await page('?view=all&state=dropped');
+  assert.match(empty.$('#state-filter').innerHTML, /data-f="dropped" aria-pressed="true">弃番/);
+  assert.equal(empty.ids().length, 0);
+  empty.click('[data-f]', {dataset: {f: 'completed'}});
+  assert.equal(empty.ids().length, 15);
+});

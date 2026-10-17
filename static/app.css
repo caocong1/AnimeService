@@ -338,6 +338,13 @@ tr.is-error td { color: var(--danger); }
 
 .shelf-tools { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: center; margin-bottom: var(--s-3); }
 .shelf-tools .search { flex: 1 1 240px; max-width: 360px; }
+.shelf-tools .seg button:disabled { opacity: .45; cursor: default; }
+@media (max-width: 720px) {
+  .shelf-tools { gap: var(--s-2); }
+  .shelf-tools .search { flex-basis: 100%; max-width: none; }
+  .shelf-tools .seg { max-width: 100%; overflow-x: auto; flex-wrap: nowrap; }
+  .shelf-tools .seg button { padding: 0 10px; }
+}
 .following-pager { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin: var(--s-4) 0; }
 .following-pager .page-info { margin-right: auto; color: var(--muted); font-size: var(--text-s); }
 .following-pager .page-size { display: flex; align-items: center; gap: var(--s-2); font-size: var(--text-s); color: var(--muted); }
