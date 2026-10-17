@@ -41,7 +41,7 @@ python -m anime.subtitle_alignment --target <母片中文基稿.ass> --candidate
 python - <<'EOF'
 import json
 result = json.load(open('<私有目录>/alignment-result.json', encoding='utf-8'))
-with open('<私有目录>/alignments.proposed.json', 'w', encoding='utf-8') as f:
+with open('<私有目录>/alignments.proposed.json', 'x', encoding='utf-8') as f:
     json.dump(result['proposal'], f, ensure_ascii=False, indent=1)
 EOF
 ```
@@ -92,7 +92,7 @@ for point in result['review_points']:
 4. 填写 `reviewer`（真实审核者）与 `evidence`（逐段核验记录：看了哪些时间点、听到什么、剪辑最终定在哪里、依据何在）。
    核心只检查非空，但空壳 evidence 等于造假；只改 `status` 不写证据不算审核。
 5. 以上完成后才把 `status` 改为 `accepted`，另存 `alignments.accepted.json`（不覆盖 proposed 文件），由原机唯一负责人执行
-   `python -m subtitle_lab workbook --show … --season … --episode … --base <中文基稿 id> --media <母片> --alignments alignments.accepted.json --refresh`。
+   `python -m subtitle_lab --root <私有归档根目录> workbook --show … --season … --episode … --base <中文基稿 id> --media <母片> --alignments alignments.accepted.json --refresh`。
    只对未看集、沿现有唯一 owner、生成新的不可变版本；研究电脑不运行它。
 6. 时间配对覆盖、人工锚点一致、文本相似都不是声学验收；`finished`、`edition`、`accepted` 继续分别记录。
 
