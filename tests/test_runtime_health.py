@@ -68,3 +68,25 @@ def test_stop_request_file_stops_the_server_cleanly(tmp_path):
     flag.write_text('');deadline=time.time()+2
     while not server.should_exit and time.time()<deadline:time.sleep(0.05)
     assert server.should_exit is True
+
+
+def test_health_problems_follow_the_status_rules_and_events_are_pruned(setup):
+    db,q,e,c=setup
+    from anime.runtime import problems
+    now=time.time()
+    assert problems(db,now)=={'reviews':0,'uncertain':0,'error':None,'blocker':''}
+    e.ingest(c());h=next(iter(q.tasks))
+    db.event('task:'+h,'historical error','error');db.execute("UPDATE tasks SET status='complete' WHERE hash=?",(h,))
+    assert problems(db,now)['error'] is None  # a completed task's old error is history, not a problem
+    db.execute("UPDATE tasks SET status='downloading',error='still failing' WHERE hash=?",(h,))
+    assert problems(db,now)['error']['scope']=='task:'+h
+    db.execute("UPDATE tasks SET status='review' WHERE hash=?",(h,))
+    assert problems(db,now)['reviews']==1 and problems(db,now)['error'] is None
+    db.event('api','request failed','error');db.event('source:9','rss broken','error')
+    assert problems(db,now)['error']['scope']=='source:9'
+    assert problems(db,now+7200)['error'] is None  # older than an hour
+    db.set('downloader_preference','thunder_first');assert problems(db,now)['blocker']
+    for i in range(10):db.execute('INSERT INTO events(time,level,scope,message) VALUES(?,?,?,?)',(now-40*86400,'info','old','x'))
+    assert db.prune_events(now=now)==10 and db.rows("SELECT * FROM events WHERE scope='old'")==[]
+    db.set('events_keep_days',1);db.execute('INSERT INTO events(time,level,scope,message) VALUES(?,?,?,?)',(now-2*86400,'info','older','y'))
+    assert db.prune_events(now=now)==1 and db.rows("SELECT * FROM events WHERE scope='source:9'")  # recent rows stay

@@ -126,6 +126,13 @@ class Store:
     def set(self,k,v):self.execute('INSERT OR REPLACE INTO kv VALUES(?,?)',(k,json.dumps(v,ensure_ascii=False)))
     def event(self,scope,message,level='info'):
         self.execute('INSERT INTO events(time,level,scope,message) VALUES(?,?,?,?)',(time.time(),level,scope,message[:1000]))
+    def prune_events(self,keep_days=None,now=None):
+        """Drop events older than events_keep_days (default 30); the newest 2000 rows always stay."""
+        keep_days=keep_days if keep_days is not None else self.get('events_keep_days',30);now=now or time.time()
+        floor=self.one('SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET 2000')  # the newest 2000 rows always stay
+        with self.connect() as c:
+            if floor:return c.execute('DELETE FROM events WHERE time<? AND id<=?',(now-keep_days*86400,floor['id'])).rowcount
+            return c.execute('DELETE FROM events WHERE time<?',(now-keep_days*86400,)).rowcount
     def show(self,sid):return self.one('SELECT * FROM shows WHERE id=?',(sid,))
     def mapping(self,sid):return json.loads(self.show(sid)['mapping'])
     def local_airings(self,sid):
