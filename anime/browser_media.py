@@ -24,9 +24,21 @@ def needs_normalization(path):
 
 
 class BrowserMedia:
+    LIMIT=8*1024**3  # bytes of packet copies kept; oldest copies go first, never the originals
     def __init__(self,subtitles):
         self.sub=subtitles;self.lock=threading.Lock();self.jobs={}
         self.root=subtitles.db.path.parent/'cache/browser-media'
+    def trim(self,keep,limit=None):
+        """Evict least recently used copies until the cache fits; the copy just made and any job in progress stay."""
+        if limit is None:
+            limit=self.sub.db.get('browser_media_cache_bytes',self.LIMIT)
+            if type(limit) is not int or limit<=0:limit=self.LIMIT
+        copies=sorted((p for p in self.root.glob('*.mp4') if p!=keep and not p.name.endswith('.partial.mp4')),key=lambda p:p.stat().st_mtime)
+        total=sum(p.stat().st_size for p in copies)+(keep.stat().st_size if keep.exists() else 0)
+        for p in copies:
+            if total<=limit:break
+            if p.stem in self.jobs and self.jobs[p.stem].locked():continue
+            total-=p.stat().st_size;p.unlink(missing_ok=True);p.with_suffix('.json').unlink(missing_ok=True)
     def cached(self,item):
         fingerprint=self.sub.fingerprint(item);target=self.root/(fingerprint+'.mp4');proof=self.root/(fingerprint+'.json')
         try:
@@ -44,10 +56,17 @@ class BrowserMedia:
             if cached:return cached
             self.root.mkdir(parents=True,exist_ok=True)
             partial=self.root/(fingerprint+'-'+secrets.token_hex(8)+'.partial.mp4')
-            # Packet copies preserve encoded picture and sound. Originals are never rewritten.
-            self.sub.run([self.sub.tool('ffmpeg'),'-nostdin','-v','error','-protocol_whitelist','file,pipe',
-                          '-i',item['path'],'-map','0','-c','copy','-movflags','+faststart',str(partial)],120)
-            if fingerprint!=self.sub.fingerprint(item):raise ValueError('转封装期间原文件变化，请重新核查')
-            os.replace(partial,target)
+            try:
+                # Packet copies preserve encoded picture and sound. Originals are never rewritten.
+                try:
+                    self.sub.run([self.sub.tool('ffmpeg'),'-nostdin','-v','error','-protocol_whitelist','file,pipe',
+                                  '-i',item['path'],'-map','0','-c','copy','-movflags','+faststart',str(partial)],120)
+                except Exception as error:
+                    raise ValueError('浏览器兼容转封装失败，原文件未改动；可改用本机播放器') from error
+                if fingerprint!=self.sub.fingerprint(item):raise ValueError('转封装期间原文件变化，请重新核查')
+                os.replace(partial,target)
+            finally:
+                partial.unlink(missing_ok=True)  # a failed or interrupted copy leaves nothing behind
             proof.write_text(json.dumps({'fingerprint':fingerprint,'size':target.stat().st_size,'mode':'packet_copy'},ensure_ascii=False),encoding='utf-8')
+            self.trim(target)
             return target
