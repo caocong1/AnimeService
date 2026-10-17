@@ -13,6 +13,7 @@ from .sources import Catalog,parse_rss
 from .releases import episodes_of,Rejected,season_of,validate_title
 from .deployment import load as load_deployment
 from .board import episode_board
+from .runtime import health as runtime_health
 
 def catalog_quarters(today=None):
     """The quarter that opens within three weeks and the one before it, oldest first."""
@@ -185,6 +186,8 @@ def create_app(db=None,engine=None,start_worker=True):
             if x['show_id'] not in first or x['episode']<first[x['show_id']]['episode']:first[x['show_id']]=x
         return {'resume':resume[:8],'next':list(first.values())[:18],'unwatched':len(entries),
                 'watching':db.one("SELECT count(*) n FROM shows WHERE selected=1 AND state IN ('trial','watching')")['n']}
+    @app.get('/api/health')
+    def health():return runtime_health(db)
     @app.get('/api/status')
     def status():
         reviews=db.rows("""SELECT t.hash,t.show_id,t.title,t.status,t.error,t.updated,

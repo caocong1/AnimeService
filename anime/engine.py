@@ -120,6 +120,16 @@ class Engine:
         if qt.get('state') in ('error','missingFiles'):return True
         if self.db.get('check_requested',0)>self.db.get('check_completed',0):return True
         return time.time()-self.db.get('task_verified_'+t['hash'],0)>=3600
+    def step(self,name,action):
+        """One scheduler step; its failure is recorded under cycle_errors and never takes the cycle or heartbeat down."""
+        try:
+            action();errors=self.db.get('cycle_errors',{})
+            if name in errors:errors.pop(name);self.db.set('cycle_errors',errors)
+        except Exception as e:
+            message=safe_error(e);errors=self.db.get('cycle_errors',{});prior=errors.get(name,{});same=prior.get('error')==message
+            errors[name]={'error':message,'count':prior.get('count',0)+1 if same else 1,'since':prior.get('since',time.time()) if same else time.time(),'last':time.time()}
+            self.db.set('cycle_errors',errors)
+            if errors[name]['count'] in EVENT_FAILURE_MARKS or errors[name]['count']%100==0:self.db.event('cycle:'+name,message,'error')
     def inventory_matches(self,sid,mapping=None):
         p=self.db.path.parent/'inventory.json'
         if not p.exists():return []
@@ -350,8 +360,8 @@ class Engine:
             self.db.set('check_started_at',time.time())
             self.db.set('heartbeat',{'time':time.time(),'phase':'checking'})
             # Enrol personally wanted new series before ordinary ingestion.
-            if hasattr(self,'enroll_source_reviews'):self.enroll_source_reviews()
-            self.source_review.discover_sources()
+            if hasattr(self,'enroll_source_reviews'):self.step('season.enroll_source_reviews',self.enroll_source_reviews)
+            self.step('source_review.discover_sources',self.source_review.discover_sources)
             self.maintenance()
             refreshed=[]
             for source in self.db.rows("""SELECT sources.* FROM sources JOIN shows ON shows.id=sources.show_id
@@ -375,11 +385,11 @@ class Engine:
                 if time.time()-self.db.get('details_'+str(show['id']),0)>21600:
                     try:self.catalog.details(show['id'])
                     except Exception as e:self.db.event('airings',safe_error(e),'warning')
-            if hasattr(self,'auto_tick'):self.auto_tick(force=force)
-            self.source_review.tick()
-            self.source_review.publish_available()
-            self.subtitle_studio.discover()
-            self.subtitle_studio.tick()
+            if hasattr(self,'auto_tick'):self.step('season.auto_tick',lambda:self.auto_tick(force=force))
+            self.step('source_review.tick',self.source_review.tick)
+            self.step('source_review.publish_available',self.source_review.publish_available)
+            self.step('subtitle_studio.discover',self.subtitle_studio.discover)
+            self.step('subtitle_studio.tick',self.subtitle_studio.tick)
             self.db.set('heartbeat',{'time':time.time(),'phase':'idle'})
             self.db.set('check_completed',requested)
             self.db.set('check_finished_at',time.time())
@@ -441,9 +451,9 @@ class Engine:
                 except Exception:pass # Genuine mismatches remain stopped and preserved.
             try:self.reconcile()
             except Exception as e:self.db.set('qbit_health',{'ok':False,'time':time.time(),'error':safe_error(e)})
-            self.source_review.publish_available()
-            self.source_review.tick()
-            self.subtitle_studio.tick()
+            self.step('source_review.publish_available',self.source_review.publish_available)
+            self.step('source_review.tick',self.source_review.tick)
+            self.step('subtitle_studio.tick',self.subtitle_studio.tick)
             self.db.set('download_maintenance_at',time.time())
         finally:self.maintenance_lock.release()
     def maintain_loop(self):

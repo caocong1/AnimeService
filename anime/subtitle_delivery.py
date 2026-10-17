@@ -13,6 +13,7 @@ import time
 import uuid
 from pathlib import Path
 
+from .net import safe_error
 from .viewing_workflow import lane, queue_snapshot, scope_blocker, RESEARCH_MODES
 
 
@@ -218,48 +219,54 @@ class SubtitleDelivery:
             for ep, studio_job in sorted(jobs.items()):
                 identity = self.episode_id(show['id'], ep)
                 present.add(identity)
-                source = self.db.one('SELECT payload FROM subtitle_studio_jobs WHERE show_id=? AND episode=?', (show['id'], ep))
-                source = json.loads(source['payload']) if source else dict(studio_job)
-                assessment = self._assessment(show['id'], ep, source)
-                blocker = _scope(self.db, show['id'], ep)
-                value = {'assessment': assessment, 'finished': _finished(self.db, show['id'], ep),
-                         'next_unwatched': show.get('next_unwatched'), 'scope_blocker': blocker}
-                key = assessment['input_signature']
-                state = ('blocked' if blocker else 'preparing' if not
-                         (assessment.get('material_ready') is True and assessment.get('clean_review_ready') is True)
-                         else 'ready' if assessment['ready'] else 'blocked')
-                with self.db.connect() as c:
-                    c.execute('BEGIN IMMEDIATE')
-                    old = c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone()
-                    if old:
-                        prior = json.loads(old['payload'])
-                        if old['dispatch_state'] in RETAINED_DISPATCH or old['lease_expires'] > self.clock():
-                            # In-flight work keeps its original input and responsible chat.
-                            value = {**prior, 'latest_assessment': value,
-                                     'scope_blocker': blocker, 'finished': value['finished']}
-                            key, state = old['input_key'], old['state']
-                        elif old['state'] in ('accepted', 'finished'):
-                            baseline_refs = prior.get('accepted_observation', {}).get('material_refs') or []
-                            baseline_raw = {ref.get('raw_hash') for ref in baseline_refs
-                                            if isinstance(ref, dict) and ref.get('raw_hash')}
-                            if not blocker and old['state'] == 'accepted':
-                                for ref in assessment.get('material_refs') or []:
-                                    if (isinstance(ref, dict) and ref.get('kind') == 'archived_draft'
-                                            and ref.get('raw_hash') and ref.get('text_hash')
-                                            and ref['raw_hash'] not in baseline_raw):
-                                        late_candidates.append((show['id'], ep, ref))
-                            value = {**prior, 'latest_assessment': value,
-                                     'scope_blocker': blocker, 'finished': value['finished']}
-                            key, state = old['input_key'], old['state']
-                        if old['payload'] == _json(value) and old['state'] == state:
-                            continue
-                        c.execute('UPDATE subtitle_delivery_jobs SET state=?,revision=revision+1,input_key=?,payload=?,updated=? WHERE id=?',
-                                  (state, key, _json(value), self.clock(), identity))
-                    else:
-                        c.execute('INSERT INTO subtitle_delivery_jobs(id,show_id,episode,kind,state,input_key,payload,created,updated) VALUES(?,?,?,\'episode\',?,?,?,?,?)',
-                                  (identity, show['id'], ep, state, key, _json(value), self.clock(), self.clock()))
-                    self._event(c, identity, 'readiness', {'state': state, 'input_key': key})
-                    changes += 1
+                error_key = 'subtitle_delivery_refresh_error_' + identity
+                try:
+                    source = self.db.one('SELECT payload FROM subtitle_studio_jobs WHERE show_id=? AND episode=?', (show['id'], ep))
+                    source = json.loads(source['payload']) if source else dict(studio_job)
+                    assessment = self._assessment(show['id'], ep, source)
+                    blocker = _scope(self.db, show['id'], ep)
+                    value = {'assessment': assessment, 'finished': _finished(self.db, show['id'], ep),
+                             'next_unwatched': show.get('next_unwatched'), 'scope_blocker': blocker}
+                    key = assessment['input_signature']
+                    state = ('blocked' if blocker else 'preparing' if not
+                             (assessment.get('material_ready') is True and assessment.get('clean_review_ready') is True)
+                             else 'ready' if assessment['ready'] else 'blocked')
+                    with self.db.connect() as c:
+                        c.execute('BEGIN IMMEDIATE')
+                        old = c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone()
+                        if old:
+                            prior = json.loads(old['payload'])
+                            if old['dispatch_state'] in RETAINED_DISPATCH or old['lease_expires'] > self.clock():
+                                # In-flight work keeps its original input and responsible chat.
+                                value = {**prior, 'latest_assessment': value,
+                                         'scope_blocker': blocker, 'finished': value['finished']}
+                                key, state = old['input_key'], old['state']
+                            elif old['state'] in ('accepted', 'finished'):
+                                baseline_refs = prior.get('accepted_observation', {}).get('material_refs') or []
+                                baseline_raw = {ref.get('raw_hash') for ref in baseline_refs
+                                                if isinstance(ref, dict) and ref.get('raw_hash')}
+                                if not blocker and old['state'] == 'accepted':
+                                    for ref in assessment.get('material_refs') or []:
+                                        if (isinstance(ref, dict) and ref.get('kind') == 'archived_draft'
+                                                and ref.get('raw_hash') and ref.get('text_hash')
+                                                and ref['raw_hash'] not in baseline_raw):
+                                            late_candidates.append((show['id'], ep, ref))
+                                value = {**prior, 'latest_assessment': value,
+                                         'scope_blocker': blocker, 'finished': value['finished']}
+                                key, state = old['input_key'], old['state']
+                            if old['payload'] == _json(value) and old['state'] == state:
+                                continue
+                            c.execute('UPDATE subtitle_delivery_jobs SET state=?,revision=revision+1,input_key=?,payload=?,updated=? WHERE id=?',
+                                      (state, key, _json(value), self.clock(), identity))
+                        else:
+                            c.execute('INSERT INTO subtitle_delivery_jobs(id,show_id,episode,kind,state,input_key,payload,created,updated) VALUES(?,?,?,\'episode\',?,?,?,?,?)',
+                                      (identity, show['id'], ep, state, key, _json(value), self.clock(), self.clock()))
+                        self._event(c, identity, 'readiness', {'state': state, 'input_key': key})
+                        changes += 1
+                    if self.db.get(error_key) is not None:
+                        self.db.execute('DELETE FROM kv WHERE key=?', (error_key,))
+                except Exception as error:  # one episode's assessment must not stop the others
+                    self.db.set(error_key, {'time': self.clock(), 'error': safe_error(error)})
         # Scope changes only block future claims; unknown/acknowledged dispatch stays protected.
         for row in self.db.rows("SELECT id,show_id,episode,state,dispatch_state FROM subtitle_delivery_jobs WHERE kind='episode'"):
             blocker = _scope(self.db, row['show_id'], row['episode'])

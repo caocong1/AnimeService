@@ -24,6 +24,16 @@ def listen_sockets(config):
     finally:
         for sock in sockets:sock.close()
 
+def watch_stop(server,flag=None,interval=2):
+    """Stop the server cleanly when the supervisor or the Stop script writes data/stop.request."""
+    import threading,time
+    flag=flag or ROOT/'data/stop.request'
+    def poll():
+        while not server.should_exit:
+            if flag.exists():server.should_exit=True;break
+            time.sleep(interval)
+    threading.Thread(target=poll,daemon=True,name='stop-watch').start()
+
 def main():
     import ctypes
     kernel=ctypes.WinDLL('kernel32',use_last_error=True)
@@ -39,5 +49,6 @@ def main():
     from .deployment import load as load_deployment
     config=uvicorn.Config('anime.app:app',host=load_deployment().get('bind_host','127.0.0.1'),port=4871,
                 access_log=False,log_config=None,proxy_headers=True,forwarded_allow_ips='127.0.0.1')
-    with listen_sockets(config) as sockets:uvicorn.Server(config).run(sockets=sockets)
+    server=uvicorn.Server(config);watch_stop(server)
+    with listen_sockets(config) as sockets:server.run(sockets=sockets)
 if __name__=='__main__':main()
