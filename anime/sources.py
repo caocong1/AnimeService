@@ -20,6 +20,9 @@ HOST_SITE={host:site for site,hosts in SITE_HOSTS.items() for host in hosts}
 HOST_SITE.update({'tokyotosho.info':'tokyotosho','tokyotosho.se':'tokyotosho','tokyo-tosho.net':'tokyotosho'})
 SITE_MIN_INTERVAL={'tokyotosho':10,'nyaa.si':5}  # seconds between requests to one site; other sites are not spaced
 EVENT_FAILURE_MARKS=(1,5,20,100)
+# TokyoTosho answers a search without matches with this fragment (served as text/html): a legitimate empty feed.
+EMPTY_RESULT=re.compile(rb'^\s*(?:</channel>\s*)?</rss>\s*$')
+CHALLENGE_MARKERS=(b'cf-chl',b'cf_chl',b'challenge-platform',b'just a moment',b'attention required',b'access denied')
 
 
 def site_of(url):
@@ -29,6 +32,15 @@ def site_of(url):
 
 def site_backoff_seconds(failures):
     return min(3600,60*2**min(max(failures,1)-1,6))
+
+
+def source_backoff_seconds(failures):
+    """One feed's own failures: a minute doubling to six hours, reset by any success."""
+    return min(21600,60*2**min(max(failures,1)-1,9))
+
+
+def bump(state,name):
+    stats=state.setdefault('stats',{});stats[name]=stats.get(name,0)+1
 
 
 def preferred_host(url,state):
@@ -52,9 +64,23 @@ def looks_like_page(response):
     """A 200 that carries HTML instead of a feed: a challenge, block or error page."""
     try:content_type=str(response.headers.get('Content-Type',''))
     except Exception:content_type=''
-    if 'html' in content_type.lower():return True
     head=bytes(response.content[:4096]).lower()
-    return b'<rss' not in head and b'<feed' not in head and b'<?xml' not in head and b'<html' in head
+    if b'<rss' in head or b'<feed' in head or b'<?xml' in head:return False
+    return 'html' in content_type.lower() or b'<html' in head
+
+
+def challenge_page(response):
+    head=bytes(response.content[:8192]).lower()
+    return looks_like_page(response) and any(marker in head for marker in CHALLENGE_MARKERS)
+
+
+def feed_items(site,response,kind):
+    """Classify one answer: empty result, challenge (site-wide), other page (this feed), or a feed to parse."""
+    body=bytes(response.content)
+    if not body.strip() or EMPTY_RESULT.match(body):return []
+    if challenge_page(response):raise NetworkError(site+' 返回验证页面',200,site_wide=True)
+    if looks_like_page(response):raise NetworkError(site+' 返回HTML页面而非RSS',200,site_wide=False)
+    return parse_rss(body,kind)
 
 class Catalog:
     def __init__(self,store,web=None):self.db=store;self.web=web or Web()
@@ -216,31 +242,34 @@ class Sources:
         if state.get('next_attempt',0)>now:  # the whole site is backing off: spend no request on it
             self.db.execute('UPDATE sources SET next_attempt=? WHERE id=?',(state['next_attempt'],source['id']));return False
         spacing=self.db.get('site_min_interval_seconds',{}).get(site,SITE_MIN_INTERVAL.get(site,0))
-        if now-state.get('last_request',0)<spacing:  # deferred to keep the site's request rate low; not a failure
-            self.db.execute('UPDATE sources SET next_attempt=? WHERE id=?',(state.get('last_request',0)+spacing,source['id']));return False
-        state['last_request']=now;self.db.set(key,state)
+        if now-state.get('last_request',0)<spacing:
+            # Deferred, not failed: each waiting feed of the site gets its own slot so none is starved.
+            state['deferred']=state.get('deferred',0)+1;bump(state,'deferred');self.db.set(key,state)
+            self.db.execute('UPDATE sources SET next_attempt=? WHERE id=?',(state.get('last_request',0)+spacing*state['deferred'],source['id']));return False
+        state.update(last_request=now,deferred=0);bump(state,'polls');self.db.set(key,state)
         self.db.execute('UPDATE sources SET last_attempt=? WHERE id=?',(now,source['id']))
         try:
             if source['kind']=='1337x':items=search_1337x(self.db,self.web,source)
-            else:
-                r=self.web.fetch(request_url(source['url'],state))
-                if looks_like_page(r):raise NetworkError(site+' 返回验证页面或HTML而非RSS',200,site_wide=True)
-                items=parse_rss(r.content,source['kind'])
+            else:items=feed_items(site,self.web.fetch(request_url(source['url'],state),retries=1 if spacing else 3),source['kind'])
+            bump(state,'empty' if not items else 'success')
             items=self.remember(source,items)
             interval=self.db.get('poll_seconds',180)
             if self.db.review_wanted(source['show_id']):interval=min(interval,180)
             if source['kind'] in GENERAL_KINDS:interval=3600
             self.db.execute('UPDATE sources SET last_success=?,next_attempt=?,failures=0,error=?,latest=? WHERE id=?',
                 (now,now+interval,'',items[0]['title'] if items else '本次RSS无条目',source['id']))
-            if state.get('failures') or state.get('error'):self.db.set(key,{**state,'failures':0,'next_attempt':0,'error':''})
+            self.db.set(key,{**state,'failures':0,'next_attempt':0,'error':''})
             return True
         except Exception as e:
             if source['kind'] in GENERAL_KINDS:record_failure(self.db,source,e)
-            n=source['failures']+1;err=safe_error(e);retry=now+min(300,15*2**min(n,5))
-            if isinstance(e,NetworkError) and e.site_wide:  # shared backoff and alias rotation for the whole site
-                failures=state.get('failures',0)+1
-                state.update(failures=failures,next_attempt=now+site_backoff_seconds(failures),error=err,host=next_host(source['url'],state))
-                self.db.set(key,state);retry=max(retry,state['next_attempt'])
+            n=source['failures']+1;err=safe_error(e);retry=now+source_backoff_seconds(n)
+            if isinstance(e,NetworkError) and e.site_wide:  # shared cooldown and alias rotation for the whole site
+                failures=state.get('failures',0)+1;bump(state,'failed_site')
+                state.update(failures=failures,next_attempt=now+max(site_backoff_seconds(failures),e.retry_after),error=err,
+                             host=next_host(source['url'],state),last_error_at=now)
+                retry=max(retry,state['next_attempt'])
+            else:bump(state,'failed_source')
+            self.db.set(key,state)
             self.db.execute('UPDATE sources SET failures=?,next_attempt=?,error=? WHERE id=?',(n,retry,err,source['id']))
             if err!=source['error'] or n in EVENT_FAILURE_MARKS or n%100==0:self.db.event('source:'+str(source['id']),err,'error')
             return False

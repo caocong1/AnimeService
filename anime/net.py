@@ -9,9 +9,15 @@ HOSTS={'api.bgm.tv','bgm.tv','bangumi.tv','mikanani.me','mikanime.tv','mikanani.
 # Responses that mean the site, not one feed, is unavailable: blocks, throttling, outages.
 SITE_WIDE_STATUSES={403,408,425,429,500,502,503,504}
 class NetworkError(RuntimeError):
-    def __init__(self,message,status=None,site_wide=None):
-        super().__init__(message);self.status=status
+    def __init__(self,message,status=None,site_wide=None,retry_after=0):
+        super().__init__(message);self.status=status;self.retry_after=retry_after
         self.site_wide=site_wide if site_wide is not None else (status is None or status in SITE_WIDE_STATUSES)
+
+
+def retry_after(response):
+    """Seconds the server asked us to wait, capped at a day; dates and nonsense count as none."""
+    value=str(response.headers.get('Retry-After','')).strip()
+    return min(86400,int(value)) if value.isdigit() else 0
 
 def safe_error(e):
     # Never retain request URLs, headers, response bodies, or auth-bearing exception strings.
@@ -29,9 +35,9 @@ def validate_url(url):
 class Web:
     def __init__(self):
         self.session=requests.Session();self.session.headers['User-Agent']='sorawatcher/AnimeService/2.0 (personal anime tracker)'
-    def fetch(self,url,method='GET',**kwargs):
+    def fetch(self,url,method='GET',retries=3,**kwargs):
         validate_url(url)
-        for attempt in range(3):
+        for attempt in range(retries):
             try:
                 target=url
                 for _ in range(4):
@@ -39,11 +45,13 @@ class Web:
                     if r.is_redirect:
                         from urllib.parse import urljoin
                         target=validate_url(urljoin(target,r.headers['Location']));continue
-                    if not r.ok:raise NetworkError(f'{urlparse(url).hostname} HTTP {r.status_code}',r.status_code)
+                    if not r.ok:raise NetworkError(f'{urlparse(url).hostname} HTTP {r.status_code}',r.status_code,retry_after=retry_after(r))
                     if len(r.content)>12*1024*1024:raise NetworkError('响应超过12MiB限制')
                     if 'text/' in r.headers.get('Content-Type','') and 'charset=' not in r.headers.get('Content-Type','').lower():r.encoding='utf-8'
                     return r
                 raise NetworkError('重定向次数过多')
-            except (requests.RequestException,NetworkError) as e:
-                if attempt==2:raise NetworkError(safe_error(e)) from None
-                time.sleep(0.5*(2**attempt))
+            except NetworkError:
+                raise  # an HTTP answer, a block or an oversized body is final for this call
+            except requests.RequestException as e:
+                if attempt==retries-1:raise NetworkError(safe_error(e)) from None
+                time.sleep(0.5*(2**attempt))  # only connection trouble is retried

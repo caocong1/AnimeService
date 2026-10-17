@@ -4,8 +4,8 @@ import pytest
 from test_reliability import setup
 from test_native_indexes import cohort,rss
 from anime import sources as sources_module
-from anime.sources import Sources,site_of,site_backoff_seconds,SITE_HOSTS
-from anime.net import NetworkError,validate_url
+from anime.sources import Sources,site_of,site_backoff_seconds,source_backoff_seconds,SITE_HOSTS
+from anime.net import NetworkError,validate_url,Web
 from anime.native_indexes import checked_download_url
 
 
@@ -98,20 +98,76 @@ def test_requests_to_one_site_are_spaced_without_counting_failures(setup,clock):
     assert Sources(db,web).rss(mikan[0]) and Sources(db,web).rss(mikan[1]) and web.fetch.call_count==5
 
 
-def test_html_page_is_a_site_block_not_a_feed_parse_failure(setup,clock):
+def test_empty_search_result_fragment_is_a_legitimate_empty_feed(setup,clock):
     db,rows=tokyo_sources(setup);web=Mock()
-    web.fetch.return_value=response(b'<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>cf-chl</body></html>','text/html; charset=utf-8')
+    web.fetch.return_value=response(b'</channel>\n</rss>','text/html; charset=UTF-8')  # what the site answers when nothing matches
+    assert Sources(db,web).rss(rows[0])
+    row=fresh(db,rows[0]);state=db.get('site_health_tokyotosho')
+    assert row['latest']=='本次RSS无条目' and row['failures']==0 and row['error']=='' and row['last_success']==clock.now
+    assert state['failures']==0 and state['stats']=={'polls':1,'empty':1} and not db.rows("SELECT * FROM events WHERE scope LIKE 'source:%'")
+
+
+def test_challenge_page_cools_the_site_but_a_plain_page_or_bad_feed_only_its_feed(setup,clock):
+    db,rows=tokyo_sources(setup);web=Mock()
+    web.fetch.return_value=response(b'<!DOCTYPE html><html><head><title>Just a moment...</title></head><body><div id="cf-chl-widget"></div></body></html>','text/html; charset=utf-8')
     assert not Sources(db,web).rss(rows[0])
     state=db.get('site_health_tokyotosho')
-    assert 'HTML' in fresh(db,rows[0])['error'] and state['failures']==1 and state['host']=='www.tokyotosho.se'
+    assert '验证页面' in fresh(db,rows[0])['error'] and state['failures']==1 and state['host']=='www.tokyotosho.se' and state['last_error_at']==clock.now
     clock.now=state['next_attempt']+1
-    web.fetch.return_value=response(b'<rss version="2.0"><channel><title>t</title></channel></rss>')
-    assert Sources(db,web).rss(fresh(db,rows[0])) and fresh(db,rows[0])['latest']=='本次RSS无条目'
+    web.fetch.return_value=response(b'<html><body><h1>Error</h1><p>Something went wrong</p></body></html>','text/html')
+    assert not Sources(db,web).rss(fresh(db,rows[0]))
+    state=db.get('site_health_tokyotosho');row=fresh(db,rows[0])
+    assert state['failures']==1 and state['next_attempt']<clock.now and 'HTML页面' in row['error'] and row['failures']==2
+    assert row['next_attempt']==clock.now+source_backoff_seconds(2)==clock.now+120
     clock.now+=100
-    web.fetch.return_value=response(b'garbage that is not a feed at all')  # one malformed feed is not a site outage
+    web.fetch.return_value=response(b'garbage that is not a feed at all')
     assert not Sources(db,web).rss(fresh(db,rows[1]))
-    assert db.get('site_health_tokyotosho')['failures']==0 and fresh(db,rows[1])['failures']==1
-    assert fresh(db,rows[1])['next_attempt']<=clock.now+300
+    assert db.get('site_health_tokyotosho')['failures']==1 and fresh(db,rows[1])['failures']==1 and fresh(db,rows[1])['next_attempt']==clock.now+60
+    assert db.get('site_health_tokyotosho')['stats']['failed_source']==2 and db.get('site_health_tokyotosho')['stats']['failed_site']==1
+    clock.now+=100
+    web.fetch.return_value=response(b'<?xml version="1.0"?><rss version="2.0"><channel><title>t</title></channel></rss>','text/plain')  # wrong type, real feed
+    assert Sources(db,web).rss(fresh(db,rows[0])) and fresh(db,rows[0])['failures']==0 and db.get('site_health_tokyotosho')['failures']==0
+
+
+def test_per_source_backoff_doubles_from_a_minute_to_six_hours():
+    assert [source_backoff_seconds(n) for n in (1,2,3,5,9,10,11,40)]==[60,120,240,960,15360,21600,21600,21600]
+
+
+def test_retry_after_extends_the_site_cooldown(setup,clock):
+    db,rows=tokyo_sources(setup);web=Mock();web.fetch.side_effect=NetworkError('www.tokyotosho.info HTTP 429',429,retry_after=900)
+    assert not Sources(db,web).rss(rows[0])
+    assert db.get('site_health_tokyotosho')['next_attempt']==clock.now+900==fresh(db,rows[0])['next_attempt']
+
+
+def test_deferred_feeds_take_turns_instead_of_starving(setup,clock):
+    db,rows=tokyo_sources(setup);web=Mock();web.fetch.return_value=response(rss(kind='tokyotosho'))
+    for n in (3,4):db.execute("INSERT INTO sources(show_id,kind,url) VALUES(42,'tokyotosho',?)",(f'https://www.tokyotosho.info/rss.php?filter=7&terms=Example{n}',))
+    rows=db.rows("SELECT * FROM sources WHERE kind='tokyotosho' ORDER BY id")
+    served=[Sources(db,web).rss(r) for r in rows]
+    assert served==[True,False,False,False]
+    assert [fresh(db,r)['next_attempt']-clock.now for r in rows[1:]]==[10,20,30]
+    assert db.get('site_health_tokyotosho')['stats']=={'polls':1,'success':1,'deferred':3}
+    clock.now+=10
+    assert Sources(db,web).rss(fresh(db,rows[1])) and db.get('site_health_tokyotosho')['deferred']==0
+
+
+def test_fetch_does_not_blindly_retry_blocks_and_honours_retry_count(monkeypatch):
+    web=Web();monkeypatch.setattr('anime.net.time.sleep',lambda s:None)
+    blocked=Mock(is_redirect=False,ok=False,status_code=503,headers={'Retry-After':'120'},content=b'')
+    web.session.request=Mock(return_value=blocked)
+    with pytest.raises(NetworkError) as err:web.fetch('https://www.tokyotosho.info/rss.php?filter=7&terms=x')
+    assert err.value.status==503 and err.value.retry_after==120 and err.value.site_wide and web.session.request.call_count==1
+    import requests
+    web.session.request=Mock(side_effect=requests.ConnectionError('dial'))
+    with pytest.raises(NetworkError) as err:web.fetch('https://www.tokyotosho.info/rss.php?filter=7&terms=x')
+    assert web.session.request.call_count==3 and err.value.site_wide and 'dial' not in str(err.value)
+    web.session.request=Mock(side_effect=requests.ConnectionError('dial'))
+    with pytest.raises(NetworkError):web.fetch('https://www.tokyotosho.info/rss.php?filter=7&terms=x',retries=1)
+    assert web.session.request.call_count==1
+    missing=Mock(is_redirect=False,ok=False,status_code=404,headers={},content=b'')
+    web.session.request=Mock(return_value=missing)
+    with pytest.raises(NetworkError) as err:web.fetch('https://mikanani.me/RSS/x')
+    assert err.value.status==404 and not err.value.site_wide and web.session.request.call_count==1
 
 
 def test_repeated_identical_failures_do_not_flood_events(setup,clock):
