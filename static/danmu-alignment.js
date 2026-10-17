@@ -22,11 +22,11 @@
   }
   function create({request, present, save, render, apply, wait = ms => new Promise(r => setTimeout(r, ms))}) {
     const runs = new WeakMap();
-    function cancel(source) {
+    function cancel(source, options) {
       const run = runs.get(source);
       if (!run) return;
       runs.delete(source);
-      if (run.job) request(`/${run.job}/cancel`, {}).catch(() => {});
+      if (run.job) request(`/${run.job}/cancel`, {}, options).catch(() => {});
     }
     function manual(source) {
       cancel(source); source.alignmentManual = true;

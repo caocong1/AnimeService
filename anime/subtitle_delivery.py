@@ -404,6 +404,25 @@ class SubtitleDelivery:
         return self.reserve(identity, owner, expected_revision, lease_seconds,
                             allow_experience=allow_experience, resume_thread=thread_id)
 
+    def release(self, identity, owner, expected_revision, lease_token=None, reason='released'):
+        """Give back a lease that never reached dispatch; a started dispatch must be reconciled instead."""
+        with self.db.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row = c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone()
+            if (not row or row['revision'] != expected_revision or row['lease_owner'] != owner
+                    or (lease_token is not None and row['lease_token'] != lease_token) or row['lease_expires'] <= self.clock()):
+                raise ValueError('No live lease for this owner and revision')
+            if row['dispatch_state'] in PROTECTED_DISPATCH:
+                raise ValueError('Dispatch already started; reconcile its result instead of releasing the lease')
+            state = row['state']
+            if row['dispatch_state'] != 'blocked-stopped':
+                state = 'late-review' if row['kind'] == 'late' else 'ready'
+            c.execute('UPDATE subtitle_delivery_jobs SET state=?,lease_owner=\'\',lease_token=\'\',lease_expires=0,revision=revision+1,updated=? WHERE id=?',
+                      (state, self.clock(), identity))
+            self._event(c, identity, 'lease-released', {'owner': owner, 'reason': reason})
+            record = dict(c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone())
+            return {**record, 'job_id': identity, 'payload': json.loads(record['payload'])}
+
     def _source_payload(self, job):
         source = self.db.one('SELECT payload FROM subtitle_studio_jobs WHERE show_id=? AND episode=?',
                              (job['show_id'], job['episode']))
@@ -473,7 +492,8 @@ class SubtitleDelivery:
                 state, status = 'blocked', 'unknown'
             c.execute('UPDATE subtitle_delivery_jobs SET state=?,dispatch_state=?,thread_id=?,lease_expires=0,revision=revision+1,updated=? WHERE id=?',
                       (state, status, thread_id or row['thread_id'], self.clock(), identity))
-            self._event(c, identity, 'dispatch-reconciled', {'result': status, 'thread_id': thread_id})
+            self._event(c, identity, 'dispatch-reconciled', {'result': status, 'thread_id': thread_id,
+                                                              **({'absence_evidence': absence_evidence} if definitely_not_created else {})})
             record = dict(c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone())
             return {**record, 'payload': json.loads(record['payload'])}
 

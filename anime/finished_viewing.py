@@ -59,22 +59,36 @@ class FinishedViewing:
         except (KeyError, TypeError, ValueError): raise ValueError('播放进度无效') from None
         if not all(math.isfinite(x) and 0 <= x <= 86400 for x in (pos, duration)) or duration <= 0 or pos > duration + 1:
             raise ValueError('播放进度无效')
-        session, sequence = p.get('session'), p.get('sequence')
-        if (not isinstance(session, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', session)
-            or type(sequence) is not int or not 1 <= sequence <= 2147483647): raise ValueError('播放会话无效')
+        session, sequence = playback_order(p)
+        if session is None: raise ValueError('播放会话无效')
         now = time.time()
         with self.db.gate, self.db.connect() as c:
-            receipt = c.execute('SELECT media_id,sequence FROM finished_playback_receipts WHERE session=?', (session,)).fetchone()
-            if receipt and (receipt[0] != row['media_id'] or receipt[1] >= sequence): return {'ok': True, 'ignored': True}
+            if not in_order(c, row['media_id'], session, sequence, now): return {'ok': True, 'ignored': True}
             c.execute('''INSERT INTO web_progress(media_id,position,duration,last_played,updated) VALUES(?,?,?,?,?)
                 ON CONFLICT(media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,
                 last_played=coalesce(excluded.last_played,web_progress.last_played),updated=excluded.updated''',
                 (row['media_id'], pos, duration, now if p.get('playing') is True and pos > 0 else None, now))
-            c.execute('INSERT INTO finished_playback_receipts VALUES(?,?,?,?) ON CONFLICT(session) DO UPDATE SET sequence=excluded.sequence,updated=excluded.updated',
-                      (session, row['media_id'], sequence, now))
-            c.execute('DELETE FROM finished_playback_receipts WHERE updated<?', (now - 7 * 86400,))
         # Opening, seeking and reaching the end never change watches.
         return {'ok': True}
+
+
+def playback_order(p):
+    """(session, sequence) when the client sent a valid pair, (None, None) when absent, ValueError when malformed."""
+    session, sequence = p.get('session'), p.get('sequence')
+    if session is None and sequence is None: return None, None
+    if (not isinstance(session, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', session)
+        or type(sequence) is not int or not 1 <= sequence <= 2147483647): raise ValueError('播放会话无效')
+    return session, sequence
+
+
+def in_order(c, media_id, session, sequence, now):
+    """Record this session's newest sequence; a late or foreign write must not move the saved position."""
+    receipt = c.execute('SELECT media_id,sequence FROM finished_playback_receipts WHERE session=?', (session,)).fetchone()
+    if receipt and (receipt[0] != media_id or receipt[1] >= sequence): return False
+    c.execute('INSERT INTO finished_playback_receipts VALUES(?,?,?,?) ON CONFLICT(session) DO UPDATE SET sequence=excluded.sequence,updated=excluded.updated',
+              (session, media_id, sequence, now))
+    c.execute('DELETE FROM finished_playback_receipts WHERE updated<?', (now - 7 * 86400,))
+    return True
 
 
 def register_finished_viewing(app, db, mark_watch):

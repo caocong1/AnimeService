@@ -47,6 +47,19 @@ def public(value):
     return value
 
 
+def absence_evidence(path):
+    """The verification record itself, bound by hash: who checked which chat list when, and how."""
+    import hashlib
+    raw = Path(path).read_bytes()
+    try:
+        data = json.loads(raw.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError('absence evidence must be a UTF-8 JSON object') from None
+    if not isinstance(data, dict) or not all(isinstance(data.get(k), str) and data[k].strip() for k in ('checked_at', 'method', 'checked_by')):
+        raise ValueError('absence evidence needs checked_at, method and checked_by')
+    return {'file': Path(path).name, 'sha256': hashlib.sha256(raw).hexdigest(), **data}
+
+
 def main():
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
@@ -69,6 +82,13 @@ def main():
     begin.add_argument('--owner', required=True)
     begin.add_argument('--revision', required=True, type=int)
     begin.add_argument('--experience', action='store_true')
+    release = sub.add_parser('release-lease', help='give back an undispatched lease (never one whose dispatch started)')
+    release.add_argument('job_id')
+    release.add_argument('--owner', required=True)
+    release.add_argument('--revision', required=True, type=int)
+    absent = sub.add_parser('not-created', help='record independently verified absence of a chat for an unknown dispatch')
+    absent.add_argument('job_id')
+    absent.add_argument('--evidence', required=True, help='JSON file describing how the absence was verified')
     for name in ('confirm', 'unknown', 'blocked', 'accepted', 'finished'):
         p = sub.add_parser(name)
         p.add_argument('job_id')
@@ -103,7 +123,13 @@ def main():
                                       allow_experience=args.experience)
             else:
                 lease = delivery.reserve(args.job_id, args.owner, args.revision, allow_experience=args.experience)
-            result = delivery.begin_dispatch(args.job_id, args.owner, lease['lease_token'], lease['revision'])
+            try:
+                result = delivery.begin_dispatch(args.job_id, args.owner, lease['lease_token'], lease['revision'])
+            except Exception as error:
+                # The lease was ours and nothing was dispatched: hand it back so the single slot is not held hostage.
+                released = delivery.release(args.job_id, args.owner, lease['revision'], lease['lease_token'], reason='begin failed: ' + str(error)[:200])
+                raise SystemExit(json.dumps({'error': str(error), 'lease_released': True, 'state': released['state'],
+                                             'revision': released['revision']}, ensure_ascii=False))
             sid, ep = result['show_id'], result['episode']
             initial = delivery.get(delivery.episode_id(sid, ep))
             responsible = result.get('thread_id') or (initial.get('thread_id') if result['kind'] in ('late','refinement') else '')
@@ -114,6 +140,11 @@ def main():
             result['suggested_title'] = f"{db.show(sid)['title']} 第{ep}集字幕" + (' v1精校细调' if result['kind']=='refinement' else ' V2审核' if result['kind']=='late' else ' v0→v1整集制作')
             template = (ROOT / 'docs/SUBTITLE-SESSION-PROMPT.txt').read_text(encoding='utf-8')
             result['session_prompt'] = template.replace('{{JOB_ID}}', result['id']).replace('{{SHOW_ID}}', str(sid)).replace('{{EPISODE}}', str(ep)).replace('{{INPUT_KEY}}', result['input_key'])
+        elif args.command == 'release-lease':
+            result = delivery.release(args.job_id, args.owner, args.revision, reason='operator release')
+        elif args.command == 'not-created':
+            result = delivery.reconcile_dispatch(args.job_id, delivery.get(args.job_id)['dispatch_token'],
+                                                 definitely_not_created=True, absence_evidence=absence_evidence(args.evidence))
         elif args.command in ('confirm', 'unknown'):
             record = delivery.get(args.job_id)
             result = delivery.reconcile_dispatch(args.job_id, record['dispatch_token'],
@@ -128,7 +159,7 @@ def main():
             from anime.subtitle_delivery_view import export_view
             try:
                 export_view(db, ROOT if Path(args.db).resolve() == (ROOT/'data/anime.db').resolve() else None)
-            except (OSError, ValueError, TypeError, KeyError):
+            except Exception:  # the state change is already saved; a view export problem must not look like a failed command
                 result['view_refresh_warning'] = 'Delivery operation saved; public progress view needs refresh'
         print(json.dumps(public(result), ensure_ascii=False, indent=2))
     finally:

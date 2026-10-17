@@ -51,8 +51,8 @@
     catch (_) { toast('本次来源已生效，但浏览器未能保存，刷新后可能丢失'); }
   }
   const danmuRetry = DanmuRetry.create();
-  const web = (path, body) => {
-    const run = () => api('/web' + path, body);
+  const web = (path, body, options) => {
+    const run = () => api('/web' + path, body, options);
     if (!(path.startsWith('/danmu/') || path === `/media/${id}/danmu`)) return run();
     const revision = [danmuRev, detailRev, searchRev];
     return danmuRetry.request(run, {
@@ -69,7 +69,7 @@
   window.addEventListener('pagehide', () => danmuRetry.close());
   window.addEventListener('pageshow', () => danmuRetry.resume());
   const alignment = DanmuAlignment.create({
-    request: (path, body) => web(`/media/${id}/alignment${path}`, body),
+    request: (path, body, options) => web(`/media/${id}/alignment${path}`, body, options),
     present: source => selected.includes(source), save: saveTiming,
     render: () => { if (!document.activeElement?.matches('#danmu-selected input')) renderSelected(); }, apply: applyDanmu,
   });
@@ -77,7 +77,7 @@
     if (sourceOnly) return;
     if (alignmentSites.includes(DanmuAlignment.sourceSite(source)) && source.count > 0) alignment.start(source, options);
   }
-  window.addEventListener('pagehide', () => selected.forEach(source => alignment.cancel(source)));
+  window.addEventListener('pagehide', () => selected.forEach(source => alignment.cancel(source, {keepalive: true})));
 
   function screenState(html) {
     $('#screen-state').innerHTML = html;
@@ -191,11 +191,14 @@
     }
     const delta = art.currentTime - lastPosition, playing = !art.video.paused && delta > 0 && delta < 35;
     lastPosition = art.currentTime;
-    await fetch(`/api/web/media/${id}/progress`, {
+    const body = { position: art.currentTime, duration: art.duration, playing, session: viewingSession, sequence: ++sequence };
+    const send = () => fetch(`/api/web/media/${id}/progress`, {
       method: 'POST', keepalive,
       headers: { 'Content-Type': 'application/json', 'X-Anime-Token': App.token },
-      body: JSON.stringify({ position: art.currentTime, duration: art.duration, playing }),
-    });
+      body: JSON.stringify(body),
+    }).then(response => { if (!response.ok) console.warn('进度未保存', response.status); }).catch(e => console.warn('进度未保存', e.message));
+    if (keepalive) return send();
+    progressQueue = progressQueue.then(send); return progressQueue;
   }
 
   function desktopButton() {
