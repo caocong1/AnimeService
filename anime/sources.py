@@ -17,7 +17,8 @@ def secure_public_url(url):
 # URL keeps the canonical host; only the request is rewritten to the preferred alias.
 SITE_HOSTS={'tokyotosho':('www.tokyotosho.info','www.tokyotosho.se','www.tokyo-tosho.net')}
 HOST_SITE={host:site for site,hosts in SITE_HOSTS.items() for host in hosts}
-HOST_SITE.update({'tokyotosho.info':'tokyotosho','tokyotosho.se':'tokyotosho','tokyo-tosho.net':'tokyotosho'})
+HOST_SITE.update({'tokyotosho.info':'tokyotosho','tokyotosho.se':'tokyotosho','tokyo-tosho.net':'tokyotosho',
+                  'bt4g.org':'bt4g','bt4gprx.com':'bt4g','1337x.to':'1337x','www.1337x.to':'1337x'})  # one site, one health record
 SITE_MIN_INTERVAL={'tokyotosho':10,'nyaa.si':5}  # seconds between requests to one site; other sites are not spaced
 EVENT_FAILURE_MARKS=(1,5,20,100)
 # TokyoTosho answers a search without matches with this fragment (served as text/html): a legitimate empty feed.
@@ -295,7 +296,7 @@ class Sources:
             self.db.execute('UPDATE sources SET archive_success=?,archive_error=? WHERE id=?',(time.time(),'',source['id']))
         except Exception as e:
             err=safe_error(e);self.db.execute('UPDATE sources SET archive_error=? WHERE id=?',(err,source['id']))
-            self.db.event('archive:'+str(source['id']),err,'warning')
+            if err!=source['archive_error']:self.db.event('archive:'+str(source['id']),err,'warning')  # a continuing condition is one warning
     def torrent(self,candidate):
         source=self.db.one('SELECT kind FROM sources WHERE id=?',(candidate.get('source_id'),))
         kind=source['kind'] if source else None

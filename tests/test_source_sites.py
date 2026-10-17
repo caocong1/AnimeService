@@ -179,3 +179,20 @@ def test_repeated_identical_failures_do_not_flood_events(setup,clock):
     web.fetch.side_effect=NetworkError('www.tokyotosho.info HTTP 502',502)  # a changed message is reported once
     assert not Sources(db,web).rss(fresh(db,rows[0]))
     assert len(db.rows('SELECT * FROM events WHERE scope=?',('source:%d'%rows[0]['id'],)))==4
+
+
+def test_archive_page_warnings_are_written_once_per_condition(setup):
+    db,q,e,r,c=cohort(setup)
+    sid=db.execute("INSERT INTO sources(show_id,kind,url,archive_url) VALUES(42,'mikan',?,?)",('https://mikanani.me/RSS/Bangumi?bangumiId=777','https://mikanani.me/Home/Bangumi/777'))
+    web=Mock();web.fetch.return_value=Mock(text='<html><body><table></table></body></html>')
+    for _ in range(5):Sources(db,web).archive(db.one('SELECT * FROM sources WHERE id=?',(sid,)))
+    assert web.fetch.call_count==5 and '未解析到条目' in db.one('SELECT archive_error FROM sources WHERE id=?',(sid,))['archive_error']
+    assert len(db.rows("SELECT * FROM events WHERE scope=?",('archive:%d'%sid,)))==1
+    web.fetch.side_effect=NetworkError('mikanani.me HTTP 503',503)
+    Sources(db,web).archive(db.one('SELECT * FROM sources WHERE id=?',(sid,)))
+    assert len(db.rows("SELECT * FROM events WHERE scope=?",('archive:%d'%sid,)))==2  # a changed condition is reported again
+
+
+def test_general_index_mirrors_share_one_site():
+    assert site_of('https://bt4g.org/search?q=x')=='bt4g'==site_of('https://bt4gprx.com/search?q=x')
+    assert site_of('https://www.1337x.to/search/x/1/')=='1337x'==site_of('https://1337x.to/x')
