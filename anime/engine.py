@@ -1,17 +1,21 @@
-import base64,datetime,json,os,re,shutil,threading,time
+import base64,datetime,hashlib,json,os,re,shutil,threading,time
 import psutil
 from pathlib import Path
 from .db import ROOT,STATES
 from .net import safe_error,NetworkError
 from .qbit import Qbit
-from .download_policy import require_submission_ready,fallback_receipt
+from .download_policy import require_submission_ready,fallback_receipt,Refusal
 from .fidelity import fidelity_blocker
 from .research_tasks import is_sample,sample_episode,sample_table,sample_allowed
-from .sources import Sources,Catalog
+from .sources import Sources,Catalog,EVENT_FAILURE_MARKS
 from .native_indexes import candidate_mapping
 from .releases import Rejected,validate_title,bdecode,select_files,norm,episodes_of,season_of
 
 RELIABLE_GROUPS=['喵萌奶茶屋','动漫国字幕组','LoliHouse','桜都字幕组','ANi','绿茶字幕组','悠哈璃羽字幕社']
+# Settings the submission gates read; while none of them, the show's policy or the task change, a refusal stands.
+GATE_SETTINGS=('downloader_preference','thunder_ui_enabled','qbit_fallback_enabled','subtitle_clean_media_preferred',
+               'subtitle_studio_enabled','native_indexes_enabled','general_indexes_enabled','source_publisher_blacklist',
+               'viewing_workflow_policy')
 
 def release_priority(candidate):
     title=norm(candidate['title'][:150])
@@ -88,6 +92,34 @@ class Engine:
             if rows[0].get('progress',0)<1:self.qb.stop(t['hash'])
         self.db.execute("UPDATE tasks SET status='held',updated=? WHERE hash=?",(time.time(),t['hash']))
         self.db.execute("UPDATE episodes SET status='held' WHERE hash=? AND status NOT IN ('complete','file_missing','error')",(t['hash'],))
+    def gate_key(self,t):
+        sid=t['show_id'];policy=self.db.one('SELECT config FROM source_policies WHERE show_id=?',(sid,))
+        parts={k:self.db.get(k) for k in GATE_SETTINGS}
+        parts.update(policy=policy['config'] if policy else None,review_wanted=self.db.review_wanted(sid),
+                     fallback=self.db.get('qbit_fallback_'+t['hash']),
+                     show=self.db.one('SELECT state,authorized,selected,auto_download,mapping,cleanup_hold FROM shows WHERE id=?',(sid,)),
+                     task=[t['title'],t['status'],t.get('acknowledged'),t.get('provider'),t['selection']])
+        return hashlib.sha256(json.dumps(parts,sort_keys=True,default=str).encode()).hexdigest()
+    def refused(self,t):
+        """A recorded refusal stands while its inputs are unchanged and its recheck time has not come; an explicit check overrides."""
+        record=self.db.get('task_failure_'+t['hash'],{})
+        if not record.get('next') or time.time()>=record['next'] or record.get('gate_key')!=self.gate_key(t):return False
+        return self.db.get('check_requested',0)<=self.db.get('check_completed',0)
+    def note_failure(self,h,t,error,message):
+        """Keep one record per task: the reason, how often and since when; report repeats sparsely."""
+        key='task_failure_'+h;prior=self.db.get(key,{});now=time.time();same=prior.get('reason')==message
+        record={'reason':message,'attempts':prior.get('attempts',0)+1 if same else 1,'since':prior.get('since',now) if same else now,'next':0,'gate_key':''}
+        if isinstance(error,Refusal):  # a policy refusal is final until its inputs change; recheck at most every six hours
+            record.update(gate_key=self.gate_key(t),next=now+min(21600,600*2**min(record['attempts']-1,5)))
+        self.db.set(key,record)
+        if not same or record['attempts'] in EVENT_FAILURE_MARKS or record['attempts']%100==0:self.db.event('task:'+h,message,'error')
+    def clear_failure(self,h):
+        if self.db.get('task_failure_'+h) is not None:self.db.execute('DELETE FROM kv WHERE key=?',('task_failure_'+h,))
+    def recheck_due(self,t,qt):
+        """Completed packages are re-verified hourly, at once on a downloader error state, or on an explicit check."""
+        if qt.get('state') in ('error','missingFiles'):return True
+        if self.db.get('check_requested',0)>self.db.get('check_completed',0):return True
+        return time.time()-self.db.get('task_verified_'+t['hash'],0)>=3600
     def inventory_matches(self,sid,mapping=None):
         p=self.db.path.parent/'inventory.json'
         if not p.exists():return []
@@ -167,8 +199,11 @@ class Engine:
         except ValueError as e:
             self.db.execute("UPDATE candidates SET status='review',reason=? WHERE id=?",(str(e)[:300],candidate['id']))
         except Exception as e:
-            self.db.execute("UPDATE candidates SET status='retry',reason=? WHERE id=?",(safe_error(e),candidate['id']))
-            self.db.event('candidate:'+str(candidate['id']),safe_error(e),'error')
+            message=safe_error(e);key='candidate_retry_'+str(candidate['id']);prior=self.db.get(key,{})
+            attempts=prior.get('attempts',0)+1 if prior.get('reason')==message else 1
+            self.db.set(key,{'reason':message,'attempts':attempts,'next':time.time()+min(21600,300*2**min(attempts-1,6))})
+            self.db.execute("UPDATE candidates SET status='retry',reason=? WHERE id=?",(message,candidate['id']))
+            if attempts in EVENT_FAILURE_MARKS or attempts%100==0:self.db.event('candidate:'+str(candidate['id']),message,'error')
     def dispatch(self,t):
         if t['status']=='linked':return
         h=t['hash'];sid=t['show_id'];selection=json.loads(t['selection'])
@@ -226,6 +261,7 @@ class Engine:
                 if not is_sample(t):
                     for ep,f in desired.items():c.execute('UPDATE episodes SET file_index=?,status=? WHERE show_id=? AND episode=? AND hash=?',(indices[f['name']],'downloading',sid,ep,h))
             self.db.event('task:'+h,'已核验文件选择并确认启动：'+','.join(map(str,desired)))
+            self.clear_failure(h)
     def reconcile(self):
         tasks=self.db.rows("SELECT * FROM tasks WHERE status NOT IN ('cleaned','linked') ORDER BY created")
         qbit_available=True
@@ -251,12 +287,14 @@ class Engine:
                     if not qbit_available:continue
                     if not self.db.eligible(sid):self.hold(t);continue
                     if t['status'] in ('intent','uncertain','held'):
+                        if self.refused(t):continue
                         self.dispatch(t);continue
                     qt=byhash.get(h)
                     if not qt:raise Rejected('下载器中未找到已确认任务；不会自动重下')
                     if not self.qb.owned(qt):raise Rejected('项目任务所有权不匹配')
                     if Path(qt['save_path']).resolve()!=Path(t['save_path']).resolve():raise Rejected('任务保存目录与台账不符')
                     if t['status']=='review':continue
+                    if t['status']=='complete' and not self.recheck_due(t,qt):continue
                     eps=self.db.rows('SELECT * FROM episodes WHERE hash=?',(h,));files=self.qb.files(h)
                     self.verify_qbit_files(t,files)
                     queue=self.db.one('SELECT state,lease,committing FROM thunder_queue WHERE hash=?',(h,))
@@ -295,12 +333,15 @@ class Engine:
                         if sample and done:
                             self.db.execute(f'UPDATE {sample_table(t)} SET path=?,updated=? WHERE hash=?',(str(p),time.time(),h))
                     self.db.execute("UPDATE episodes SET first_completed=coalesce(first_completed,?) WHERE hash=? AND status='complete'",(time.time(),h))
-                    self.db.execute('UPDATE tasks SET status=?,updated=?,error=? WHERE hash=?',('complete' if completed else 'downloading',time.time(),'' if qt.get('state') not in ('error','missingFiles') else qt['state'],h))
+                    status='complete' if completed else 'downloading';error='' if qt.get('state') not in ('error','missingFiles') else qt['state']
+                    if (status,error)!=(t['status'],t['error']):self.db.execute('UPDATE tasks SET status=?,updated=?,error=? WHERE hash=?',(status,time.time(),error,h))
+                    if status=='complete':self.db.set('task_verified_'+h,time.time())
+                    self.clear_failure(h)
             except Exception as e:
                 message=str(e) if isinstance(e,Rejected) else safe_error(e)
                 if isinstance(e,Rejected):self.db.execute("UPDATE tasks SET status='review',error=?,updated=? WHERE hash=?",(message,time.time(),h))
-                else:self.db.execute('UPDATE tasks SET error=?,updated=? WHERE hash=?',(message,time.time(),h))
-                self.db.event('task:'+h,message,'error')
+                elif message!=(t or {}).get('error'):self.db.execute('UPDATE tasks SET error=?,updated=? WHERE hash=?',(message,time.time(),h))
+                self.note_failure(h,t or {'hash':h,'show_id':sid,'title':'','status':'','selection':''},e,message)
     def cycle(self,force=False):
         if not self.cycle_lock.acquire(blocking=False):return
         try:
@@ -312,6 +353,7 @@ class Engine:
             if hasattr(self,'enroll_source_reviews'):self.enroll_source_reviews()
             self.source_review.discover_sources()
             self.maintenance()
+            refreshed=[]
             for source in self.db.rows("""SELECT sources.* FROM sources JOIN shows ON shows.id=sources.show_id
                 WHERE sources.enabled=1 AND shows.authorized=1 AND shows.cleanup_hold=0
                 AND (shows.state IN ('trial','watching') OR (shows.auto_download=1 AND shows.state='wish'))
@@ -323,15 +365,10 @@ class Engine:
                 if force or source['next_attempt']<=time.time():
                     ok=self.sources.rss(source)
                     if ok and (force or source['failures'] or not source['archive_success'] or time.time()-source['archive_success']>21600):self.sources.archive(source)
-                    if ok:
-                        if self.db.review_wanted(source['show_id']) and self.source_review.policy(source['show_id']).get('mode')=='sampling':
-                            try:self.source_review.start(source['show_id'])
-                            except Exception as ex:self.db.event('source-review:'+str(source['show_id']),safe_error(ex),'warning')
-                        candidates=self.db.rows("SELECT * FROM candidates WHERE show_id=? AND status IN ('discovered','retry','source_wait') ORDER BY source_id,id DESC",(source['show_id'],))
-                        candidates.sort(key=lambda c:(self.source_review.priority(c),release_priority(c)))
-                        for c in candidates[:300]:
-                            if self.stop_event.is_set():break
-                            self.ingest(c)
+                    if ok and source['show_id'] not in refreshed:refreshed.append(source['show_id'])
+            for sid in refreshed:  # a show's pending candidates once per cycle, however many of its sources refreshed
+                if self.stop_event.is_set():break
+                self.ingest_show(sid)
             # Air dates for every tracked show, not just downloading ones, so the board can tell aired from future.
             for show in self.db.rows("SELECT id FROM shows WHERE selected=1 AND state IN ('trial','watching','wish','paused')"):
                 if self.stop_event.is_set():break
@@ -347,6 +384,16 @@ class Engine:
             self.db.set('check_completed',requested)
             self.db.set('check_finished_at',time.time())
         finally:self.cycle_lock.release()
+    def ingest_show(self,sid):
+        if self.db.review_wanted(sid) and self.source_review.policy(sid).get('mode')=='sampling':
+            try:self.source_review.start(sid)
+            except Exception as ex:self.db.event('source-review:'+str(sid),safe_error(ex),'warning')
+        candidates=self.db.rows("SELECT * FROM candidates WHERE show_id=? AND status IN ('discovered','retry','source_wait') ORDER BY source_id,id DESC",(sid,))
+        candidates.sort(key=lambda c:(self.source_review.priority(c),release_priority(c)));now=time.time()
+        for c in candidates[:300]:
+            if self.stop_event.is_set():break
+            if c['status']=='retry' and self.db.get('candidate_retry_'+str(c['id']),{}).get('next',0)>now:continue
+            self.ingest(c)
     def verify_qbit_files(self,t,files):
         selection=json.loads(t['selection']);h,manifest=bdecode((self.cache/(t['hash']+'.torrent')).read_bytes(),include_padding=True)
         plain=[{k:f[k] for k in ('index','name','size')} for f in manifest]

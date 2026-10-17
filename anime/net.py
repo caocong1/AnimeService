@@ -1,4 +1,5 @@
 import re,time
+from pathlib import Path
 from urllib.parse import urlparse
 import requests
 
@@ -21,8 +22,17 @@ def retry_after(response):
 
 def safe_error(e):
     # Never retain request URLs, headers, response bodies, or auth-bearing exception strings.
-    if isinstance(e,NetworkError):return str(e)
-    return type(e).__name__+'：请求失败，请检查网络或本机接口'
+    if isinstance(e,NetworkError) or getattr(e,'safe_message',False):return str(e)
+    return type(e).__name__+'：请求失败，请检查网络或本机接口'+where(e)
+
+def where(e):
+    """Innermost frame of this package as module.function:line; no paths, arguments or values."""
+    tb=e.__traceback__;spot=''
+    while tb:
+        code=tb.tb_frame.f_code
+        if re.search(r'[\\/]anime[\\/][^\\/]+\.py$',code.co_filename):spot=f'（{Path(code.co_filename).stem}.{code.co_name}:{tb.tb_lineno}）'
+        tb=tb.tb_next
+    return spot
 
 def validate_url(url):
     p=urlparse(url)

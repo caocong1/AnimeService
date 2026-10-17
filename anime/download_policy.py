@@ -11,6 +11,11 @@ def fallback_receipt(db,t):
 THUNDER_PENDING = '迅雷优先；自动接入尚待验证，已暂停自动提交。不会直接改用qB；需先确认迅雷任务失败且已停止，才能交接备用下载器。'
 
 
+class Refusal(ValueError):
+    """A submission gate said no for a stated reason; the text is ours and safe to record and show."""
+    safe_message=True
+
+
 def submission_blocker(db):
     if db.get('downloader_preference', 'qbit') == 'thunder_first' and not db.get('thunder_ui_enabled',False):
         # No verified Thunder writer/stop adapter exists yet. A KV readiness flag
@@ -22,13 +27,13 @@ def submission_blocker(db):
 def require_submission_ready(db,task=None):
     if task:
         blocked=source_blocker(db,task['title'],task['selection'])
-        if blocked:raise ValueError(blocked)
+        if blocked:raise Refusal(blocked)
         blocked=task_clean_blocker(db,task)
-        if blocked:raise ValueError(blocked)
+        if blocked:raise Refusal(blocked)
     if task and fallback_receipt(db,task):return
     reason = submission_blocker(db)
     if reason:
-        raise ValueError(reason)
+        raise Refusal(reason)
 
 
 def status(db):
