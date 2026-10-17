@@ -15,7 +15,7 @@ RELIABLE_GROUPS=['喵萌奶茶屋','动漫国字幕组','LoliHouse','桜都字�
 # Settings the submission gates read; while none of them, the show's policy or the task change, a refusal stands.
 GATE_SETTINGS=('downloader_preference','thunder_ui_enabled','qbit_fallback_enabled','subtitle_clean_media_preferred',
                'subtitle_studio_enabled','native_indexes_enabled','general_indexes_enabled','source_publisher_blacklist',
-               'viewing_workflow_policy')
+               'viewing_workflow_policy','source_fidelity')
 
 def release_priority(candidate):
     title=norm(candidate['title'][:150])
@@ -97,20 +97,27 @@ class Engine:
         parts={k:self.db.get(k) for k in GATE_SETTINGS}
         parts.update(policy=policy['config'] if policy else None,review_wanted=self.db.review_wanted(sid),
                      fallback=self.db.get('qbit_fallback_'+t['hash']),
-                     show=self.db.one('SELECT state,authorized,selected,auto_download,mapping,cleanup_hold FROM shows WHERE id=?',(sid,)),
-                     task=[t['title'],t['status'],t.get('acknowledged'),t.get('provider'),t['selection']])
+                     show=self.db.one('SELECT state,authorized,selected,auto_download,mapping,cleanup_hold,total FROM shows WHERE id=?',(sid,)),
+                     task=[t['title'],t['status'],t.get('acknowledged'),t.get('provider'),t['selection'],t.get('purpose'),t.get('external_id')],
+                     candidates=self.db.rows('''SELECT id,title,source_metadata FROM candidates WHERE show_id=? AND
+                         (hash=? OR id IN (SELECT candidate_id FROM source_samples WHERE hash=?)
+                         OR id IN (SELECT candidate_id FROM subtitle_samples WHERE hash=?)) ORDER BY id''',(sid,t['hash'],t['hash'],t['hash'])),
+                     references=self.db.rows('SELECT evidence FROM subtitle_samples WHERE hash=? AND show_id=? ORDER BY candidate_id',(t['hash'],sid)))
         return hashlib.sha256(json.dumps(parts,sort_keys=True,default=str).encode()).hexdigest()
     def refused(self,t):
         """A recorded refusal stands while its inputs are unchanged and its recheck time has not come; an explicit check overrides."""
+        # Unknown/already acknowledged submissions must continue reconciliation.
+        if t['status']=='uncertain' or t.get('acknowledged') or t.get('external_id'):return False
         record=self.db.get('task_failure_'+t['hash'],{})
         if not record.get('next') or time.time()>=record['next'] or record.get('gate_key')!=self.gate_key(t):return False
-        return self.db.get('check_requested',0)<=self.db.get('check_completed',0)
+        return self.db.get('check_requested',0)<=max(self.db.get('check_completed',0),record.get('checked_request',0))
     def note_failure(self,h,t,error,message):
         """Keep one record per task: the reason, how often and since when; report repeats sparsely."""
         key='task_failure_'+h;prior=self.db.get(key,{});now=time.time();same=prior.get('reason')==message
-        record={'reason':message,'attempts':prior.get('attempts',0)+1 if same else 1,'since':prior.get('since',now) if same else now,'next':0,'gate_key':''}
+        record={'reason':message,'attempts':prior.get('attempts',0)+1 if same else 1,'since':prior.get('since',now) if same else now,
+                'next':0,'gate_key':'','checked_request':self.db.get('check_requested',0)}
         if isinstance(error,Refusal):  # a policy refusal is final until its inputs change; recheck at most every six hours
-            record.update(gate_key=self.gate_key(t),next=now+min(21600,600*2**min(record['attempts']-1,5)))
+            record.update(gate_key=self.gate_key(t),next=now+min(21600,600*2**min(record['attempts']-1,6)))
         self.db.set(key,record)
         if not same or record['attempts'] in EVENT_FAILURE_MARKS or record['attempts']%100==0:self.db.event('task:'+h,message,'error')
     def clear_failure(self,h):
@@ -118,8 +125,12 @@ class Engine:
     def recheck_due(self,t,qt):
         """Completed packages are re-verified hourly, at once on a downloader error state, or on an explicit check."""
         if qt.get('state') in ('error','missingFiles'):return True
-        if self.db.get('check_requested',0)>self.db.get('check_completed',0):return True
+        verified=self.db.get('task_verified_inputs_'+t['hash'],{})
+        if self.db.get('check_requested',0)>max(self.db.get('check_completed',0),verified.get('checked_request',0)):return True
+        if verified.get('key')!=self.verification_key(t,qt):return True
         return time.time()-self.db.get('task_verified_'+t['hash'],0)>=3600
+    def verification_key(self,t,qt):
+        return hashlib.sha256(json.dumps([self.gate_key(t),qt.get('progress'),qt.get('amount_left')]).encode()).hexdigest()
     def inventory_matches(self,sid,mapping=None):
         p=self.db.path.parent/'inventory.json'
         if not p.exists():return []
@@ -203,7 +214,7 @@ class Engine:
         except Exception as e:
             message=safe_error(e);key='candidate_retry_'+str(candidate['id']);prior=self.db.get(key,{})
             attempts=prior.get('attempts',0)+1 if prior.get('reason')==message else 1
-            self.db.set(key,{'reason':message,'attempts':attempts,'next':time.time()+min(21600,300*2**min(attempts-1,6))})
+            self.db.set(key,{'reason':message,'attempts':attempts,'next':time.time()+min(21600,300*2**min(attempts-1,7))})
             self.db.execute("UPDATE candidates SET status='retry',reason=? WHERE id=?",(message,candidate['id']))
             if attempts in EVENT_FAILURE_MARKS or attempts%100==0:self.db.event('candidate:'+str(candidate['id']),message,'error')
     def dispatch(self,t):
@@ -337,11 +348,16 @@ class Engine:
                     self.db.execute("UPDATE episodes SET first_completed=coalesce(first_completed,?) WHERE hash=? AND status='complete'",(time.time(),h))
                     status='complete' if completed else 'downloading';error='' if qt.get('state') not in ('error','missingFiles') else qt['state']
                     if (status,error)!=(t['status'],t['error']):self.db.execute('UPDATE tasks SET status=?,updated=?,error=? WHERE hash=?',(status,time.time(),error,h))
-                    if status=='complete':self.db.set('task_verified_'+h,time.time())
+                    if status=='complete':
+                        self.db.set('task_verified_'+h,time.time())
+                        self.db.set('task_verified_inputs_'+h,{'key':self.verification_key({**t,'status':status},qt),
+                            'checked_request':self.db.get('check_requested',0)})
                     self.clear_failure(h)
             except Exception as e:
                 message=str(e) if isinstance(e,Rejected) else safe_error(e)
-                if isinstance(e,Rejected):self.db.execute("UPDATE tasks SET status='review',error=?,updated=? WHERE hash=?",(message,time.time(),h))
+                if isinstance(e,Rejected):
+                    if (t or {}).get('status')!='review' or (t or {}).get('error')!=message:
+                        self.db.execute("UPDATE tasks SET status='review',error=?,updated=? WHERE hash=?",(message,time.time(),h))
                 elif message!=(t or {}).get('error'):self.db.execute('UPDATE tasks SET error=?,updated=? WHERE hash=?',(message,time.time(),h))
                 self.note_failure(h,t or {'hash':h,'show_id':sid,'title':'','status':'','selection':''},e,message)
     def cycle(self,force=False):
@@ -391,10 +407,11 @@ class Engine:
             try:self.source_review.start(sid)
             except Exception as ex:self.db.event('source-review:'+str(sid),safe_error(ex),'warning')
         candidates=self.db.rows("SELECT * FROM candidates WHERE show_id=? AND status IN ('discovered','retry','source_wait') ORDER BY source_id,id DESC",(sid,))
-        candidates.sort(key=lambda c:(self.source_review.priority(c),release_priority(c)));now=time.time()
+        now=time.time()
+        candidates=[c for c in candidates if c['status']!='retry' or self.db.get('candidate_retry_'+str(c['id']),{}).get('next',0)<=now]
+        candidates.sort(key=lambda c:(self.source_review.priority(c),release_priority(c)))
         for c in candidates[:300]:
             if self.stop_event.is_set():break
-            if c['status']=='retry' and self.db.get('candidate_retry_'+str(c['id']),{}).get('next',0)>now:continue
             self.ingest(c)
     def verify_qbit_files(self,t,files):
         selection=json.loads(t['selection']);h,manifest=bdecode((self.cache/(t['hash']+'.torrent')).read_bytes(),include_padding=True)
