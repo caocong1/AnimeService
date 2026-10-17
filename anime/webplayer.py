@@ -69,18 +69,27 @@ class WebPlayer:
                 episode_identity TEXT NOT NULL,
                 PRIMARY KEY(media_id,source_key))''')
 
-    def media(self):
+    def inventory_rows(self):
+        """Legacy inventory entries with their media keys, hashed once per inventory file version rather than per request."""
         inventory=self.db.path.parent/'inventory.json'
         if inventory.exists() and inventory.stat().st_mtime_ns!=self.inventory_mtime:
             self.inventory=json.loads(inventory.read_text(encoding='utf-8'));self.inventory_mtime=inventory.stat().st_mtime_ns
+            self._inventory_rows=None
+        if getattr(self,'_inventory_rows',None) is None or self._inventory_source is not self.inventory:
+            rows=[]
+            for x in self.inventory:
+                if x.get('legacy_active'):continue
+                path=Path(x['path']);key=hashlib.sha256(str(path).lower().encode()).hexdigest()[:32]
+                rows.append((x,{'id':key,'name':path.name,'folder':path.parent.name,'path':str(path),'size':x['size'],'legacy':True}))
+            self._inventory_rows=rows;self._inventory_source=self.inventory
+        return self._inventory_rows
+
+    def media(self):
         rows={}
-        blocked=media_filter(self.db)
-        for x in self.inventory:
-            if x.get('legacy_active'):continue
+        blocked=media_filter(self.db)  # the blacklist is read on every call, so a ban applies at once
+        for x,row in self.inventory_rows():
             if blocked(x):continue
-            path=Path(x['path'])
-            key=hashlib.sha256(str(path).lower().encode()).hexdigest()[:32]
-            rows[key]={'id':key,'name':path.name,'folder':path.parent.name,'path':str(path),'size':x['size'],'legacy':True}
+            rows[row['id']]=dict(row)
         for x in self.db.rows("SELECT episodes.*,shows.title FROM episodes JOIN shows ON shows.id=episodes.show_id WHERE episodes.status='complete' OR (episodes.status='legacy_unverified' AND episodes.hash IS NULL)"):
             if blocked(x):continue
             key=hashlib.sha256(x['path'].lower().encode()).hexdigest()[:32]
