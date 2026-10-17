@@ -4,8 +4,14 @@ import requests
 
 HOSTS={'api.bgm.tv','bgm.tv','bangumi.tv','mikanani.me','mikanime.tv','mikanani.hacgn.fun',
        'share.dmhy.org','dl.dmhy.org','nyaa.si','www.tokyotosho.info','tokyotosho.info',
+       'www.tokyotosho.se','tokyotosho.se','www.tokyo-tosho.net','tokyo-tosho.net',
        'bt4g.org','bt4gprx.com','1337x.to','www.1337x.to','itorrents.net'}
-class NetworkError(RuntimeError):pass
+# Responses that mean the site, not one feed, is unavailable: blocks, throttling, outages.
+SITE_WIDE_STATUSES={403,408,425,429,500,502,503,504}
+class NetworkError(RuntimeError):
+    def __init__(self,message,status=None,site_wide=None):
+        super().__init__(message);self.status=status
+        self.site_wide=site_wide if site_wide is not None else (status is None or status in SITE_WIDE_STATUSES)
 
 def safe_error(e):
     # Never retain request URLs, headers, response bodies, or auth-bearing exception strings.
@@ -33,7 +39,7 @@ class Web:
                     if r.is_redirect:
                         from urllib.parse import urljoin
                         target=validate_url(urljoin(target,r.headers['Location']));continue
-                    if not r.ok:raise NetworkError(f'{urlparse(url).hostname} HTTP {r.status_code}')
+                    if not r.ok:raise NetworkError(f'{urlparse(url).hostname} HTTP {r.status_code}',r.status_code)
                     if len(r.content)>12*1024*1024:raise NetworkError('响应超过12MiB限制')
                     if 'text/' in r.headers.get('Content-Type','') and 'charset=' not in r.headers.get('Content-Type','').lower():r.encoding='utf-8'
                     return r

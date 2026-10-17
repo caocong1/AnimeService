@@ -8,7 +8,8 @@ from urllib.parse import urlencode,urlparse
 from .releases import validate_title,Rejected,bdecode
 
 KINDS={'nyaa','tokyotosho','bt4g','1337x'}
-INDEX_HOSTS={'nyaa.si','www.tokyotosho.info','tokyotosho.info','bt4g.org','bt4gprx.com','1337x.to','www.1337x.to'}
+INDEX_HOSTS={'nyaa.si','www.tokyotosho.info','tokyotosho.info','www.tokyotosho.se','tokyotosho.se',
+             'www.tokyo-tosho.net','tokyo-tosho.net','bt4g.org','bt4gprx.com','1337x.to','www.1337x.to'}
 
 
 def metadata(candidate):

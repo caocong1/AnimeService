@@ -12,6 +12,8 @@
 
 - Nyaa使用已核实的`https://nyaa.si/`，动画搜索RSS`page=rss&c=1_0`，覆盖生肉分类及明确声明MultiSub/软字幕的发布。`nyaa.eu`代理不接入。
 - TokyoTosho使用`https://www.tokyotosho.info/rss.php`，`filter=7`为Raws、`filter=1`为Anime。种子链接经常指向Nyaa，保留Tokyo详情与Nyaa种子地址两份来源。
+  该站有三个官方域名`www.tokyotosho.info`、`www.tokyotosho.se`、`www.tokyo-tosho.net`：来源表只记录`.info`规范地址，抓取时按站点健康轮换域名（某域名返回站点级错误后下一次换下一个域名），候选详情链接接受这三个域名。
+- 站点级健康（`kv site_health_<站点>`）：同一站点的全部来源共享失败退避（首次60秒，指数增长，上限1小时，成功即清零）与最小请求间隔（tokyotosho 10秒、nyaa 5秒，可用`kv site_min_interval_seconds`按站点覆盖；蜜柑等不限制）。被间隔推迟的来源不计失败。HTTP 403/408/425/429/5xx、连接失败以及返回HTML/验证页记为站点级故障；单个feed格式错误只影响该来源（退避上限300秒）。同一来源连续相同错误只在第1、5、20、100次及每100次写事件。
 - 搜索词来自既有核验别名和原名，只供发现；标题和实际torrent文件仍按完整身份与明确季号核验。续作搜索缺季号不入候选；不借RSS关联推断同季。
 - RSS通常仅返回有限的最新条目；Nyaa当前75、Tokyo最多150，持续轮询后持久保存发现，不宣称全站历史已覆盖。
 

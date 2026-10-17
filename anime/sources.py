@@ -13,6 +13,49 @@ def secure_public_url(url):
         return 'https:'+url[5:]
     return url
 
+# Alternate hosts of one site share health, backoff and request spacing. The stored source
+# URL keeps the canonical host; only the request is rewritten to the preferred alias.
+SITE_HOSTS={'tokyotosho':('www.tokyotosho.info','www.tokyotosho.se','www.tokyo-tosho.net')}
+HOST_SITE={host:site for site,hosts in SITE_HOSTS.items() for host in hosts}
+HOST_SITE.update({'tokyotosho.info':'tokyotosho','tokyotosho.se':'tokyotosho','tokyo-tosho.net':'tokyotosho'})
+SITE_MIN_INTERVAL={'tokyotosho':10,'nyaa.si':5}  # seconds between requests to one site; other sites are not spaced
+EVENT_FAILURE_MARKS=(1,5,20,100)
+
+
+def site_of(url):
+    host=urlparse(url).hostname or ''
+    return HOST_SITE.get(host,host)
+
+
+def site_backoff_seconds(failures):
+    return min(3600,60*2**min(max(failures,1)-1,6))
+
+
+def preferred_host(url,state):
+    hosts=SITE_HOSTS.get(site_of(url))
+    if not hosts:return None
+    return state.get('host') if state.get('host') in hosts else hosts[0]
+
+
+def request_url(url,state):
+    host=preferred_host(url,state)
+    return urlparse(url)._replace(netloc=host).geturl() if host else url
+
+
+def next_host(url,state):
+    hosts=SITE_HOSTS.get(site_of(url))
+    if not hosts:return state.get('host')
+    return hosts[(hosts.index(preferred_host(url,state))+1)%len(hosts)]
+
+
+def looks_like_page(response):
+    """A 200 that carries HTML instead of a feed: a challenge, block or error page."""
+    try:content_type=str(response.headers.get('Content-Type',''))
+    except Exception:content_type=''
+    if 'html' in content_type.lower():return True
+    head=bytes(response.content[:4096]).lower()
+    return b'<rss' not in head and b'<feed' not in head and b'<?xml' not in head and b'<html' in head
+
 class Catalog:
     def __init__(self,store,web=None):self.db=store;self.web=web or Web()
     def sync_quarter(self,year,month):
@@ -116,7 +159,7 @@ class Catalog:
 
 def parse_rss(content,kind=None):
     feed=feedparser.parse(content)
-    if not feed.get('version') or (feed.bozo and not feed.entries):raise NetworkError('RSS格式无效或返回了验证页面')
+    if not feed.get('version') or (feed.bozo and not feed.entries):raise NetworkError('RSS格式无效或返回了验证页面',200,site_wide=False)
     out=[]
     for e in feed.entries:
         enclosures=e.get('enclosures',[]);link=secure_public_url(e.get('link',''))
@@ -169,21 +212,38 @@ class Sources:
         if source['kind'] in KINDS and not eligible(self.db,source['show_id'],source['kind']):return False
         from .general_indexes import GENERAL_KINDS,site_backoff,search_1337x,record_failure
         if source['kind'] in GENERAL_KINDS and site_backoff(self.db,source):return False
-        now=time.time();self.db.execute('UPDATE sources SET last_attempt=? WHERE id=?',(now,source['id']))
+        site=site_of(source['url']);key='site_health_'+site;state=self.db.get(key,{});now=time.time()
+        if state.get('next_attempt',0)>now:  # the whole site is backing off: spend no request on it
+            self.db.execute('UPDATE sources SET next_attempt=? WHERE id=?',(state['next_attempt'],source['id']));return False
+        spacing=self.db.get('site_min_interval_seconds',{}).get(site,SITE_MIN_INTERVAL.get(site,0))
+        if now-state.get('last_request',0)<spacing:  # deferred to keep the site's request rate low; not a failure
+            self.db.execute('UPDATE sources SET next_attempt=? WHERE id=?',(state.get('last_request',0)+spacing,source['id']));return False
+        state['last_request']=now;self.db.set(key,state)
+        self.db.execute('UPDATE sources SET last_attempt=? WHERE id=?',(now,source['id']))
         try:
-            items=search_1337x(self.db,self.web,source) if source['kind']=='1337x' else parse_rss(self.web.fetch(source['url']).content,source['kind'])
+            if source['kind']=='1337x':items=search_1337x(self.db,self.web,source)
+            else:
+                r=self.web.fetch(request_url(source['url'],state))
+                if looks_like_page(r):raise NetworkError(site+' 返回验证页面或HTML而非RSS',200,site_wide=True)
+                items=parse_rss(r.content,source['kind'])
             items=self.remember(source,items)
             interval=self.db.get('poll_seconds',180)
             if self.db.review_wanted(source['show_id']):interval=min(interval,180)
             if source['kind'] in GENERAL_KINDS:interval=3600
             self.db.execute('UPDATE sources SET last_success=?,next_attempt=?,failures=0,error=?,latest=? WHERE id=?',
                 (now,now+interval,'',items[0]['title'] if items else '本次RSS无条目',source['id']))
+            if state.get('failures') or state.get('error'):self.db.set(key,{**state,'failures':0,'next_attempt':0,'error':''})
             return True
         except Exception as e:
             if source['kind'] in GENERAL_KINDS:record_failure(self.db,source,e)
-            n=source['failures']+1;err=safe_error(e)
-            self.db.execute('UPDATE sources SET failures=?,next_attempt=?,error=? WHERE id=?',(n,now+min(300,15*2**min(n,5)),err,source['id']))
-            self.db.event('source:'+str(source['id']),err,'error');return False
+            n=source['failures']+1;err=safe_error(e);retry=now+min(300,15*2**min(n,5))
+            if isinstance(e,NetworkError) and e.site_wide:  # shared backoff and alias rotation for the whole site
+                failures=state.get('failures',0)+1
+                state.update(failures=failures,next_attempt=now+site_backoff_seconds(failures),error=err,host=next_host(source['url'],state))
+                self.db.set(key,state);retry=max(retry,state['next_attempt'])
+            self.db.execute('UPDATE sources SET failures=?,next_attempt=?,error=? WHERE id=?',(n,retry,err,source['id']))
+            if err!=source['error'] or n in EVENT_FAILURE_MARKS or n%100==0:self.db.event('source:'+str(source['id']),err,'error')
+            return False
     def archive(self,source):
         if not source['archive_url']:return
         try:
