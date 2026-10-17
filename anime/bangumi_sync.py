@@ -4,6 +4,7 @@ import threading
 import time
 from .bangumi import BangumiClient, BangumiError, episode_map
 from .bangumi_auth import TokenVault
+from .net import safe_error
 
 TYPES = {'wish': 1, 'completed': 2, 'trial': 3, 'watching': 3, 'paused': 4, 'dropped': 5}
 OPTIONS = {'enabled': False, 'private_new': True, 'ratings': False, 'comments': False}
@@ -235,6 +236,11 @@ class BangumiSync:
                 credentials = self.vault.read()
                 if not credentials or credentials['id'] != account['id']:
                     raise ValueError('Bangumi 授权与账号不匹配，请重新连接')
+            except Exception as error:  # only a credential problem asks for a new login
+                self.db.set('bangumi_sync_health', {'ok': False, 'auth_required': True,
+                    'error': str(error) if isinstance(error, ValueError) else 'Bangumi 本机授权不可用，请重新连接'})
+                return
+            try:
                 client = self.client_factory(credentials['token'])
                 for job in self.db.rows("SELECT * FROM bangumi_sync_queue WHERE state IN ('pending','error') AND next_attempt<=? ORDER BY updated DESC,show_id LIMIT 4", (time.time(),)):
                     try:
@@ -258,9 +264,12 @@ class BangumiSync:
                             self.db.set('bangumi_sync_health', {'ok': False, 'error': message,
                                 'auth_required': e.status in (401, 403), 'next_attempt': time.time() + delay})
                             break
-            except Exception:
-                self.db.set('bangumi_sync_health', {'ok': False, 'auth_required': True,
-                                                  'error': 'Bangumi 本机授权不可用，请重新连接'})
+            except Exception as error:
+                # A busy database, a client that cannot be built or an unexpected shape is not a
+                # revoked login: back off (a minute doubling to an hour) and keep the queue.
+                failures = (health.get('failures', 0) if not health.get('ok') else 0) + 1
+                self.db.set('bangumi_sync_health', {'ok': False, 'auth_required': False, 'error': safe_error(error),
+                    'failures': failures, 'next_attempt': time.time() + min(3600, 60 * 2 ** min(failures - 1, 6))})
 
     def run(self, stop):
         while not stop.is_set():

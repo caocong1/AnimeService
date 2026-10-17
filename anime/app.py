@@ -400,6 +400,7 @@ def create_app(db=None,engine=None,start_worker=True):
         if 'numbering' in old_mapping:m['numbering']=old_mapping['numbering']
         if not isinstance(m.get('aliases'),list) or not m['aliases'] or len(m['aliases'])>20 or any(not isinstance(a,str) or len(a)<2 or len(a)>200 for a in m['aliases']):raise ValueError('至少填写一个明确作品别名')
         for k,default,lo,hi in [('season',1,1,99),('offset',0,-999,999),('airing_offset',0,-999,999),('start',1,1,999),('end',s['total'] or 999,1,999)]:
+            if k=='airing_offset' and k not in m:continue  # absent stays absent: board and sync then use Bangumi's own sort shift
             v=m.get(k,default)
             if not isinstance(v,int) or not lo<=v<=hi:raise ValueError(k+'数值超界')
             m[k]=v
