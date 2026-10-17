@@ -57,7 +57,7 @@ python -m pytest -q
 
 请先阅读 [部署限制](docs/DEVELOPMENT.md#部署与本机配置)。确认本机路径与下载器所有权后，`Install-AnimeService.ps1` 会安装 Python 依赖、创建当前用户登录自启和桌面快捷方式，并立即启动后台；它不是仅安装依赖的命令。
 
-- `Start-AnimeService.ps1` / `Stop-AnimeService.ps1`：启动或停止本项目服务。
+- `Start-AnimeService.ps1` / `Stop-AnimeService.ps1`：启动或停止本项目服务。停止通过 `data/stop.request` 通知 supervisor 与服务进程自行退出，独立启动的实例同样会停止。
 - `Remove-Autostart.ps1`：仅移除本项目登录自启。
 - 运行数据保存在 `data/`，日志保存在 `logs/`，都不提交 Git。
 - 新安装默认仅监听本机；其他访问入口需要单独配置。

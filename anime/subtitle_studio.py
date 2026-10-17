@@ -175,7 +175,14 @@ class SubtitleStudio:
                 with archive.connect() as con:
                     con.execute('INSERT OR IGNORE INTO discoveries VALUES(?,?,?,?)',(identity,key,value,time.time()))
                 if c['episode'] not in seen_jobs:
-                    self.refresh_job(sid,c['episode'],archive);seen_jobs.add(c['episode'])
+                    seen_jobs.add(c['episode']);key_error=f'subtitle_studio_job_error_{sid}_{c["episode"]}'
+                    try:
+                        self.refresh_job(sid,c['episode'],archive)
+                        if self.db.get(key_error) is not None:self.db.execute('DELETE FROM kv WHERE key=?',(key_error,))
+                    except Exception as ex:  # a changed frozen target or missing core for one episode must not stop the others
+                        message=safe_error(ex)
+                        if self.db.get(key_error,{}).get('error')!=message:self.db.event('subtitle-studio',f'{sid} E{c["episode"]} {message}','warning')
+                        self.db.set(key_error,{'time':time.time(),'error':message})
                 if c['episode']==1 and not subtitle_only:continue
                 if clean_blocker(self.db,c):continue
                 choices.setdefault((c['episode'],c['family']['key']),c)
@@ -427,7 +434,10 @@ class SubtitleStudio:
                     count+=1
                     if count>=2:break
                 if self.db.get('subtitle_delivery_policy',{}).get('enabled'):
-                    self.delivery.refresh()
+                    try:self.delivery.refresh()
+                    except Exception as ex:  # keep the worker alive and the failure visible
+                        self.db.event('subtitle-delivery',safe_error(ex),'error')
+                        self.db.set('subtitle_studio_health',{'time':time.time(),'ok':False,'error':safe_error(ex)});return
                 self.db.set('subtitle_studio_health',{'time':time.time(),'ok':True})
             finally:self.lock.release()
         threading.Thread(target=worker,name='subtitle-studio-archive',daemon=True).start()
