@@ -1,6 +1,6 @@
 # 在另一台电脑用 Claude Fable 研究字幕问题
 
-2026-10-17。推荐 **Claude Code + 独立研究分支 + 脱敏问题基线 + 按需本地证据**。
+2026-10-17。推荐 **Claude Code + 独立研究分支 + SSH读取原机材料 + 隔离实验**。
 Claude 可直接沿代码追踪、运行隔离测试、保存实验和补丁；原机继续正常交付。
 这次同步不迁移生产 DB、下载授权、自动化、制作负责人或观看状态。
 
@@ -40,6 +40,58 @@ Claude Code版本；需要固定5.1时选择账户可用的 `claude-fable-5-1`�
 不要一次加载全部文档、JSON和图片，先看基线，再按问题取证。
 [CLAUDE.md官方说明](https://code.claude.com/docs/en/memory)。
 
+## 通过 ssh home 访问原机 WSL
+
+用户已提供研究电脑上的 `home` SSH别名。以下命令从**研究电脑的终端**执行，
+使用它已有的连接配置，不把IP、密钥或账户配置写进仓库。
+本轮已在原机默认WSL（Ubuntu-26.04）确认下列路径可读，且用其Python3.14.4
+实际校验研究包134个成员通过；尚未从另一台电脑发起端到端SSH验证。
+首次连接先探测，若别名指向另一WSL发行版或权限不同，以远端实际结果为准。
+
+| 内容 | WSL路径 |
+| --- | --- |
+| AnimeService生产项目（只读） | `/mnt/d/AnimeService` |
+| 独立字幕核心与技能（只读） | `/mnt/d/SubtitleSkillLab` |
+| 最新问题索引（可能继续更新） | `/mnt/d/AnimeService/data/subtitle-studio/unresolved-issues/issues.json` |
+| 已有原声研究与失败记录 | `/mnt/d/AnimeService/data/subtitle-studio/audio-review-lab/` |
+| 三项原声有限审听材料 | `/mnt/d/AnimeService/data/subtitle-studio/audio-review-lab/finite-review-20261013-v1/` |
+| Jimaku12682归档 | `/mnt/d/AnimeService/data/subtitle-studio/jimaku-12682-verification-20261016/` |
+| 已校验的私有快照ZIP | `/mnt/d/AnimeService/data/research-handoff/20261017/subtitle-research-private-20261017.zip` |
+
+连接探测与原机只读校验：
+
+```powershell
+ssh home 'ls -ld /mnt/d/AnimeService /mnt/d/SubtitleSkillLab && python3 --version'
+ssh home 'cd /mnt/d/AnimeService && python3 scripts/verify_research_bundle.py data/research-handoff/20261017/subtitle-research-private-20261017.zip'
+```
+
+需要把快照取到研究电脑时，在**本地克隆根目录**执行：
+
+```powershell
+scp home:/mnt/d/AnimeService/data/research-handoff/20261017/subtitle-research-private-20261017.zip ./subtitle-research-private-20261017.zip
+python scripts/verify_research_bundle.py ./subtitle-research-private-20261017.zip
+```
+
+上述SSH/SCP命令也可从macOS/Linux终端执行；本地Python按实际安装用 `python3`。
+ZIP先留在Git忽略的位置，验证成功后按下节解压到新的 `data/research-import/` 子目录。
+SSH可直接执行远端命令，SCP的远端文件写成 `home:/绝对路径`。
+[OpenSSH命令说明](https://man.openbsd.org/ssh)、
+[SCP命令说明](https://man.openbsd.org/scp)。
+
+Windows报告中的 `D:/AnimeService/...` 对应这里的 `/mnt/d/AnimeService/...`；
+其它盘符也要先检查其实际挂载，不能把Windows绝对路径直接传给Linux工具。
+[WSL文件系统说明](https://learn.microsoft.com/en-us/windows/wsl/filesystems)。
+研究包是已冻结的旧快照，原机问题索引可能较新；先记读取时间与hash，再决定取哪些增量，
+不为了“同步”重写原档案或把远端整个data目录复制进仓库。
+
+原机两个项目目录只读：不在其中 `git switch/pull/reset`、改稿、安装依赖、启动服务或运行
+队列/发布脚本。通用代码改研究电脑的克隆；确有必要的远端诊断只在
+`~/anime-subtitle-research/<run>/` 创建独立脚本/输出，以只读输入路径定位原材料。
+用WSL自身工具，不复用Windows `.venv/Scripts/python.exe` 作为Linux环境，
+不更改现有WSL/驱动/下载器/生产服务。重型实验先核当前资源与实验锁，不能挤占或接管原writer。
+SSH只解决访问：原声/视频/完整私稿不通过base64、工具输出或API请求送进模型；
+默认只向Claude返回必要的hash、统计与脱敏结论。
+
 ## 可直接粘贴的提示词
 
 ```text
@@ -50,6 +102,10 @@ Claude Code版本；需要固定5.1时选择账户可用的 `claude-fable-5-1`�
 把问题区分为材料缺失、候选已有但未匹配、声学证据不足、时轴/排版缺陷、流程/代码缺陷。优先解决已有日文候选的分段匹配、缺句和重复对白消歧，再研究歌词TV剪辑的句级计时、快速字卡/移动小字。魔王E2的C17/C254/C358只在出现新材料或实质新方法时做限定实验；复用已有失败记录，不轮换模型重复跑，不重翻已有全文。
 
 先确认新电脑有哪些依赖和证据。仅有Git也要继续完成代码分析、官方资料核查、合成反例/回归测试及可复用工具改进；缺真实材料不能伪造音画测试。独立SubtitleSkillLab不在本Git仓库，不能把缺路径/模型当算法失败。
+
+研究电脑已配置ssh home，连接的是原机WSL。原项目只读路径/mnt/d/AnimeService，独立字幕核心/技能只读路径/mnt/d/SubtitleSkillLab。最新问题索引在/mnt/d/AnimeService/data/subtitle-studio/unresolved-issues/issues.json；原声研究在/mnt/d/AnimeService/data/subtitle-studio/audio-review-lab/，其中finite-review-20261013-v1/有有限审听材料；Jimaku归档在/mnt/d/AnimeService/data/subtitle-studio/jimaku-12682-verification-20261016/。
+
+先用ssh home 'ls -ld /mnt/d/AnimeService /mnt/d/SubtitleSkillLab && python3 --version'核远端。可通过SSH做只读目录/hash/统计核查，按文档用scp取/mnt/d/AnimeService/data/research-handoff/20261017/subtitle-research-private-20261017.zip到本地并校验。包是历史快照，原机新材料按读取时间和hash另记。代码在研究电脑克隆中改；若需要远端隔离诊断，只写~/anime-subtitle-research/<run>/，不在原机项目里切分支、pull、改稿或部署，不把Windows虚拟环境当WSL环境。SSH可达不等于允许把原声或私稿输出进Claude上下文，默认只返回必要的脱敏结论。
 
 每次实际实验固定输入hash、实现/模型版本、一个主要变量、对照、时限、成功标准与退出条件。相同失败条件不重复；先完成一到两个最高价值的小实验，再按实际收益继续。明确区别文本匹配、ASR/OCR候选、实际审听、播放器技术检查和正式accepted。不能从中文反造日文，不能以歌词/文件名/v1标签证明普通对白完整双语，不能用第一次发声证明第二次。
 
@@ -63,7 +119,8 @@ Claude Code版本；需要固定5.1时选择账户可用的 `claude-fable-5-1`�
 ## 私有材料如何带到另一台电脑
 
 本次原机另外生成 `data/research-handoff/20261017/subtitle-research-private-20261017.zip`。
-它**不会随git pull出现**。需要真实证据时，由用户通过自己的文件传输方式拷贝。
+它**不会随git pull出现**。需要真实证据时，可使用上面的 `scp home:...` 命令取回，
+也可在SSH远端用本地工具处理并只回传脱敏结果。
 里面有问题索引、直接引用的证据、Jimaku候选、有限原声审听材料、独立核心与技能源码快照；
 没有生产数据库、凭据、观看记录、整集视频、模型权重或运行环境。
 
