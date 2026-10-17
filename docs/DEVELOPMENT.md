@@ -69,6 +69,10 @@ Bangumi 同步入口 `/manage#bangumi`，GET `/api/bangumi-sync` 只返回非秘
 
 `GET /api/health` 只读 kv，不扫描表：返回服务名、`ok`（心跳不超过 max(600 秒, 3×poll_seconds)）、心跳阶段与年龄、维护循环年龄、下载器与字幕工坊健康、`cycle_errors`（调度各步最近一次失败的错误、次数与起始时间）、进程 pid、启动时间与代码版本（`git rev-parse --short HEAD`）。`/api/status` 仍是详细视图。调度循环里的每一步（来源登记、选源、字幕工坊 discover/tick 等）各自隔离：一步失败只记入 `cycle_errors` 并在第 1、5、20、100 次写事件，其余步骤与空闲心跳照常。
 
+## 浏览器兼容转封装缓存
+
+多 `mdat` 的 MP4 会按需做仅复制封包的转封装，缓存在数据库同目录 `cache/browser-media/`，按文件指纹命名并附校验 JSON。转封装失败时临时 `.partial.mp4` 一律清除并返回「浏览器兼容转封装失败」；缓存总量超过 `kv browser_media_cache_bytes`（默认 8 GiB）时按最后修改时间淘汰最旧的副本（刚生成和正在生成的保留），原片永不改动。弹弹play 历史导入在播放器数据库文件大小与修改时间都未变化时跳过复制与 PowerShell 读取，健康记录带 `unchanged`。
+
 ## 播放进度写入契约
 
 `POST /api/web/media/{key}/progress` 接受 `position`、`duration`、`playing`，可选 `session`（16–80 位 `[A-Za-z0-9_-]`）与 `sequence`（≥1 的整数）。两者同时给出时，服务端按会话记录最新序号：同一会话的迟到或重复序号、以及该会话已绑定到其它媒体时，返回 `{"ok":true,"ignored":true}` 且不改位置；成品（`finished:` 前缀）必须给出这对字段，普通媒体可省略以兼容旧客户端和当前 TV 端。网页端对普通媒体同样发送会话序号并串行发送；TV 端接入成品/续播契约时应同样携带。任何进度写入都不会产生已看记录。
