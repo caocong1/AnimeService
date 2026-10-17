@@ -138,3 +138,17 @@ def test_history_api_requires_local_token_for_sync_and_confirm(tmp_path):
     assert client.post('/api/history/dandan/confirm',json={'media_ids':['a']}).status_code==403
     token=client.get('/api/bootstrap').json()['token']
     assert client.post('/api/history/dandan/confirm',headers={'x-anime-token':token},json={'media_ids':['a']}).json()['confirmed']==1
+
+
+def test_sync_skips_copying_and_reading_when_the_player_history_is_unchanged(tmp_path):
+    from unittest.mock import Mock
+    db,h,media,data,t=sample(tmp_path)
+    h.extract=Mock(return_value=data);h.merge=Mock(side_effect=lambda d:{'ok':True,'success':time.time()})
+    signature=[[10,1],None];h.source_signature=lambda:signature
+    assert h.sync()['ok'] and h.extract.call_count==1
+    second=h.sync()
+    assert second.get('unchanged') is True and h.extract.call_count==1 and db.get('dandan_history_health')['unchanged'] is True
+    signature=[[11,2],None]
+    assert h.sync().get('unchanged') is None and h.extract.call_count==2
+    h.source_signature=lambda:None  # when the files cannot be seen, every poll still tries
+    h.sync();assert h.extract.call_count==3
