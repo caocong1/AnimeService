@@ -55,7 +55,11 @@ scripts/subtitle_delivery_queue.py confirm JOB_ID --thread-id RETURNED_THREAD_ID
 scripts/subtitle_delivery_queue.py unknown JOB_ID
 scripts/subtitle_delivery_queue.py blocked JOB_ID --thread-id RESPONSIBLE_THREAD_ID --reason CONCRETE_REASON --stopped
 scripts/subtitle_delivery_queue.py accepted JOB_ID --thread-id RESPONSIBLE_THREAD_ID --build-id VERIFIED_PUBLISHED_BUILD
+scripts/subtitle_delivery_queue.py release-lease JOB_ID --owner DISPATCHER_THREAD_ID --revision CURRENT_REVISION
+scripts/subtitle_delivery_queue.py not-created JOB_ID --evidence ABSENCE_RECORD.json
 ```
+
+`release-lease`只归还尚未进入派发（没有committing/unknown/acknowledged）的租约，由同一owner和当前revision确认；`begin`在持久意图失败时会自动归还刚领取的租约并输出`lease_released`。`not-created`把unknown派发记为已核实未创建：证据文件必须是含`checked_at`、`method`、`checked_by`的JSON，文件名和sha256随回执一起写入事件；它不能替代`confirm`，也不能清掉已有负责人会话。
 
 以上不是要重跑的固定批次；先读实时JOB_ID/revision/状态。token只在数据库及进程内使用，CLI输出递归去除token字段。`--stopped`只能由已经安全保存并停止正文写入的负责人使用，不能清掉未知派发。已看经验样本领取须显式`--experience`，通常只在新未看队列没有可操作项时做。
 

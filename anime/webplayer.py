@@ -336,10 +336,14 @@ def register_webplayer(app,db):
         if key.startswith('finished:'):return player.finished_viewing.progress(key.removeprefix('finished:'),p)
         player.item(key);pos=float(p.get('position',0));duration=float(p.get('duration',0))
         if not all(math.isfinite(x) and 0<=x<=86400 for x in (pos,duration)) or pos>duration+1:raise ValueError('播放进度无效')
+        from .finished_viewing import playback_order,in_order
+        session,sequence=playback_order(p)  # optional for plain media: older clients and the TV stay unordered
         now=time.time();played=now if p.get('playing') is True and pos>0 else None
-        db.execute('''INSERT INTO web_progress(media_id,position,duration,last_played,updated) VALUES(?,?,?,?,?)
-          ON CONFLICT(media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,
-          last_played=coalesce(excluded.last_played,web_progress.last_played),updated=excluded.updated''',(key,pos,duration,played,now))
+        with db.gate,db.connect() as c:
+            if session is not None and not in_order(c,key,session,sequence,now):return {'ok':True,'ignored':True}
+            c.execute('''INSERT INTO web_progress(media_id,position,duration,last_played,updated) VALUES(?,?,?,?,?)
+              ON CONFLICT(media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,
+              last_played=coalesce(excluded.last_played,web_progress.last_played),updated=excluded.updated''',(key,pos,duration,played,now))
         return {'ok':True} # Never turn a seek, open, or end event into "finished".
     @app.post('/api/web/media/{key}/desktop')
     def desktop(key:str):
