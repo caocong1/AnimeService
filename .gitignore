@@ -42,6 +42,7 @@
 !/scripts/Ocr-SourceFrames.ps1
 !/scripts/seed_subtitle_studio.py
 !/scripts/viewing_queue.py
+!/scripts/airing_numbering_diff.py
 !/scripts/subtitle_delivery_queue.py
 !/scripts/supervisor.py
 !/scripts/stop_danmu.py
