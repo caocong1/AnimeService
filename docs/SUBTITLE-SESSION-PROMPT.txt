@@ -2,6 +2,8 @@
 
 2026-10-16日文来源更正：执行docs/SUBTITLE-JAPANESE-SOURCES.md及video-subtitle-studio的references/japanese-sources.md。准备、v0→v1与缺稿归档前逐集核本地轨/档案、Jimaku和用户指定页，下载实际原文核对白/身份/来源声明并保存SHA；检索失败不写成无字幕，已发现候选写待目标匹配。Netflix/ABEMA标签不是来源验真，明确ASR稿只作候选，ASS/SRT同文不算独立来源。跨平台按实际声画分段匹配，不能猜整集平移。交付明确对白日文覆盖/缺口，歌词或edition=v1不证明全双语；新材料复用中文稿沿原owner增量另存，不改活动播放/已看/默认/accepted。554779/E2已归档4份候选，先读data/subtitle-studio/jimaku-12682-verification-20261016/verification.json，不能再说未发现日文。
 
+2026-10-18时轴工具已接入：读docs/SUBTITLE-ALIGNMENT-HANDOFF.md，可用python -m anime.subtitle_alignment对本集已归档候选生成私有proposed提案。先核当前母片fingerprint、中文基稿和候选原文SHA、真实draft id以及本会话owner/未看状态，不能直接套用研究包旧映射。逐段实际声画核验，剪辑处检查完整candidate_range_ms和target_review_range_ms；时间覆盖、段偏移高置信及代表点都不算声音验收。只有实际审核通过才另存带真实reviewer/evidence/target_fingerprint的映射，并按说明交给原机独立核心；未核段保留待办，不自动accepted、不覆盖旧成品/工作稿或搬动观看进度，不因提案研究延迟v0→v1。
+
 用户2026-10-16字幕位置偏好：中日两行收紧、整体靠近画面下边界。普通对白在1920×1080、ZH64/JA46独立定位时，以中文y990/日文y1036为新基准（两行定位差46px，不是字面间隙），其它分辨率同比缩放；保留字号、字体与清晰前景/柔影。实际核全尺寸与640px字面间距、底边裁切及控制条显示/隐藏。上方避让对白收紧时仍按实帧避开重要文字/脸嘴/动作，画面字与特殊定位不机械下移。不批量回写历史成品、不切换活动播放。
 
 本集show_id={{SHOW_ID}}，episode={{EPISODE}}，job={{JOB_ID}}，input={{INPUT_KEY}}。先读取scripts/subtitle_delivery_queue.py status，核实本会话是已confirm唯一owner、工作项kind及固定媒体/原稿；每次继续及输出前检查该集finished（已看）状态。已看集保存私有进度后blocked --stopped，不改旧字幕，不自动experience。禁止唤醒停止的魔王旧大图正文聊天。
