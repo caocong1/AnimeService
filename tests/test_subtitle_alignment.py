@@ -134,6 +134,98 @@ def test_edit_in_candidate_cut_becomes_two_segments_between_clusters():
     assert any(p['kind'] == 'cut' for p in result['review_points'])
 
 
+def only_cut(result):
+    assert len(result['cuts']) == 1
+    return result['cuts'][0]
+
+
+def cue_boundaries_respected(candidate, cut):
+    """No range endpoint or representative point falls inside a cue, and overlapping cues stay on one side together."""
+    points = cut['position']['candidate_range_ms'] + [cut['candidate_time_ms']]
+    assert not any(r['start_ms'] < p < r['end_ms'] for r in candidate for p in points)
+    undecided = set(cut['position']['undecided_candidate_ids'])
+    for cluster in sa.clusters(candidate):
+        ids = set(cluster['ids'])
+        assert ids <= undecided or not ids & undecided
+
+
+def sides_hold(candidate, position, edit):
+    by_id = {r['id']: r for r in candidate}
+    assert all(by_id[i]['truth_start_ms'] < edit for i in position['supporting_candidate_ids']['before'])
+    assert all(by_id[i]['truth_start_ms'] >= edit for i in position['supporting_candidate_ids']['after'])
+
+
+def test_cut_inside_a_long_cue_free_gap_is_bounded_by_the_whole_gap():
+    """Review example: cues cannot locate an edit inside a cue-free stretch, so the stretch itself is the candidate range."""
+    master = master_rows()
+    edit = 350000
+    missing = [r['id'] for r in master if 300000 <= r['start_ms'] and r['end_ms'] <= 385000]
+    candidate = candidate_rows(master, lambda t: t + 1000 if t < edit else t + 16000, drop=0, split=0, merge=0, drop_ids=missing)
+    result = sa.align(master, candidate)
+    cut = only_cut(result)
+    position = cut['position']
+    gap_start = max(r['end_ms'] for r in candidate if r['truth_start_ms'] < 300000)
+    gap_end = min(r['start_ms'] for r in candidate if r['truth_start_ms'] >= 300000)
+    assert gap_end - gap_start > 90000 and position['longest_cue_free_gap_ms'] == [gap_start, gap_end]
+    low, high = position['candidate_range_ms']
+    assert low <= gap_start and high >= gap_end and position['cue_free_ms'] >= gap_end - gap_start
+    assert low <= edit + 1000 and edit + 16000 <= high  # the inserted stretch lies inside the range
+    assert low <= cut['candidate_time_ms'] <= high and cut['candidate_time_basis'] == sa.CUT_TIME_BASIS
+    assert position['bounded_by_evidence'] == {'before': True, 'after': True} and len(position['undecided_candidate_ids']) <= 2
+    assert cut['segment_confidence'] == ['high', 'high']
+    sides_hold(candidate, position, edit)
+    cue_boundaries_respected(candidate, cut)
+    point = next(p for p in result['review_points'] if p['kind'] == 'cut')
+    assert point['candidate_range_ms'] == [low, high] and point['position_kind'] == position['kind']
+    assert point['target_review_range_ms'] == position['target_review_range_ms'] and point['target_review_rows']['count'] > 20
+    assert point['reason'] == position['reason'] and 'representative' in point['detail']
+
+
+def test_cut_among_candidate_only_rows_spans_the_undecided_clusters():
+    """Song lines the candidate carries inside the target's lyric block fit either offset; they and the edit stay inside the range."""
+    master = master_rows(lyric_block=(300000, 400000))
+    edit = 350000
+    song = [(318000 + k * 3000, 320200 + k * 3000, f'song{k}') for k in range(26)]  # candidate time, no target dialogue under either offset
+    song += [(s + 1200, e + 1200, 'dup') for s, e, _ in song[::4]]  # overlapping pairs
+    candidate = candidate_rows(master, lambda t: t + 1000 if t < edit else t + 16000, drop=0, split=0, merge=0, extra=song)
+    result = sa.align(master, candidate)
+    cut = only_cut(result)
+    position = cut['position']
+    assert position['kind'] == 'undecided_cues' and result['summary']['cut_position_kinds'] == {'single_gap': 0, 'undecided_cues': 1}
+    core = {r['id'] for r in candidate if 'truth_start_ms' not in r}
+    assert len(core) == 33 and core <= set(position['undecided_candidate_ids'])
+    low, high = position['candidate_range_ms']
+    assert low <= min(r['start_ms'] for r in candidate if r['id'] in core) and high >= max(r['end_ms'] for r in candidate if r['id'] in core)
+    assert low <= edit + 1000 and edit + 16000 <= high and low <= cut['candidate_time_ms'] <= high
+    offsets = [s['offset_ms'] for s in result['segments']]
+    assert position['target_review_range_ms'] == [low + min(offsets), high + max(offsets)]
+    assert position['cue_free_ms'] < high - low  # the undecided clusters take time inside the range
+    sides_hold(candidate, position, edit)
+    cue_boundaries_respected(candidate, cut)
+    assert result['lyrics']['OP_JP']['candidate_rows_inside_block'] == 33
+
+
+def test_cut_between_well_supported_cues_stays_within_a_few_cues():
+    """With supported cues on both sides the range is the inserted stretch plus at most a couple of adjacent cues."""
+    master = master_rows()
+    a, b = next((a, b) for a, b in zip(master, master[1:]) if a['end_ms'] >= 600000)
+    edit = (a['end_ms'] + b['start_ms']) // 2
+    candidate = candidate_rows(master, lambda t: t + 1000 if t < edit else t + 16000)
+    result = sa.align(master, candidate)
+    cut = only_cut(result)
+    position = cut['position']
+    low, high = position['candidate_range_ms']
+    assert low <= edit + 1000 and edit + 16000 <= high and low <= cut['candidate_time_ms'] <= high
+    last_before = max(r['id'] for r in candidate if r.get('truth_start_ms', edit) < edit)
+    first_after = min(r['id'] for r in candidate if r.get('truth_start_ms', -1) >= edit)
+    assert min(position['supporting_candidate_ids']['before']) >= last_before - 2
+    assert max(position['supporting_candidate_ids']['after']) <= first_after + 2
+    assert len(position['undecided_candidate_ids']) <= 2 and position['bounded_by_evidence'] == {'before': True, 'after': True}
+    assert position['longest_cue_free_gap_ms'][1] - position['longest_cue_free_gap_ms'][0] >= 15000
+    sides_hold(candidate, position, edit)
+    cue_boundaries_respected(candidate, cut)
+
+
 def test_candidate_rows_before_target_start_are_outside_and_spans_stay_non_negative():
     master = master_rows()
     candidate = candidate_rows(master, lambda t: t + 5000, extra=[(200, 1800, 'pre'), (2000, 3500, 'roll')])
@@ -374,9 +466,7 @@ def srt_time(ms):
     return f'{h:02d}:{m:02d}:{s:02d},{frac:03d}'
 
 
-def test_cli_writes_proposal_in_lab_schema(tmp_path):
-    master = master_rows(count=120, lyric_block=(35000, 80000))
-    candidate = candidate_rows(master, lambda t: t + 1000)
+def write_fixture(tmp_path, master, candidate):
     ass = ['[Script Info]', 'ScriptType: v4.00+', '', '[Events]',
            'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text']
     ass += [f"Dialogue: 0,{ass_time(r['start_ms'])},{ass_time(r['end_ms'])},{r['style']},,0,0,0,,{r['text']}" for r in master]
@@ -384,6 +474,12 @@ def test_cli_writes_proposal_in_lab_schema(tmp_path):
     (tmp_path / 'base.ass').write_text('\n'.join(ass) + '\n', encoding='utf-8')
     srt = [f"{r['id']}\n{srt_time(r['start_ms'])} --> {srt_time(r['end_ms'])}\n{r['text']}\n" for r in candidate]
     (tmp_path / 'cand.srt').write_text('\n'.join(srt), encoding='utf-8-sig')
+
+
+def test_cli_writes_proposal_in_lab_schema(tmp_path):
+    master = master_rows(count=120, lyric_block=(35000, 80000))
+    candidate = candidate_rows(master, lambda t: t + 1000)
+    write_fixture(tmp_path, master, candidate)
     out = tmp_path / 'proposal.json'
     sa.main(['--target', str(tmp_path / 'base.ass'), '--candidate', str(tmp_path / 'cand.srt'), '--out', str(out),
              '--draft-id', 'DRAFT', '--text'])
@@ -399,6 +495,29 @@ def test_cli_writes_proposal_in_lab_schema(tmp_path):
                               [{**r, 'truth_start_ms': c['truth_start_ms']} for r, c in zip(parsed, candidate)
                                if 'truth_start_ms' in c])) <= 200
     assert 'SECRET' not in out.read_text(encoding='utf-8')
+
+
+def test_proposal_extraction_and_check_flow(tmp_path):
+    """The handoff steps from docs/SUBTITLE-ALIGNMENT-HANDOFF.md: extract the proposal, check cue placement, list review points."""
+    master = master_rows()
+    edit = 400000
+    candidate = candidate_rows(master, lambda t: t + 1000 if t < edit else t + 9000, extra=[(300, 900, 'pre')])
+    write_fixture(tmp_path, master, candidate)
+    out = tmp_path / 'result.json'
+    with contextlib.redirect_stdout(io.StringIO()):
+        sa.main(['--target', str(tmp_path / 'base.ass'), '--candidate', str(tmp_path / 'cand.srt'), '--out', str(out), '--draft-id', 'DRAFT'])
+    result = json.loads(out.read_text(encoding='utf-8'))
+    alignments = result['proposal']
+    assert list(alignments) == ['DRAFT'] and alignments['DRAFT']['status'] == 'proposed'
+    assert alignments['DRAFT']['target_fingerprint'] is None and alignments['DRAFT']['reviewer'] is None
+    assert 'SECRET' not in out.read_text(encoding='utf-8')
+    rows = sa.load(tmp_path / 'cand.srt', False)
+    segments = alignments['DRAFT']['segments']
+    unplaced = [r['id'] for r in rows if r['valid'] and sa.mapped(segments, r['start_ms'], r['end_ms']) is None]
+    assert unplaced == [o['id'] for o in result['outside_target']] == [1]
+    checklist = [p for p in result['review_points'] if p['kind'] == 'cut']
+    assert len(checklist) == 1 and checklist[0]['candidate_range_ms'][0] <= checklist[0]['candidate_time_ms'] <= checklist[0]['candidate_range_ms'][1]
+    assert checklist[0]['target_review_rows']['count'] >= 1 and result['summary']['cut_position_kinds']['single_gap'] + result['summary']['cut_position_kinds']['undecided_cues'] == 1
 
 
 def test_parse_formats_and_invalid_rows():

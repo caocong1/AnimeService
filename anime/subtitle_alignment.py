@@ -12,6 +12,10 @@ Coverage is the share of the target's dialogue time (the union of its valid dial
 intervals) that lies under candidate dialogue rows paired by overlap after mapping.
 Duplicate, nested and overlapping rows count once and archived control rows (music marks,
 bracketed sound cues) never count, so coverage can only fall when dialogue is missing.
+
+A cut between two segments is reported with one representative time and with the range of
+candidate time the cue evidence allows for it: cue-free stretches and cues that fit either
+offset cannot locate an edit, so the reviewer inspects the whole range, not the point.
 """
 import argparse
 import bisect
@@ -25,8 +29,8 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA = 'anime-subtitle-alignment-proposal/v2'
-REVISION = 'interval-overlap-dp-v2'
+SCHEMA = 'anime-subtitle-alignment-proposal/v3'
+REVISION = 'interval-overlap-dp-v3'
 # Frame-rate conversions; a 25 fps broadcast candidate drifts against 23.976 fps media.
 SCALES = (1.0, 25 / 23.976, 23.976 / 25, 24 / 23.976, 23.976 / 24, 25 / 24, 24 / 25)
 LYRIC_STYLE = re.compile(r'(?:^|[^a-z])(?:op|ed|opening|ending|song|lyrics?|karaoke|insert|ost|chorus)(?:[^a-z]|$)', re.I)
@@ -39,7 +43,11 @@ CAVEATS = [
     'Pairs are temporal overlap candidates; speaker, wording and phrase boundaries still need review.',
     'status=proposed cannot enter an authored timeline; the reviewer sets accepted with evidence.',
     'Coverage is target dialogue time under paired candidate rows; it proves neither wording, source independence nor audio acceptance.',
+    'A cut has one representative candidate_time_ms; cue evidence only bounds it to position.candidate_range_ms, which is not a calibrated confidence interval.',
 ]
+# Chance-corrected cue evidence a cut may give up while it is moved; about one fully supported cue cluster.
+CUT_TOLERANCE = 0.5
+CUT_TIME_BASIS = 'representative point: midpoint of the chosen cue gap; the evidence bound is position.candidate_range_ms'
 COVERAGE_BASIS = ('union of valid target dialogue intervals intersected with the union of paired candidate '
                   'dialogue rows after mapping, over the target union; control rows never count')
 
@@ -408,6 +416,52 @@ def segment_spans(units, runs, scale):
     return segments
 
 
+def cut_positions(timeline, units, runs, chance, tol, tolerance=CUT_TOLERANCE):
+    """How far each cut could move before the cue evidence objects: a bound, not a calibrated interval.
+
+    Scores are the DP's chance-corrected unit scores at the two neighbouring offsets. From the chosen
+    gap the cut is moved one cue cluster at a time in each direction, charging each cluster's
+    preference for the side it leaves; a gap stays admissible while the running charge is below
+    ``tolerance``. Cue-free stretches and clusters that fit either offset cost nothing and widen the
+    range; the cluster whose evidence exhausts the tolerance ends it. Clusters are atomic, so
+    overlapping cues are never divided.
+    """
+    def preference(i, before, after):
+        score = lambda offset: max(0.0, unit_score(timeline, units[i], offset, tol)[0] - chance['score'])
+        return score(before) - score(after)
+
+    def extend(start, stop, step, sign, before, after):
+        i, charge = start, 0.0
+        while i != stop:
+            charge += sign * preference(i, before, after)
+            if charge >= tolerance:
+                return i, True
+            i += step
+        return i, False
+
+    positions = []
+    for a, b in zip(runs, runs[1:]):
+        lo, bounded_before = extend(a['last'], a['first'], -1, 1, a['offset'], b['offset'])
+        hi, bounded_after = extend(a['last'] + 1, b['last'], 1, -1, a['offset'], b['offset'])
+        gaps = [(units[i]['end_ms'], units[i + 1]['start_ms']) for i in range(lo, hi)]
+        longest = max(gaps, key=lambda g: g[1] - g[0])
+        between = units[lo + 1:hi]
+        cue_free = sum(e - s for s, e in gaps)
+        edges = [f"candidate cluster {units[lo]['ids']} holds the earlier offset" if bounded_before else 'the earlier segment has no cluster left to move',
+                 f"cluster {units[hi]['ids']} holds the later offset" if bounded_after else 'the later segment has no cluster left to move']
+        positions.append({
+            'kind': 'single_gap' if hi == lo + 1 else 'undecided_cues',
+            'candidate_range_ms': [units[lo]['end_ms'], units[hi]['start_ms']],
+            'supporting_candidate_ids': {'before': list(units[lo]['ids']), 'after': list(units[hi]['ids'])},
+            'bounded_by_evidence': {'before': bounded_before, 'after': bounded_after},
+            'undecided_candidate_ids': [cid for u in between for cid in u['ids']],
+            'cue_free_ms': cue_free, 'longest_cue_free_gap_ms': list(longest), 'evidence_tolerance': tolerance,
+            'reason': (f"cue evidence only bounds the cut: {edges[0]} and {edges[1]} (moving past either costs at least "
+                       f"{tolerance} of chance-corrected support); {len(between)} clusters between them fit either offset "
+                       f"within that tolerance and {cue_free / 1000:.1f} s carry no cues")})
+    return positions
+
+
 def mapped(segments, start_ms, end_ms):
     """Same interpolation rule as the lab core: a cue must lie entirely inside one segment."""
     for index, seg in enumerate(segments):
@@ -498,14 +552,22 @@ def align(target_rows, candidate_rows, window_ms=150000, step_ms=20, tol=200, pe
                    confidence='high' if run['hit_z'] >= 6 and anchored >= 8 and anchored >= 0.7 * count else
                    'medium' if run['hit_z'] >= 3 and anchored >= 4 else 'low',
                    candidate_ids=[units[run['first']]['ids'][0], units[run['last']]['ids'][-1]])
-    cuts = [{'between_segments': [a['index'], b['index']], 'candidate_time_ms': a['source_end_ms'],
-             'target_before_ms': a['target_end_ms'], 'target_after_ms': b['target_start_ms'],
-             'offset_change_ms': b['offset_ms'] - a['offset_ms']} for a, b in zip(segments, segments[1:])]
+    target_sorted = sorted(target, key=lambda r: r['start_ms'])
+    target_starts = [r['start_ms'] for r in target_sorted]
+    cuts = []
+    for a, b, position in zip(segments, segments[1:], cut_positions(timeline, units, runs, chance, tol)):
+        low, high = position['candidate_range_ms']
+        review = [max(0, round(low * scale + min(a['offset_ms'], b['offset_ms']))), round(high * scale + max(a['offset_ms'], b['offset_ms']))]
+        rows = [r for r in target_sorted if r['end_ms'] > review[0] and r['start_ms'] < review[1]]
+        position.update(target_review_range_ms=review,
+                        target_review_rows={'first_id': rows[0]['id'], 'last_id': rows[-1]['id'], 'count': len(rows)} if rows else None)
+        cuts.append({'between_segments': [a['index'], b['index']], 'candidate_time_ms': a['source_end_ms'],
+                     'candidate_time_basis': CUT_TIME_BASIS, 'target_before_ms': a['target_end_ms'],
+                     'target_after_ms': b['target_start_ms'], 'offset_change_ms': b['offset_ms'] - a['offset_ms'],
+                     'segment_confidence': [a['confidence'], b['confidence']], 'position': position})
     # Pairing by temporal overlap after mapping; archived control rows are listed, never paired.
     target_partners = {r['id']: [] for r in target}
     pairs, unreferenced, outside, control = [], [], [], []
-    target_sorted = sorted(target, key=lambda r: r['start_ms'])
-    target_starts = [r['start_ms'] for r in target_sorted]
     for row in usable:
         place = mapped(segments, row['start_ms'], row['end_ms'])
         if place is None:
@@ -557,6 +619,7 @@ def align(target_rows, candidate_rows, window_ms=150000, step_ms=20, tol=200, pe
     covered, total = coverage(target, pairs)
     lyrics = lyric_report(target_rows, usable, segments)
     summary = {'scale': round(scale, 6), 'drift_suspected': scale != 1.0, 'segments': len(segments), 'cuts': len(cuts),
+               'cut_position_kinds': {k: sum(1 for c in cuts if c['position']['kind'] == k) for k in ('single_gap', 'undecided_cues')},
                'target_dialogue_rows': len(target), 'candidate_rows': len(usable),
                'candidate_rows_invalid_timing': sum(1 for r in candidate_rows if not r['valid']),
                'pairs': {k: sum(1 for p in pairs if p['relation'] == k) for k in ('one_to_one', 'one_to_many', 'many_to_one')},
@@ -640,10 +703,18 @@ def review_points(result):
     if result['summary']['drift_suspected']:
         points.append({'kind': 'drift', 'detail': f"frame-rate scale {result['summary']['scale']} chosen; verify first/last anchors"})
     for cut in result['cuts']:
+        position = cut['position']
         points.append({'kind': 'cut', 'candidate_time_ms': cut['candidate_time_ms'],
+                       'candidate_range_ms': position['candidate_range_ms'], 'position_kind': position['kind'],
+                       'supporting_candidate_ids': position['supporting_candidate_ids'],
+                       'undecided_candidate_ids': position['undecided_candidate_ids'],
                        'target_before_ms': cut['target_before_ms'], 'target_after_ms': cut['target_after_ms'],
-                       'offset_change_ms': cut['offset_change_ms'],
-                       'detail': 'inspect picture/audio on both sides of this candidate time'})
+                       'target_review_range_ms': position['target_review_range_ms'],
+                       'target_review_rows': position['target_review_rows'],
+                       'offset_change_ms': cut['offset_change_ms'], 'segment_confidence': cut['segment_confidence'],
+                       'reason': position['reason'],
+                       'detail': 'inspect picture/audio across the whole candidate range and target review range; '
+                                 'candidate_time_ms is only a representative point'})
     for seg in result['segments']:
         if seg['confidence'] != 'high':
             points.append({'kind': 'segment_confidence', 'segment': seg['index'], 'confidence': seg['confidence'],
