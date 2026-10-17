@@ -1,8 +1,8 @@
-import datetime,json,re,time,calendar
+import datetime,hashlib,json,re,time,calendar
 from urllib.parse import urlencode,urljoin,urlparse
 import feedparser
 from bs4 import BeautifulSoup
-from .net import Web,NetworkError,validate_url,safe_error
+from .net import Web,NetworkError,RequestDeferred,validate_url,safe_error
 from .native_indexes import KINDS,entry_metadata,eligible,search_mapping,checked_download_url,verify_hash
 from .releases import validate_title,Rejected
 from .fidelity import fidelity_blocker
@@ -21,7 +21,7 @@ HOST_SITE.update({'tokyotosho.info':'tokyotosho','tokyotosho.se':'tokyotosho','t
 SITE_MIN_INTERVAL={'tokyotosho':10,'nyaa.si':5}  # seconds between requests to one site; other sites are not spaced
 EVENT_FAILURE_MARKS=(1,5,20,100)
 # TokyoTosho answers a search without matches with this fragment (served as text/html): a legitimate empty feed.
-EMPTY_RESULT=re.compile(rb'^\s*(?:</channel>\s*)?</rss>\s*$')
+EMPTY_RESULT=re.compile(rb'^\s*</channel>\s*</rss>\s*$')
 CHALLENGE_MARKERS=(b'cf-chl',b'cf_chl',b'challenge-platform',b'just a moment',b'attention required',b'access denied')
 
 
@@ -50,6 +50,7 @@ def preferred_host(url,state):
 
 
 def request_url(url,state):
+    validate_url(url)  # Do not erase credentials/ports while replacing netloc.
     host=preferred_host(url,state)
     return urlparse(url)._replace(netloc=host).geturl() if host else url
 
@@ -77,10 +78,59 @@ def challenge_page(response):
 def feed_items(site,response,kind):
     """Classify one answer: empty result, challenge (site-wide), other page (this feed), or a feed to parse."""
     body=bytes(response.content)
-    if not body.strip() or EMPTY_RESULT.match(body):return []
+    if site=='tokyotosho' and kind=='tokyotosho' and EMPTY_RESULT.fullmatch(body):return []
+    if not body.strip():raise NetworkError(site+' 返回空正文，尚不能确认无结果',200,site_wide=False)
     if challenge_page(response):raise NetworkError(site+' 返回验证页面',200,site_wide=True)
     if looks_like_page(response):raise NetworkError(site+' 返回HTML页面而非RSS',200,site_wide=False)
     return parse_rss(body,kind)
+
+
+def update_health(db,site,change):
+    """One short SQLite transaction; no network or sleep while holding it."""
+    key='site_health_'+site
+    with db.connect() as con:
+        con.execute('BEGIN IMMEDIATE')
+        row=con.execute('SELECT value FROM kv WHERE key=?',(key,)).fetchone()
+        state=json.loads(row[0]) if row else {}
+        result=change(state)
+        con.execute('INSERT OR REPLACE INTO kv VALUES(?,?)',(key,json.dumps(state,ensure_ascii=False)))
+    return result
+
+
+def reserve_request(db,url):
+    validate_url(url);site=site_of(url);now=time.time()
+    spacing=db.get('site_min_interval_seconds',{}).get(site,SITE_MIN_INTERVAL.get(site,0))
+    def reserve(state):
+        until=state.get('next_attempt',0)
+        if until>now:
+            bump(state,'deferred');return until
+        if now-state.get('last_request',0)<spacing:
+            state['deferred']=state.get('deferred',0)+1;bump(state,'deferred')
+            return state['last_request']+spacing*state['deferred']
+        state.update(last_request=now,deferred=0);bump(state,'http_attempts')
+        return None
+    until=update_health(db,site,reserve)
+    if until is not None:raise RequestDeferred(until,url)
+
+
+def fail_site(db,url,error):
+    if not isinstance(error,NetworkError) or not error.site_wide or getattr(error,'health_recorded',False):return
+    now=time.time()
+    def failed(state):
+        failures=state.get('failures',0)+1
+        # Access restrictions cool the whole family without rotating to evade them.
+        rotate=error.status is None or 500<=error.status<600
+        state.update(failures=failures,next_attempt=max(state.get('next_attempt',0),now+max(site_backoff_seconds(failures),error.retry_after)),
+                     error=safe_error(error),host=next_host(url,state) if rotate else preferred_host(url,state),last_error_at=now)
+    update_health(db,site_of(url),failed);error.health_recorded=True
+
+
+def record_poll(db,site,outcome,started):
+    def finished(state):
+        bump(state,'polls');bump(state,outcome)
+        if outcome in ('success','empty') and state.get('last_error_at',0)<=started:
+            state.update(failures=0,next_attempt=0,error='')
+    update_health(db,site,finished)
 
 class Catalog:
     def __init__(self,store,web=None):self.db=store;self.web=web or Web()
@@ -207,6 +257,46 @@ def parse_rss(content,kind=None):
 
 class Sources:
     def __init__(self,store,web=None):self.db=store;self.web=web or Web()
+    def fetch(self,url,**kwargs):
+        """Apply shared budgets to RSS, details, torrents and every redirect/retry."""
+        validate_url(url);site=site_of(url);now=time.time();key=hashlib.sha256(url.encode()).hexdigest()
+        state=self.db.get('site_health_'+site,{})
+        pending=state.get('redirects',{}).get(key,{})
+        if pending.get('expires',0)<=now:pending={}
+        target=validate_url(pending.get('target',url));visited=list(pending.get('visited',[]))
+        if pending.get('not_before',0)>now:raise RequestDeferred(pending['not_before'],target)
+        reserve_request(self.db,target)
+        first=True
+        def before_request(next_url):
+            nonlocal first
+            if first:first=False
+            else:reserve_request(self.db,next_url)
+        spacing=self.db.get('site_min_interval_seconds',{}).get(site,SITE_MIN_INTERVAL.get(site,0))
+        kwargs['retries']=1 if spacing else kwargs.get('retries',3)
+        def clear_pending(state):
+            state.get('redirects',{}).pop(key,None)
+        try:
+            result=self.web.fetch(target,before_request=before_request,**kwargs)
+            if pending:update_health(self.db,site,clear_pending)
+            return result
+        except RequestDeferred as deferred:
+            validate_url(deferred.target)
+            if deferred.target!=target:
+                if deferred.target in visited or len(visited)>=3:
+                    update_health(self.db,site,clear_pending)
+                    raise NetworkError('重定向次数过多',site_wide=False) from None
+                visited.append(target)
+                def remember_redirect(state):
+                    redirects={k:v for k,v in state.get('redirects',{}).items() if v.get('expires',0)>time.time()}
+                    if len(redirects)>=256:redirects.pop(next(iter(redirects)))
+                    redirects[key]={'target':deferred.target,'visited':visited,'not_before':deferred.until,
+                                    'expires':max(time.time()+3600,deferred.until+60)}
+                    state['redirects']=redirects
+                update_health(self.db,site,remember_redirect)
+            raise
+        except NetworkError as error:
+            error.health_recorded=False  # One new fetch, even if a test/adapter reuses an exception instance.
+            fail_site(self.db,target,error);raise
     def remember(self,source,items):
         if source['kind'] in KINDS:
             if not eligible(self.db,source['show_id'],source['kind']):return []
@@ -239,38 +329,28 @@ class Sources:
         from .general_indexes import GENERAL_KINDS,site_backoff,search_1337x,record_failure
         if source['kind'] in GENERAL_KINDS and site_backoff(self.db,source):return False
         site=site_of(source['url']);key='site_health_'+site;state=self.db.get(key,{});now=time.time()
-        if state.get('next_attempt',0)>now:  # the whole site is backing off: spend no request on it
-            self.db.execute('UPDATE sources SET next_attempt=? WHERE id=?',(state['next_attempt'],source['id']));return False
-        spacing=self.db.get('site_min_interval_seconds',{}).get(site,SITE_MIN_INTERVAL.get(site,0))
-        if now-state.get('last_request',0)<spacing:
-            # Deferred, not failed: each waiting feed of the site gets its own slot so none is starved.
-            state['deferred']=state.get('deferred',0)+1;bump(state,'deferred');self.db.set(key,state)
-            self.db.execute('UPDATE sources SET next_attempt=? WHERE id=?',(state.get('last_request',0)+spacing*state['deferred'],source['id']));return False
-        state.update(last_request=now,deferred=0);bump(state,'polls');self.db.set(key,state)
-        self.db.execute('UPDATE sources SET last_attempt=? WHERE id=?',(now,source['id']))
         try:
-            if source['kind']=='1337x':items=search_1337x(self.db,self.web,source)
-            else:items=feed_items(site,self.web.fetch(request_url(source['url'],state),retries=1 if spacing else 3),source['kind'])
-            bump(state,'empty' if not items else 'success')
+            if source['kind']=='1337x':items=search_1337x(self.db,self,source)
+            else:items=feed_items(site,self.fetch(request_url(source['url'],state)),source['kind'])
+            outcome='empty' if not items else 'success'
             items=self.remember(source,items)
             interval=self.db.get('poll_seconds',180)
             if self.db.review_wanted(source['show_id']):interval=min(interval,180)
             if source['kind'] in GENERAL_KINDS:interval=3600
-            self.db.execute('UPDATE sources SET last_success=?,next_attempt=?,failures=0,error=?,latest=? WHERE id=?',
-                (now,now+interval,'',items[0]['title'] if items else '本次RSS无条目',source['id']))
-            self.db.set(key,{**state,'failures':0,'next_attempt':0,'error':''})
+            self.db.execute('UPDATE sources SET last_attempt=?,last_success=?,next_attempt=?,failures=0,error=?,latest=? WHERE id=?',
+                (now,time.time(),time.time()+interval,'',items[0]['title'] if items else '本次RSS无条目',source['id']))
+            record_poll(self.db,site,outcome,now)
             return True
+        except RequestDeferred as deferred:
+            self.db.execute('UPDATE sources SET next_attempt=? WHERE id=?',(deferred.until,source['id']));return False
         except Exception as e:
             if source['kind'] in GENERAL_KINDS:record_failure(self.db,source,e)
-            n=source['failures']+1;err=safe_error(e);retry=now+source_backoff_seconds(n)
-            if isinstance(e,NetworkError) and e.site_wide:  # shared cooldown and alias rotation for the whole site
-                failures=state.get('failures',0)+1;bump(state,'failed_site')
-                state.update(failures=failures,next_attempt=now+max(site_backoff_seconds(failures),e.retry_after),error=err,
-                             host=next_host(source['url'],state),last_error_at=now)
-                retry=max(retry,state['next_attempt'])
-            else:bump(state,'failed_source')
-            self.db.set(key,state)
-            self.db.execute('UPDATE sources SET failures=?,next_attempt=?,error=? WHERE id=?',(n,retry,err,source['id']))
+            n=source['failures']+1;err=safe_error(e);retry=time.time()+source_backoff_seconds(n)
+            fail_site(self.db,source['url'],e)
+            site_failure=isinstance(e,NetworkError) and e.site_wide
+            record_poll(self.db,site,'failed_site' if site_failure else 'failed_source',now)
+            if site_failure:retry=max(retry,self.db.get(key,{}).get('next_attempt',0))
+            self.db.execute('UPDATE sources SET last_attempt=?,failures=?,next_attempt=?,error=? WHERE id=?',(now,n,retry,err,source['id']))
             if err!=source['error'] or n in EVENT_FAILURE_MARKS or n%100==0:self.db.event('source:'+str(source['id']),err,'error')
             return False
     def archive(self,source):
@@ -279,7 +359,7 @@ class Sources:
             url=source['archive_url'];items=[];visited=set()
             for _ in range(20):
                 if url in visited:break
-                visited.add(url);soup=BeautifulSoup(self.web.fetch(url).text,'html.parser')
+                visited.add(url);soup=BeautifulSoup(self.fetch(url).text,'html.parser')
                 for tr in soup.select('tr'):
                     a=tr.select_one('a[href*="/Home/Episode/"],a[href*="/topics/view/"]')
                     if not a:continue
@@ -293,6 +373,7 @@ class Sources:
             if not items:raise NetworkError('历史页未解析到条目，可能尚未发布或页面结构变化')
             self.remember(source,items)
             self.db.execute('UPDATE sources SET archive_success=?,archive_error=? WHERE id=?',(time.time(),'',source['id']))
+        except RequestDeferred:return
         except Exception as e:
             err=safe_error(e);self.db.execute('UPDATE sources SET archive_error=? WHERE id=?',(err,source['id']))
             self.db.event('archive:'+str(source['id']),err,'warning')
@@ -305,17 +386,17 @@ class Sources:
             if len(eps)!=1 or not self.db.allowed(candidate['show_id'],eps[0]):raise Rejected('索引候选不在已核验的单集范围')
         if kind in ('bt4g','1337x'):
             from .general_indexes import resolve_torrent
-            return resolve_torrent(self.db,self.web,candidate)
+            return resolve_torrent(self.db,self,candidate)
         url=secure_public_url(candidate['url'])
         if url.startswith('magnet:'):
             detail=secure_public_url(candidate['detail'])
             if not detail.startswith('https:'):raise ValueError('仅磁力链接，缺少可核验种子；等待人工来源补充')
             url=detail
-        r=self.web.fetch(url)
+        r=self.fetch(url)
         if r.content.startswith(b'd'):return verify_hash(candidate,r.content)
         soup=BeautifulSoup(r.text,'html.parser')
         for a in soup.select('a[href]'):
             href=secure_public_url(urljoin(url,a['href']))
             if '.torrent' in href and urlparse(href).hostname in ('mikanani.me','mikanime.tv','dl.dmhy.org','share.dmhy.org','nyaa.si'):
-                return verify_hash(candidate,self.web.fetch(href).content)
+                return verify_hash(candidate,self.fetch(href).content)
         raise ValueError('来源没有可核验的torrent文件，未提交下载')

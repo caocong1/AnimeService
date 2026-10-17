@@ -104,7 +104,7 @@ def test_empty_search_result_fragment_is_a_legitimate_empty_feed(setup,clock):
     assert Sources(db,web).rss(rows[0])
     row=fresh(db,rows[0]);state=db.get('site_health_tokyotosho')
     assert row['latest']=='本次RSS无条目' and row['failures']==0 and row['error']=='' and row['last_success']==clock.now
-    assert state['failures']==0 and state['stats']=={'polls':1,'empty':1} and not db.rows("SELECT * FROM events WHERE scope LIKE 'source:%'")
+    assert state['failures']==0 and state['stats']=={'http_attempts':1,'polls':1,'empty':1} and not db.rows("SELECT * FROM events WHERE scope LIKE 'source:%'")
 
 
 def test_challenge_page_cools_the_site_but_a_plain_page_or_bad_feed_only_its_feed(setup,clock):
@@ -112,7 +112,7 @@ def test_challenge_page_cools_the_site_but_a_plain_page_or_bad_feed_only_its_fee
     web.fetch.return_value=response(b'<!DOCTYPE html><html><head><title>Just a moment...</title></head><body><div id="cf-chl-widget"></div></body></html>','text/html; charset=utf-8')
     assert not Sources(db,web).rss(rows[0])
     state=db.get('site_health_tokyotosho')
-    assert '验证页面' in fresh(db,rows[0])['error'] and state['failures']==1 and state['host']=='www.tokyotosho.se' and state['last_error_at']==clock.now
+    assert '验证页面' in fresh(db,rows[0])['error'] and state['failures']==1 and state['host']=='www.tokyotosho.info' and state['last_error_at']==clock.now
     clock.now=state['next_attempt']+1
     web.fetch.return_value=response(b'<html><body><h1>Error</h1><p>Something went wrong</p></body></html>','text/html')
     assert not Sources(db,web).rss(fresh(db,rows[0]))
@@ -146,7 +146,7 @@ def test_deferred_feeds_take_turns_instead_of_starving(setup,clock):
     served=[Sources(db,web).rss(r) for r in rows]
     assert served==[True,False,False,False]
     assert [fresh(db,r)['next_attempt']-clock.now for r in rows[1:]]==[10,20,30]
-    assert db.get('site_health_tokyotosho')['stats']=={'polls':1,'success':1,'deferred':3}
+    assert db.get('site_health_tokyotosho')['stats']=={'http_attempts':1,'polls':1,'success':1,'deferred':3}
     clock.now+=10
     assert Sources(db,web).rss(fresh(db,rows[1])) and db.get('site_health_tokyotosho')['deferred']==0
 

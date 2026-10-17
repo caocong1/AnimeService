@@ -2,7 +2,7 @@ import base64,datetime,json,os,re,shutil,threading,time
 import psutil
 from pathlib import Path
 from .db import ROOT,STATES
-from .net import safe_error,NetworkError
+from .net import safe_error,NetworkError,RequestDeferred
 from .qbit import Qbit
 from .download_policy import require_submission_ready,fallback_receipt
 from .fidelity import fidelity_blocker
@@ -166,6 +166,8 @@ class Engine:
             self.db.execute("UPDATE candidates SET status='rejected',reason=? WHERE id=?",(str(e),candidate['id']))
         except ValueError as e:
             self.db.execute("UPDATE candidates SET status='review',reason=? WHERE id=?",(str(e)[:300],candidate['id']))
+        except RequestDeferred:
+            self.db.execute("UPDATE candidates SET status='retry',reason=? WHERE id=?",('站点请求等待下一时隙',candidate['id']))
         except Exception as e:
             self.db.execute("UPDATE candidates SET status='retry',reason=? WHERE id=?",(safe_error(e),candidate['id']))
             self.db.event('candidate:'+str(candidate['id']),safe_error(e),'error')
