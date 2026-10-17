@@ -454,6 +454,8 @@ class Engine:
             self.step('source_review.publish_available',self.source_review.publish_available)
             self.step('source_review.tick',self.source_review.tick)
             self.step('subtitle_studio.tick',self.subtitle_studio.tick)
+            if time.time()-self.db.get('events_pruned_at',0)>=3600:
+                self.step('events.prune',self.db.prune_events);self.db.set('events_pruned_at',time.time())
             self.db.set('download_maintenance_at',time.time())
         finally:self.maintenance_lock.release()
     def maintain_loop(self):

@@ -132,8 +132,10 @@ function shell(active) {
     const r = await api('/check', {});
     toast(r.blocker ? '已请求检查 · 下载受阻：' + r.blocker : '已请求检查新集');
   }));
-  boot().then(() => { health(); setInterval(health, 60000); }).catch(e => toast(e.message));
-  addEventListener('pageshow', e => { if (e.persisted) health(); });
+  const poll = () => health(active === 'manage');  // only the management page needs the full status
+  boot().then(() => { poll(); setInterval(() => { if (!document.hidden) poll(); }, 60000); }).catch(e => toast(e.message));
+  addEventListener('pageshow', e => { if (e.persisted) poll(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 }
 
 function statusProblems(s, now = Date.now() / 1000) {
@@ -156,10 +158,24 @@ function statusProblems(s, now = Date.now() / 1000) {
   return { error, reviews, reviewMessage };
 }
 
-async function health() {
+function healthSummary(h, now = Date.now() / 1000) {
+  /* From /api/health: alive within 240 s of the last heartbeat, then blocker, error, reviews in that order. */
+  const alive = h.heartbeat && h.heartbeat.age != null && h.heartbeat.age < 240;
+  const p = h.problems || {};
+  const state = !alive ? 'down' : p.blocker || p.error || p.reviews ? 'warn' : 'ok';
+  const text = !alive ? '后台未响应' : p.blocker ? '下载受阻' : p.error ? '有错误' : p.reviews ? '有待核查' : '后台正常';
+  return { state, text, title: alive ? '心跳 ' + ago(now - h.heartbeat.age) : '' };
+}
+
+async function health(full = false) {
   const el = $('#health');
   if (!el) return;
   try {
+    if (!full) {
+      const summary = healthSummary(await api('/health'));
+      el.dataset.state = summary.state; el.lastElementChild.textContent = summary.text; el.title = summary.title;
+      return;
+    }
     const s = await api('/status');
     const alive = s.heartbeat && Date.now() / 1000 - s.heartbeat.time < 240;
     const blocked = s.downloader?.blocker;

@@ -71,3 +71,14 @@ test('later successful history sync resolves only its own old failure', () => {
   const serviceFailure = { ...failure, scope: 'service' };
   assert.equal(context.statusProblems({ ...s, events: [failure, serviceFailure] }, 10001).error, serviceFailure);
 });
+
+test('healthSummary renders the cheap /api/health answer with the same priorities as the full status', () => {
+  const summary = (h) => context.healthSummary(h, 10000);
+  assert.equal(JSON.stringify(summary({ heartbeat: { age: null }, problems: {} })), JSON.stringify({ state: 'down', text: '后台未响应', title: '' }));  // objects cross the vm boundary
+  assert.equal(summary({ heartbeat: { age: 300 }, problems: {} }).state, 'down');
+  assert.equal(summary({ heartbeat: { age: 5 }, problems: {} }).state, 'ok');
+  assert.equal(summary({ heartbeat: { age: 5 }, problems: { reviews: 2 } }).text, '有待核查');
+  assert.equal(summary({ heartbeat: { age: 5 }, problems: { reviews: 2, error: { scope: 'task:x' } } }).text, '有错误');
+  assert.equal(summary({ heartbeat: { age: 5 }, problems: { blocker: '迅雷优先', error: { scope: 'x' } } }).text, '下载受阻');
+  assert.match(summary({ heartbeat: { age: 5 }, problems: {} }).title, /^心跳 /);
+});
