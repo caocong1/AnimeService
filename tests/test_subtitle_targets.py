@@ -33,6 +33,7 @@ def fixture(setup,monkeypatch):
     return db,q,e,archive,old,new,p,target
 
 
+@pytest.mark.requires_lab
 def test_freeze_preserves_episode_watch_and_old_workbook(setup,monkeypatch):
     db,q,e,a,old,new,p,target=fixture(setup,monkeypatch)
     original_base=a.add_base(42,1,2,Path(db.path.parent/'base.vtt'),{'language':'chi','source_key':'transition-fixture','media_fingerprint':lab_core().fingerprint(old),'release':'[Group] Example S01E02'})
@@ -52,6 +53,7 @@ def test_freeze_preserves_episode_watch_and_old_workbook(setup,monkeypatch):
 
 
 @pytest.mark.parametrize('failure',['unknown_media','stale_review','no_listening','wish','wrong_manifest','stale_version'])
+@pytest.mark.requires_lab
 def test_freeze_rejects_unproved_or_out_of_scope_target(setup,monkeypatch,failure):
     db,q,e,a,old,new,p,target=fixture(setup,monkeypatch)
     if failure=='unknown_media':p['fingerprint']='b'*64
@@ -82,6 +84,7 @@ def publication_fixture(setup,monkeypatch):
     return db,q,e,a,old,new,{'target_id':frozen['target_id'],'build_id':'fixture','player_review':player,'idle_review':idle},target
 
 
+@pytest.mark.requires_lab
 def test_publish_waits_for_paused_session_then_retains_old_url(setup,monkeypatch):
     db,q,e,a,old,new,p,target=publication_fixture(setup,monkeypatch)
     original=db.one('SELECT * FROM episodes')
@@ -97,6 +100,7 @@ def test_publish_waits_for_paused_session_then_retains_old_url(setup,monkeypatch
     assert len(db.rows('SELECT * FROM subtitle_publications'))==1
 
 
+@pytest.mark.requires_lab
 def test_publish_denies_missing_build_new_edit_and_unproved_idle(setup,monkeypatch):
     db,q,e,a,old,new,p,target=publication_fixture(setup,monkeypatch)
     before=db.one('SELECT * FROM episodes')
@@ -109,6 +113,7 @@ def test_publish_denies_missing_build_new_edit_and_unproved_idle(setup,monkeypat
     assert db.one('SELECT * FROM episodes')==before and q.adds==0
 
 
+@pytest.mark.requires_lab
 def test_core_acceptance_does_not_activate_frozen_research_media(setup,monkeypatch):
     db,q,e,a,old,new,p,target=fixture(setup,monkeypatch)
     e.subtitle_studio.production_targets.freeze(42,2,p)
@@ -117,6 +122,7 @@ def test_core_acceptance_does_not_activate_frozen_research_media(setup,monkeypat
     assert authored(db,{**target,'show_id':42,'episode':2}) is None
 
 
+@pytest.mark.requires_lab
 def test_blacklist_after_freeze_blocks_publication_and_retained_urls(setup,monkeypatch):
     db,q,e,a,old,new,p,target=publication_fixture(setup,monkeypatch)
     db.set('source_publisher_blacklist',[{'publisher':'Group','aliases':['Group'],'reason':'synthetic advertisement fixture'}])
@@ -125,6 +131,7 @@ def test_blacklist_after_freeze_blocks_publication_and_retained_urls(setup,monke
     assert db.one('SELECT * FROM episodes')==before and q.adds==0
 
 
+@pytest.mark.requires_lab
 def test_changed_frozen_media_never_retargets_or_overwrites_workbook(setup,monkeypatch):
     db,q,e,a,old,new,p,target=fixture(setup,monkeypatch)
     e.subtitle_studio.production_targets.freeze(42,2,p)
@@ -134,6 +141,7 @@ def test_changed_frozen_media_never_retargets_or_overwrites_workbook(setup,monke
     assert head(db,42,2)==record and work.read_bytes()==original
 
 
+@pytest.mark.requires_lab
 def test_api_session_csrf_scope_and_private_target_responses(setup,monkeypatch):
     from fastapi.testclient import TestClient
     from anime.app import create_app
@@ -155,6 +163,7 @@ def test_api_session_csrf_scope_and_private_target_responses(setup,monkeypatch):
         assert q.adds==0
 
 
+@pytest.mark.requires_lab
 def test_published_build_hash_and_font_assets_are_rechecked(setup,monkeypatch):
     from anime.subtitle_targets import accepted_build
     db,q,e,a,old,new,p,target=fixture(setup,monkeypatch);core=lab_core()

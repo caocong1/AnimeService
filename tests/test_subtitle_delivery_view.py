@@ -8,6 +8,7 @@ from anime.subtitle_delivery import SubtitleDelivery
 from anime.subtitle_delivery_view import catalogue, report_progress, resources
 
 
+@pytest.mark.requires_lab
 def test_report_stage_requires_active_exact_owner_and_does_not_change_inputs(setup, monkeypatch):
     db,q,e,archive,old,new,freeze,target,record=prepared_candidate(setup,monkeypatch)
     scheduler=SubtitleDelivery(db);job=scheduler.record_preparation(42,2)
@@ -29,6 +30,7 @@ def test_report_stage_requires_active_exact_owner_and_does_not_change_inputs(set
     assert q.adds==0
 
 
+@pytest.mark.requires_lab
 def test_resource_counts_use_same_episode_actual_files_dedupe_and_fidelity(setup,monkeypatch):
     db,q,e,archive,old,new,freeze,target,record=prepared_candidate(setup,monkeypatch)
     # Existing reconciled fixture master is a raw/soft candidate only when labelled.

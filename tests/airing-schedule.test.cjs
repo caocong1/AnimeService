@@ -57,3 +57,13 @@ test('corrected backend lists and lists without missing entries need no detail r
   await context.applyListAiringSchedules(list, async () => { throw Error('Unexpected detail request'); });
   assert.equal(list[0].eps[0].s, 'missing');
 });
+
+test('today() is the local calendar date, not the UTC date', () => {
+  const local = new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const today = vm.runInContext('today()', context);  // a top-level const is not a context property
+  assert.match(today, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(today, local);
+  const shifted = new Date(Date.UTC(2026, 9, 17, 18, 30));  // 18:30 UTC is already the 18th in UTC+8
+  const expected = new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Shanghai' }).format(shifted);
+  assert.equal(expected, '2026-10-18');
+});

@@ -12,6 +12,7 @@ from anime.subtitle_delivery_materials import readiness
 
 
 @pytest.mark.parametrize('failure', [None, 'policy_missing', 'optin_missing', 'wrong_target', 'expired', 'changed_report'])
+@pytest.mark.requires_lab
 def test_first_release_uses_chinese_and_real_output_preparation_without_fake_audio(setup, monkeypatch, failure):
     db,q,e,archive,old,new,freeze,target,record=prepared_candidate(setup,monkeypatch)
     before=(db.rows('SELECT * FROM episodes'),db.rows('SELECT * FROM watches'))
@@ -40,6 +41,7 @@ def test_first_release_uses_chinese_and_real_output_preparation_without_fake_aud
     assert before==(db.rows('SELECT * FROM episodes'),db.rows('SELECT * FROM watches')) and q.adds==0
 
 
+@pytest.mark.requires_lab
 def test_already_delivered_episode_cannot_resume_or_repeat_first_release(setup,monkeypatch):
     db,q,e,archive,old,new,freeze,target,record=prepared_candidate(setup,monkeypatch)
     scheduler=SubtitleDelivery(db);job=scheduler.record_preparation(42,2)
@@ -78,6 +80,7 @@ def release_fixture(db, target):
 
 
 @pytest.mark.parametrize('failure',[None,'unknown','wrong_owner','bad_file','wrong_episode','bad_player','worker_active','not_published'])
+@pytest.mark.requires_lab
 def test_finished_receipt_verifies_files_and_releases_only_confirmed_owner(setup,monkeypatch,failure):
     db,q,e,archive,old,new,freeze,target,record=prepared_candidate(setup,monkeypatch)
     before=(db.rows('SELECT * FROM episodes'),db.rows('SELECT * FROM watches'))

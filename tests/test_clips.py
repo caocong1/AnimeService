@@ -74,6 +74,7 @@ def wait(clips,key,jid):
 
 
 @pytest.mark.parametrize('fmt,audio', [('mp4',True),('mp4',False),('gif',True)])
+@pytest.mark.requires_ffmpeg
 def test_real_export_bounds_resize_audio_and_original_preserved(movie,fmt,audio):
     db,key,source = movie; before = hashlib.sha256(source.read_bytes()).hexdigest()
     player = WebPlayer(db); clips = Clips(player)
@@ -105,6 +106,7 @@ def test_real_export_bounds_resize_audio_and_original_preserved(movie,fmt,audio)
     clips.close()
 
 
+@pytest.mark.requires_ffmpeg
 def test_cancel_stalled_process_and_no_partial_delivered(movie,monkeypatch):
     db,key,_ = movie; player = WebPlayer(db); clips = Clips(player)
     clips.probe(player.item(key))
@@ -123,6 +125,7 @@ def test_cancel_stalled_process_and_no_partial_delivered(movie,monkeypatch):
     clips.close()
 
 
+@pytest.mark.requires_ffmpeg
 def test_api_auth_media_binding_blacklist_and_readonly(movie,monkeypatch):
     db,key,source = movie; engine = Mock(); app = create_app(db,engine,start_worker=False)
     with TestClient(app,base_url='http://127.0.0.1:4871') as client:
@@ -146,6 +149,7 @@ def test_api_auth_media_binding_blacklist_and_readonly(movie,monkeypatch):
     assert source.is_file(); engine.submit.assert_not_called()
 
 
+@pytest.mark.requires_ffmpeg
 def test_restart_interrupts_unfinished_and_rejects_changed_source(movie):
     db,key,source=movie; clips=Clips(WebPlayer(db)); clips.root.mkdir(parents=True)
     jid='a'*32

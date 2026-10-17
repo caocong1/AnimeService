@@ -32,6 +32,7 @@ def completed_sample(setup,purpose='subtitle_sample'):
 
 
 @pytest.mark.parametrize('purpose',['source_sample','subtitle_sample'])
+@pytest.mark.requires_lab
 def test_verified_complete_sample_can_be_archived_while_qbit_is_offline(setup,monkeypatch,purpose):
     db,q,e,table,c,path,ep=completed_sample(setup,purpose)
     before=(db.one('SELECT * FROM tasks'),db.one(f'SELECT * FROM {table}'),db.show(42))
@@ -99,6 +100,7 @@ def test_file_presence_cannot_override_manifest_scope_ownership_or_unknown_resul
     assert (q.adds,q.starts,q.stops)==controls
 
 
+@pytest.mark.requires_lab
 def test_linked_sample_needs_the_existing_exact_read_only_receipt(setup):
     db,q,e,table,c,path,ep=completed_sample(setup)
     task=db.one('SELECT * FROM tasks');db.execute("UPDATE tasks SET status='linked'")

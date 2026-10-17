@@ -11,7 +11,11 @@ jobs:
         with:
           python-version: '3.14'
       - run: python -m pip install -r requirements-dev.txt
-      - run: python -m pytest -q
+      - name: Install ffmpeg for media tests
+        run: choco install ffmpeg -y --no-progress
+      # Tests marked requires_lab need the private subtitle core and are reported as skipped here;
+      # the original machine runs them. Anything else failing is a real regression.
+      - run: python -m pytest -q -rs
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
