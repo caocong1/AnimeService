@@ -87,6 +87,9 @@ def test_health_problems_follow_the_status_rules_and_events_are_pruned(setup):
     assert problems(db,now+7200)['error'] is None  # older than an hour
     db.set('downloader_preference','thunder_first');assert problems(db,now)['blocker']
     for i in range(10):db.execute('INSERT INTO events(time,level,scope,message) VALUES(?,?,?,?)',(now-40*86400,'info','old','x'))
-    assert db.prune_events(now=now)==10 and db.rows("SELECT * FROM events WHERE scope='old'")==[]
-    db.set('events_keep_days',1);db.execute('INSERT INTO events(time,level,scope,message) VALUES(?,?,?,?)',(now-2*86400,'info','older','y'))
-    assert db.prune_events(now=now)==1 and db.rows("SELECT * FROM events WHERE scope='source:9'")  # recent rows stay
+    assert db.prune_events(now=now)==0 and len(db.rows("SELECT * FROM events WHERE scope='old'"))==10  # within the newest 2000: kept
+    with db.connect() as c:c.executemany('INSERT INTO events(time,level,scope,message) VALUES(?,?,?,?)',[(now-i,'info','recent','z') for i in range(2000)])
+    assert db.prune_events(now=now)==10 and db.rows("SELECT * FROM events WHERE scope='old'")==[]  # old and beyond the newest 2000
+    db.set('events_keep_days','bad');db.execute('INSERT INTO events(time,level,scope,message) VALUES(?,?,?,?)',(now-2*86400,'info','older','y'))
+    assert db.prune_events(now=now)==0  # an invalid keep-days setting falls back to 30 days
+    db.set('events_keep_days',1);assert db.prune_events(now=now)==0 and db.rows("SELECT * FROM events WHERE scope='older'")  # still within the newest 2000
