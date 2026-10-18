@@ -38,15 +38,52 @@ class Api(private val prefs: Prefs) {
         .build()
 
     @Volatile private var token: String? = null
+    @Volatile private var capabilities: Map<String, Any?> = emptyMap()
+    @Volatile private var capabilityServer: String? = null
 
     val base: String get() = prefs.server.trimEnd('/')
 
     fun url(path: String) = base + path
 
+    /** Optional capabilities the bootstrap advertised for the CURRENT server; another server starts from none. */
+    val negotiatedCapabilities: Map<String, Any?> get() = if (capabilityServer == base) capabilities else emptyMap()
+
     suspend fun bootstrap(): JSONObject {
         val d = JSONObject(call(Request.Builder().url(url("/api/bootstrap")).build()))
         token = d.optString("token")
+        capabilities = capabilityWhitelist(d.optJSONObject("capabilities"))
+        capabilityServer = base
         return d
+    }
+
+    /** A structured reply: HTTP status (0 when unreachable) and the JSON object body when there is one. */
+    class StructuredReply(val status: Int, val body: Map<String, Any?>?)
+
+    /**
+     * Writer traffic keeps the structured 409/503 bodies instead of throwing; a 403 refreshes the token
+     * once and retries the SAME request, like post(). A GET is sent when [body] is null.
+     */
+    suspend fun structured(path: String, body: Map<String, Any?>?): StructuredReply {
+        if (token == null && body != null) bootstrap()
+        val first = exchange(path, body)
+        if (first.status != 403 || body == null) return first
+        if ((first.body?.get("error") as? String)?.contains("不受信任") == true) return first
+        bootstrap()
+        return exchange(path, body)
+    }
+
+    private suspend fun exchange(path: String, body: Map<String, Any?>?): StructuredReply = withContext(Dispatchers.IO) {
+        val request = if (body == null) Request.Builder().url(url(path)).header("X-Anime-Token", token.orEmpty()).build()
+                      else postRequest(path, JSONObject(body))
+        try {
+            client.newCall(request).execute().use { r ->
+                val text = r.body?.string().orEmpty()
+                val parsed = try { toMap(JSONObject(text)) } catch (e: org.json.JSONException) { null }
+                StructuredReply(r.code, parsed)
+            }
+        } catch (e: IOException) {   // SSL failures are IOExceptions too: unreachable, never a success
+            StructuredReply(0, null)
+        }
     }
 
     suspend fun get(path: String): String = call(Request.Builder().url(url(path)).build())
@@ -103,6 +140,21 @@ class Api(private val prefs: Prefs) {
     companion object {
         private const val LOGIN = "/api/access/login"
         private val JSON = "application/json".toMediaType()
+
+        /** Only the fields the app knows are kept from an optional capabilities object. */
+        fun capabilityWhitelist(c: JSONObject?): Map<String, Any?> {
+            val w = c?.optJSONObject("playback_writer") ?: return emptyMap()
+            return mapOf("playback_writer" to mapOf("protocol" to w.opt("protocol"), "enabled" to w.opt("enabled")))
+        }
+
+        fun toMap(o: JSONObject): Map<String, Any?> = o.keys().asSequence().associateWith { k -> fromJson(o.get(k)) }
+
+        private fun fromJson(v: Any?): Any? = when (v) {
+            is JSONObject -> toMap(v)
+            is JSONArray -> (0 until v.length()).map { fromJson(v.get(it)) }
+            JSONObject.NULL -> null
+            else -> v
+        }
 
         /**
          * "192.168.1.20" → "http://192.168.1.20:4871" (LAN); "anime.example.com:38443" →

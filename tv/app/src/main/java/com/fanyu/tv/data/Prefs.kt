@@ -34,6 +34,11 @@ class Prefs(context: Context) {
     fun setSourceOffset(media: String, identity: String, seconds: Double) =
         sp.edit().putFloat("off:$media:$identity", seconds.toFloat()).apply()
 
+    /** Display label of this box's progress writer ("电视播放器 XXXX"): a random suffix, never an identity. */
+    var writerLabel: String
+        get() = sp.getString("writer_label", "") ?: ""
+        set(value) = sp.edit().putString("writer_label", value).apply()
+
     fun globalOffset(media: String): Double = sp.getFloat("goff:$media", 0f).toDouble()
     fun setGlobalOffset(media: String, seconds: Double) = sp.edit().putFloat("goff:$media", seconds.toFloat()).apply()
 }

@@ -98,7 +98,7 @@ class ShowActivity : ComponentActivity() {
         }
         val s = show
         when {
-            s != null -> ShowPage(s, onPlay = { startActivity(PlayerActivity.intent(this, id, it.n)) }, onToggle = ::toggle, toast = toast)
+            s != null -> ShowPage(s, onPlay = { startActivity(PlayerActivity.intent(this, id, it.n, explicit = true)) }, onToggle = ::toggle, toast = toast)
             error != null -> ErrorPanel(error!!, retry = { error = null; reloads++ }, change = null)
             else -> Box(Modifier.fillMaxSize().background(C.bg))
         }
