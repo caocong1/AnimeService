@@ -100,7 +100,8 @@ def test_failed_source_is_retryable(library):
             raise TimeoutError()
         return original(path, params)
     player.danmu = unavailable
-    assert player.auto_danmu(key)['status'] == 'error'
+    failed = player.auto_danmu(key)
+    assert failed['status'] == 'error' and failed['sources'] == [] and 'comments' not in failed
     player.danmu = original
     assert player.auto_danmu(key)['status'] == 'matched'
 

@@ -18,7 +18,7 @@ def ugc_episode(title, names, episode, season=1):
 
 
 def match(player, item):
-    fallback = {'status': 'needs_selection', 'message': '暂未找到可核验的本集来源，可稍后重试或补充来源。', 'comments': [], 'sources': [], 'candidates': []}
+    fallback = {'status': 'needs_selection', 'message': '暂未找到可核验的本集来源，可稍后重试或补充来源。', 'sources': [], 'candidates': []}
     if item.get('unverified') or not item.get('show_id') or not item.get('episode'):
         return {**fallback, 'message': '这份文件尚未核验作品和集数，请手动选择弹幕来源。'}
     show = player.db.one('SELECT title,original,mapping,metadata FROM shows WHERE id=?', (item['show_id'],))

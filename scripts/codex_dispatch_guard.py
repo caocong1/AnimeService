@@ -4,6 +4,7 @@ Reads Codex projections/logs only. Never opens the AnimeService database, starts
 an AI turn, releases a lease, or interrupts an episode production thread.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,21 +31,41 @@ def normalize_cwd(cwd):
 
 
 def load_config(path=CONFIG_PATH):
-    config = {**DEFAULTS, **json.loads(Path(path).read_text(encoding='utf-8'))}
+    raw = Path(path).read_bytes()
+    value = json.loads(raw.decode('utf-8-sig'))
+    if not isinstance(value, dict):raise ValueError('dispatcher config must be an object')
+    config = {**DEFAULTS, **value}
     if not isinstance(config['targets'], dict) or not config['targets']:
         raise ValueError(f'{path}: targets must map dispatcher thread ids to automation ids')
+    if any(not isinstance(k,str) or not k.strip() or not isinstance(v,str) or not v.strip() for k,v in config['targets'].items()):
+        raise ValueError('dispatcher targets must contain nonempty strings')
+    recovery=config['recovery_turns']
+    if not isinstance(recovery,dict) or any(k not in config['targets'] or not isinstance(v,str) or not v for k,v in recovery.items()):
+        raise ValueError('recovery_turns must map configured targets to turn ids')
     wait = config['wait_seconds']  # seconds without log progress before a scheduled turn counts as stale
     if isinstance(wait, bool) or not isinstance(wait, int) or not 60 <= wait <= 86400:
         config['wait_seconds'] = DEFAULTS['wait_seconds']  # outside 60..86400 or not an integer: the former hard-coded 20 minutes
     if not isinstance(config['cwd'], str) or not config['cwd'].strip():
         raise ValueError(f'{path}: cwd must name the dispatcher project directory')
-    missing = {'state', 'history', 'logs'} - set(config['db_files'] or {})
+    if not isinstance(config['db_files'],dict):raise ValueError('db_files must be an object')
+    missing = {'state', 'history', 'logs'} - set(config['db_files'])
     if missing:
         raise ValueError(f'{path}: db_files is missing {sorted(missing)}')
+    if any(not isinstance(v,str) or not v or '/' in v or '\\' in v or ':' in v or v in ('.','..') for v in config['db_files'].values()):
+        raise ValueError('db_files must contain filenames, not paths')
+    if len(set(config['db_files'].values()))!=len(config['db_files']):raise ValueError('db_files must be distinct')
+    if not isinstance(config['run_dir'],str) or not config['run_dir'].strip():raise ValueError('run_dir must be a nonempty path')
+    for key in ('node','codex_home'):
+        if config[key] is not None and (not isinstance(config[key],str) or not config[key].strip()):raise ValueError(f'{key} must be a path or null')
+    config['_config_path']=str(Path(path).resolve())
+    config['_config_sha256']=hashlib.sha256(raw).hexdigest()
     return config
 
 
-CONFIG = load_config()
+try:
+    CONFIG = load_config(); CONFIG_ERROR = None
+except (OSError,ValueError,TypeError) as error:
+    CONFIG = dict(DEFAULTS); CONFIG_ERROR = type(error).__name__ + ': invalid or unreadable dispatcher configuration'
 TARGETS = CONFIG['targets']
 RECOVERY_TURNS = CONFIG['recovery_turns']
 WAIT_SECONDS = CONFIG['wait_seconds']
@@ -111,17 +133,18 @@ def snapshot(home, now, config=None):
 def run(apply, home=None, now=None, config=None):
     """One guard pass. The status file is always written, with `error` set when the
     Codex projections could not be read; control results are recorded per thread."""
-    config = config or CONFIG
-    now = now or time.time()
+    config_error = CONFIG_ERROR if config is None else None
+    config = CONFIG if config is None else config
+    now = time.time() if now is None else now
     home = Path(home or config.get('codex_home') or Path.home() / '.codex')
     run_dir = Path(config['run_dir'])
     run_dir = run_dir if run_dir.is_absolute() else ROOT / run_dir
     status = {'at': now, 'apply': apply, 'threshold_seconds': config['wait_seconds'], 'threads': [], 'error': None}
     run_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        status['threads'] = snapshot(home, now, config)
-    except Exception as e:
-        status['error'] = f'{type(e).__name__}: {e}'
+    if config_error:status['error']=config_error
+    else:
+        try:status['threads'] = snapshot(home, now, config)
+        except Exception as e:status['error'] = f'{type(e).__name__}: {e}'
     for row in status['threads']:
         if not apply or row['decision'] != 'interrupt_stale_model_wait':
             continue
@@ -131,8 +154,11 @@ def run(apply, home=None, now=None, config=None):
         try:
             if not node:
                 raise FileNotFoundError('node not found on PATH and the configured path does not exist')
+            config_path=Path(config['_config_path'])
+            if hashlib.sha256(config_path.read_bytes()).hexdigest()!=config['_config_sha256']:
+                raise ValueError('dispatcher configuration changed during this pass')
             p = subprocess.run([node, str(control), row['thread_id'], row['turn_id']], capture_output=True, text=True, encoding='utf-8', timeout=25,
-                               env={**os.environ, 'ANIMESERVICE_DISPATCH_CONFIG': str(CONFIG_PATH)}, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                               env={**os.environ, 'ANIMESERVICE_DISPATCH_CONFIG': str(config_path)}, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             row['control_exit_code'] = p.returncode
             row['control_receipt'] = p.stdout.strip()[:2000]
             row['control_error'] = p.stderr.strip()[:500]
@@ -140,11 +166,15 @@ def run(apply, home=None, now=None, config=None):
             row['control_exit_code'] = None
             row['control_receipt'] = ''
             row['control_error'] = f'{type(e).__name__}: {e}'[:500]
-        with (run_dir / 'actions.jsonl').open('a', encoding='utf-8') as f:
-            f.write(json.dumps({'at': now, **row}, ensure_ascii=False) + '\n')
-    tmp = run_dir / 'status.tmp'
-    tmp.write_text(json.dumps(status, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    tmp.replace(run_dir / 'status.json')
+        try:
+            with (run_dir / 'actions.jsonl').open('a', encoding='utf-8') as f:
+                f.write(json.dumps({'at': now, **row}, ensure_ascii=False) + '\n')
+        except OSError as error:status['error']='action_log: '+type(error).__name__
+    # Concurrent diagnostic/apply invocations must not share one temporary file.
+    with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=run_dir,prefix='status-',suffix='.tmp',delete=False) as f:
+        tmp=Path(f.name);f.write(json.dumps(status,ensure_ascii=False,indent=2)+'\n')
+    try:tmp.replace(run_dir/'status.json')
+    finally:tmp.unlink(missing_ok=True)
     return status
 
 
@@ -154,7 +184,7 @@ def main():
     args = parser.parse_args()
     status = run(args.apply)
     print(json.dumps(status, ensure_ascii=False))
-    sys.exit(1 if status['error'] else 0)
+    sys.exit(1 if status['error'] or any(row.get('control_error') or row.get('control_exit_code') not in (None,0) for row in status['threads']) else 0)
 
 
 if __name__ == '__main__':

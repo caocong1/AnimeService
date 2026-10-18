@@ -25,11 +25,29 @@
      into one remix per window; every caller gets the promise of that shared run. A request made while a
      run is in progress starts one more run after it, so the latest state is always applied. */
   function createScheduler(run, delay = 50) {
-    let queued = null;
-    return () => {
-      queued ||= new Promise(resolve => setTimeout(resolve, delay)).then(() => { queued = null; return run(); });
-      return queued;
+    let queued = null, running = false, closed = false;
+    async function drain() {
+      if (running || closed || !queued?.ready) return;
+      const batch = queued; queued = null; running = true;
+      try { batch.resolve(await run()); } catch (error) { batch.reject(error); }
+      finally { running = false; drain(); }
+    }
+    const schedule = () => {
+      if (closed) return Promise.resolve();
+      if (!queued) {
+        const batch = {ready:false};
+        batch.promise = new Promise((resolve,reject) => Object.assign(batch,{resolve,reject}));
+        queued = batch;
+        batch.timer = setTimeout(() => { batch.ready = true; drain(); }, delay);
+      }
+      return queued.promise;
     };
+    schedule.cancel = () => {
+      if (queued) { clearTimeout(queued.timer); queued.resolve(); queued = null; }
+    };
+    schedule.close = () => { closed = true; schedule.cancel(); };
+    schedule.resume = () => { closed = false; };
+    return schedule;
   }
   function createReplacer(plugin) {
     let pending = Promise.resolve();

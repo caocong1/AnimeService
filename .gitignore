@@ -83,6 +83,7 @@
 !/docs/WEB-PLAYBACK-RESEARCH.md
 !/docs/PLAYER-QA.md
 !/docs/PLAYBACK-SESSION-CONTRACT.md
+!/docs/DISPATCH-RECEIPT-CONTRACT.md
 !/docs/automation-prompts/
 !/docs/deployment.example.json
 /static/vendor/

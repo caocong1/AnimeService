@@ -478,14 +478,18 @@
 
   async function remixDanmu() {
     if (!art) return;
+    const revision = danmuRev, player = art;
     comments = DanmuTiming.mix(selected, 0, art.duration);
     replaceDanmu ||= DanmuTiming.createReplacer(art.plugins.artplayerPluginDanmuku);
     onScreen.clear(); refreshDanmuList();
     await replaceDanmu(comments);
+    if (revision !== danmuRev || player !== art) return;
     renderNote();
   }
   // Every caller shares one remix per 50 ms window (source loads, auto-match, alignment, nudges).
   const applyDanmu = DanmuTiming.createScheduler(remixDanmu);
+  addEventListener('pagehide', () => { ++danmuRev; applyDanmu.close(); });
+  addEventListener('pageshow', () => { applyDanmu.resume(); if (art) applyDanmu().catch(() => {}); });
   function renderNote() {
     const failures=selected.filter(s=>s.error).length, n=listRows.length;
     $('#danmu-note').textContent = failures ? (n ? `${n} 条 · 有失败` : '来源失败') : `${n} 条`;

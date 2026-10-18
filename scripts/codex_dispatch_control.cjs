@@ -2,11 +2,21 @@ const net = require('node:net');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const [threadId, turnId] = process.argv.slice(2);
 // Same dispatcher list as codex_dispatch_guard.py; ANIMESERVICE_DISPATCH_CONFIG points both at another copy.
-const config = JSON.parse(fs.readFileSync(process.env.ANIMESERVICE_DISPATCH_CONFIG || path.join(__dirname, 'codex_dispatch.json'), 'utf8'));
-const allowed = new Set(Object.keys(config.targets || {}));
-if (!allowed.has(threadId) || !/^[0-9a-f-]{36}$/.test(turnId || '')) throw Error('outside dispatcher scope');
+function loadConfig(filename = process.env.ANIMESERVICE_DISPATCH_CONFIG || path.join(__dirname, 'codex_dispatch.json')) {
+  const config = JSON.parse(fs.readFileSync(filename, 'utf8').replace(/^\uFEFF/, ''));
+  if (!config?.targets || typeof config.targets !== 'object' || Array.isArray(config.targets)
+      || !Object.keys(config.targets).length || Object.entries(config.targets).some(([id,automation]) => !id.trim() || typeof automation !== 'string' || !automation.trim()))
+    throw Error('invalid dispatcher targets');
+  return config;
+}
+function validateScope(config, threadId, turnId) {
+  if (!Object.hasOwn(config.targets, threadId) || !/^[0-9a-f-]{36}$/.test(turnId || '')) throw Error('outside dispatcher scope');
+}
+module.exports = {loadConfig, validateScope};
+function main() {
+const [threadId, turnId] = process.argv.slice(2);
+validateScope(loadConfig(), threadId, turnId);
 const method = 'thread-follower-interrupt-turn', versionText = '4', targetClientId = undefined;
 const params = {conversationId:threadId, mode:'system', expectedTurnId:turnId};
 const pending = new Map();
@@ -49,3 +59,5 @@ socket.once('connect', async () => {
   } catch (e) { console.error(e.message); process.exitCode = 1; }
   finally { clearTimeout(deadline); socket.end(); }
 });
+}
+if (require.main === module) main();

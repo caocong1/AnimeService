@@ -54,12 +54,35 @@ test('scheduler coalesces a burst into one remix and runs again for requests mad
   await new Promise(r => setTimeout(r, 15));
   assert.equal(runs, 1);                       // the burst shares one run
   const late = schedule();                     // requested while run 1 is in progress
+  await new Promise(r => setTimeout(r, 15));
+  assert.equal(runs, 1);                       // the next window must not overlap a slow run
   release();
   assert.deepEqual(await Promise.all(burst), [1, 1, 1]);
   await new Promise(r => setTimeout(r, 15));
   assert.equal(runs, 2);                       // the late request got its own run after the first
   release();
   assert.equal(await late, 2);
+});
+
+test('scheduler reads the latest selection, cancels pending work and resumes after pagehide', async () => {
+  const {createScheduler} = require('../static/danmu-timing.js');
+  let selected = 'old'; const applied = [];
+  const schedule = createScheduler(() => applied.push(selected), 5);
+  const pending = schedule(); selected = 'new'; await pending;
+  assert.deepEqual(applied, ['new']);
+  const cancelled = schedule(); schedule.close(); await cancelled;
+  await schedule(); await new Promise(r => setTimeout(r, 15));
+  assert.deepEqual(applied, ['new']);
+  schedule.resume(); selected = 'resumed'; await schedule();
+  assert.deepEqual(applied, ['new','resumed']);
+});
+
+test('scheduler propagates failures and can run again afterwards', async () => {
+  const {createScheduler} = require('../static/danmu-timing.js');
+  let attempts = 0;
+  const schedule = createScheduler(() => { if (++attempts === 1) throw Error('failed'); return attempts; }, 1);
+  await assert.rejects(schedule(), /failed/);
+  assert.equal(await schedule(), 2);
 });
 
 test('dedupe key treats equal time/text/mode as one comment and keeps distinct modes', () => {

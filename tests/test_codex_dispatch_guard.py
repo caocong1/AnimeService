@@ -80,3 +80,47 @@ def test_node_comes_from_path_or_the_configured_file(monkeypatch, tmp_path):
     assert guard.node_path({'node': str(present)}) == str(present)
     monkeypatch.setattr(guard.shutil, 'which', lambda name: '/usr/bin/node')
     assert guard.node_path({'node': None}) == '/usr/bin/node'
+
+
+def test_invalid_config_is_reported_without_reading_projections_or_running_control(tmp_path,monkeypatch):
+    import json
+    path=tmp_path/'invalid.json';path.write_text('{broken',encoding='utf-8')
+    monkeypatch.setenv('ANIMESERVICE_DISPATCH_CONFIG',str(path))
+    module=importlib.util.module_from_spec(SPEC);SPEC.loader.exec_module(module)
+    assert module.CONFIG_ERROR
+    monkeypatch.setitem(module.CONFIG,'run_dir',str(tmp_path/'status'))
+    def forbidden(*args,**kwargs):raise AssertionError('Invalid config must fail closed')
+    monkeypatch.setattr(module,'snapshot',forbidden)
+    monkeypatch.setattr(module.subprocess,'run',forbidden)
+    status=module.run(True,now=0)
+    assert status['error'] and status['threads']==[] and status['at']==0
+    assert json.loads((tmp_path/'status/status.json').read_text())['error']==status['error']
+
+
+def test_control_uses_the_loaded_config_and_records_failure(tmp_path,monkeypatch):
+    import json
+    from types import SimpleNamespace
+    path=tmp_path/'config.json';path.write_text(json.dumps({**guard.DEFAULTS,'targets':{TID:'automation-3'},'run_dir':str(tmp_path/'run')}),encoding='utf-8')
+    cfg=guard.load_config(path)
+    monkeypatch.setattr(guard,'snapshot',lambda *args:[{'thread_id':TID,'turn_id':'synthetic-turn','decision':'interrupt_stale_model_wait'}])
+    monkeypatch.setattr(guard,'node_path',lambda *args:'synthetic-node')
+    calls=[]
+    def control(command,**kwargs):
+        assert kwargs['env']['ANIMESERVICE_DISPATCH_CONFIG']==str(path.resolve())
+        assert kwargs['timeout']==25
+        calls.append(command)
+        return SimpleNamespace(returncode=7,stdout='',stderr='synthetic control failure')
+    monkeypatch.setattr(guard.subprocess,'run',control)
+    status=guard.run(True,now=1300,config=cfg)
+    assert len(calls)==1 and status['threads'][0]['control_exit_code']==7
+    assert status['threads'][0]['control_error']=='synthetic control failure'
+    path.write_text('{}',encoding='utf-8')
+    status=guard.run(True,now=1301,config=cfg)
+    assert len(calls)==1 and 'changed' in status['threads'][0]['control_error']
+
+
+@pytest.mark.parametrize('patch',[{'targets':{'t':None}},{'recovery_turns':[]},{'db_files':[]},{'db_files':{'state':'../prod.db','history':'h','logs':'l'}},{'run_dir':''},{'codex_home':5}])
+def test_config_rejects_unsafe_shapes(tmp_path,patch):
+    import json
+    path=tmp_path/'config.json';path.write_text(json.dumps({**guard.DEFAULTS,'targets':{'t':'a'},**patch}),encoding='utf-8')
+    with pytest.raises(ValueError):guard.load_config(path)
