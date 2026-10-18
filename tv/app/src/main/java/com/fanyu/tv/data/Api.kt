@@ -18,7 +18,7 @@ import javax.net.ssl.SSLException
 import java.util.concurrent.TimeUnit
 
 /** [code] is the HTTP status, 0 when the server could not be reached, [TLS] when HTTPS could not be verified. */
-class ApiError(val code: Int, message: String) : Exception(message) {
+class ApiError(val code: Int, message: String, val details: Map<String, Any?>? = null) : Exception(message) {
     val untrusted get() = code == 403 && message?.contains("不受信任") == true
     val needsPairing get() = code == 401
 
@@ -49,12 +49,17 @@ class Api(private val prefs: Prefs) {
     val negotiatedCapabilities: Map<String, Any?> get() = if (capabilityServer == base) capabilities else emptyMap()
 
     suspend fun bootstrap(): JSONObject {
-        val d = JSONObject(call(Request.Builder().url(url("/api/bootstrap")).build()))
+        val server = base                                   // bound before the request: a switch mid-flight never credits the new server
+        val d = JSONObject(call(Request.Builder().url(server + "/api/bootstrap").build()))
+        if (base != server) throw ApiError(0, "服务器已切换")
         token = d.optString("token")
         capabilities = capabilityWhitelist(d.optJSONObject("capabilities"))
-        capabilityServer = base
+        capabilityServer = server
         return d
     }
+
+    /** The server changed or pairing ended: nothing negotiated or issued for the old server may be reused. */
+    fun forgetServer() { token = null; capabilities = emptyMap(); capabilityServer = null }
 
     /** A structured reply: HTTP status (0 when unreachable) and the JSON object body when there is one. */
     class StructuredReply(val status: Int, val body: Map<String, Any?>?)
@@ -63,18 +68,22 @@ class Api(private val prefs: Prefs) {
      * Writer traffic keeps the structured 409/503 bodies instead of throwing; a 403 refreshes the token
      * once and retries the SAME request, like post(). A GET is sent when [body] is null.
      */
-    suspend fun structured(path: String, body: Map<String, Any?>?): StructuredReply {
+    suspend fun structured(path: String, body: Map<String, Any?>?, server: String = base): StructuredReply {
+        if (base != server) return StructuredReply(SERVER_CHANGED, null)
         if (token == null && body != null) bootstrap()
-        val first = exchange(path, body)
+        val first = exchange(path, body, server)
         if (first.status != 403 || body == null) return first
         if ((first.body?.get("error") as? String)?.contains("不受信任") == true) return first
         bootstrap()
-        return exchange(path, body)
+        if (base != server) return StructuredReply(SERVER_CHANGED, null)   // never replay the packet against another server
+        return exchange(path, body, server)
     }
 
-    private suspend fun exchange(path: String, body: Map<String, Any?>?): StructuredReply = withContext(Dispatchers.IO) {
-        val request = if (body == null) Request.Builder().url(url(path)).header("X-Anime-Token", token.orEmpty()).build()
-                      else postRequest(path, JSONObject(body))
+    private suspend fun exchange(path: String, body: Map<String, Any?>?, server: String): StructuredReply = withContext(Dispatchers.IO) {
+        if (base != server) return@withContext StructuredReply(SERVER_CHANGED, null)
+        val request = if (body == null) Request.Builder().url(server + path).header("X-Anime-Token", token.orEmpty()).build()
+                      else Request.Builder().url(server + path).header("Origin", origin()).header("X-Anime-Token", token.orEmpty())
+                          .post(JSONObject(body).toString().toRequestBody(JSON)).build()
         try {
             client.newCall(request).execute().use { r ->
                 val text = r.body?.string().orEmpty()
@@ -133,13 +142,16 @@ class Api(private val prefs: Prefs) {
     private fun read(r: Response): String {
         val text = r.body?.string().orEmpty()
         if (r.isSuccessful) return text
-        val message = runCatching { JSONObject(text) }.getOrNull()?.let { it.optString("error").ifEmpty { it.optString("detail") } }
-        throw ApiError(r.code, message?.ifEmpty { null } ?: "服务返回 ${r.code}")
+        val parsed = runCatching { JSONObject(text) }.getOrNull()
+        val message = parsed?.let { it.optString("error").ifEmpty { it.optString("detail") } }
+        throw ApiError(r.code, message?.ifEmpty { null } ?: "服务返回 ${r.code}", parsed?.let { toMap(it) })   // structured 409 reasons stay available
     }
 
     companion object {
         private const val LOGIN = "/api/access/login"
         private val JSON = "application/json".toMediaType()
+        /** Structured reply status: the server bound to this request changed underneath it. */
+        const val SERVER_CHANGED = -2
 
         /** Only the fields the app knows are kept from an optional capabilities object. */
         fun capabilityWhitelist(c: JSONObject?): Map<String, Any?> {
