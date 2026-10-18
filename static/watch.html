@@ -25,6 +25,7 @@
       <details class="playback-source" open><summary>当前播放文件与字幕</summary><dl class="kv"><dt>视频文件</dt><dd id="playing-file">正在读取…</dd><dt>字幕来源</dt><dd id="playing-subtitle" role="status">正在读取…</dd></dl><a class="link" id="playing-subtitle-library" href="/subtitle-library">查看字幕库</a></details>
       <section class="playback-controls" aria-label="音轨、字幕与弹幕">
         <div class="pc-row" id="playback-source-row" hidden><h2 class="pc-label"><label for="playback-source">播放源</label></h2><div class="pc-body pc-inline"><select id="playback-source"></select><span class="pc-note" id="tracking-status" role="status"></span></div></div>
+        <div class="pc-row" id="writer-row" hidden><h2 class="pc-label">进度写入</h2><div class="pc-body pc-inline"><span class="pc-note" id="writer-status" aria-live="polite"></span><button class="btn small" id="writer-takeover" type="button" hidden>接管</button></div></div>
         <div class="pc-row">
           <h2 class="pc-label"><label for="picture-mode">画面</label></h2>
           <div class="pc-body">
@@ -161,6 +162,7 @@
 <script src="/static/clip-export.js?v=1"></script>
 <script src="/static/picture-quality.js?v=1"></script>
 <script src="/static/finished-releases.js?v=20261016-unified"></script>
-<script src="/static/watch.js?v=37"></script>
+<script src="/static/playback-writer.js?v=1"></script>
+<script src="/static/watch.js?v=38"></script>
 </body>
 </html>

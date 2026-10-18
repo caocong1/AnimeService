@@ -38,9 +38,15 @@ async function api(path, body, options = {}) {
   return data;
 }
 
+/* Only the fields the pages know are kept from an optional capabilities object; nothing else is merged. */
+function capabilityWhitelist(c) {
+  const w = c && typeof c === 'object' && c.playback_writer && typeof c.playback_writer === 'object' ? c.playback_writer : null;
+  return { playback_writer: w ? { protocol: w.protocol, enabled: w.enabled } : null };
+}
 function boot() {
   App.ready ??= api('/bootstrap').then(b => {
-    Object.assign(App, { token: b.token, local: b.local, settings: b.settings, quarters: b.quarters || [], catalog_years: b.catalog_years || [] });
+    Object.assign(App, { token: b.token, local: b.local, settings: b.settings, quarters: b.quarters || [], catalog_years: b.catalog_years || [],
+      capabilities: capabilityWhitelist(b.capabilities) });
     return App;
   });
   return App.ready;
