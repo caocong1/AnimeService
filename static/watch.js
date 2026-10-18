@@ -24,6 +24,58 @@
     viewingLease(); viewingLeaseTimer = setInterval(viewingLease, 30000);
   });
   let played = false, art = null, media = null, show = null, lastPosition = 0, lastSave = 0, selected = [], comments = [], activeDanmu = null, danmuRev = 0, tracks = [];
+  /* ---------- explicit playback writer (v2), only when the bootstrap advertises it ---------- */
+  let writer = null, writerIntentAt = 0;
+  const writerLabel = () => {
+    let saved = null;
+    try { saved = localStorage.getItem('fanyu-writer-label'); } catch (_) {}
+    const label = PlaybackWriter.sanitizeLabel(saved) || PlaybackWriter.deviceLabel('网页播放器');
+    try { localStorage.setItem('fanyu-writer-label', label); } catch (_) {}
+    return label;
+  };
+  function openWriter() {
+    if (!window.PlaybackWriter || !PlaybackWriter.negotiated(App.capabilities)) return;   // legacy progress stays untouched
+    const headers = () => ({ 'Content-Type': 'application/json', 'X-Anime-Token': App.token });
+    const reply = async res => ({ status: res.status, ok: res.ok, body: await res.json().catch(() => null) });
+    const failed = () => ({ status: 0, ok: false, body: null });
+    writer = PlaybackWriter.create({
+      post: (path, body, options) => fetch(path, { method: 'POST', keepalive: options?.keepalive === true, headers: headers(), body: JSON.stringify(body) }).then(reply, failed),
+      get: path => fetch(path, { headers: { 'X-Anime-Token': App.token } }).then(reply, failed),
+      mediaKey: releaseId ? 'finished:' + releaseId : id, session: viewingSession, device: writerLabel(),
+    });
+    writer.subscribe(renderWriter);
+    writer.state().catch(() => {}).then(renderWriter);
+  }
+  /* Who holds progress is always visible; other devices' labels are plain text. */
+  function renderWriter() {
+    const row = $('#writer-row'), status = $('#writer-status'), button = $('#writer-takeover');
+    if (!writer) { row.hidden = true; return; }
+    const s = writer.snapshot(), owner = s.conflict?.device || '另一设备';
+    const text = s.status === 'writing' ? (s.unsaved ? '进度未保存：连接失败，播放继续' : '') :
+      s.status === 'conflict' || s.status === 'fenced' || s.status === 'stale' ? `由 ${owner} 持有进度 · 本机未保存` :
+      s.status === 'expired' ? '进度未保存：会话已过期' :
+      s.status === 'error' || s.status === 'unsupported' ? '进度未保存：连接失败' :
+      s.status === 'idle' || s.status === 'released' ? '进度未保存：按播放开始记录' : '';
+    status.textContent = text;
+    button.hidden = !['conflict', 'fenced', 'stale', 'expired'].includes(s.status);
+    button.textContent = s.status === 'expired' || s.status === 'stale' ? '重新获取' : '接管';
+    row.hidden = !text;
+  }
+  /* open on an explicit Play/Resume; takeover/reacquire only from the visible button with the generation shown. */
+  async function claimWriter(mode, expectedGeneration) {
+    if (!writer) return null;
+    const r = await writer.claim({ mode, expectedGeneration }).catch(e => ({ ok: false, reason: e.message }));
+    renderWriter();
+    if (r.ok) { lastSave = Date.now(); saveProgress().catch(() => {}); }
+    return r;
+  }
+  document.addEventListener('click', e => {
+    if (e.target.closest('#restart, #dismiss, [data-end-next]')) writerIntentAt = Date.now();
+    if (e.target.closest('#writer-takeover') && writer) {
+      const s = writer.snapshot();
+      claimWriter('takeover', s.conflict?.generation ?? s.generation);
+    }
+  }, true);
   let searchRev = 0;
   let detailRev = 0;
   let resultRows = [], resultContext = '本集推荐';
@@ -176,6 +228,18 @@
   /* Only real playback moves the stored position; opening or leaving the page never does. */
   async function saveProgress(keepalive = false) {
     if (audioSwitching || !played || !art || !Number.isFinite(art.duration) || art.duration <= 0) return;
+    if (writer) {   // v2 was negotiated: the legacy routes are never used, even on failure
+      if (writer.status !== 'writing') { renderWriter(); return; }
+      let playing;
+      if (finishedEndpoint) { playing = moved; moved = false; }
+      else { const delta = art.currentTime - lastPosition; playing = !art.video.paused && delta > 0 && delta < 35; lastPosition = art.currentTime; }
+      const packet = { position: art.currentTime, duration: art.duration, playing };
+      const r = await writer.progress(packet, { keepalive });
+      if (r.ok) tracking('续播进度已同步 · ' + clock(packet.position));
+      else if (!r.ignored && r.reason !== 'stale_response') { if (finishedEndpoint) moved ||= packet.playing; tracking('进度未保存'); }
+      renderWriter();
+      return;
+    }
     if (finishedEndpoint) {
       const body = {position:art.currentTime,duration:art.duration,playing:moved,session:viewingSession,sequence:++sequence};
       moved = false;
@@ -265,7 +329,7 @@
       if(t!==document.body && !$('#screen').contains(t) && !art.template.$player.contains(t)) return;
       if(t.closest('input, textarea, select, button, [contenteditable], #danmu-menu')) return;
       if(e.isComposing || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
-      if(e.code==='Space') { e.preventDefault(); if(!e.repeat) art.toggle(); }
+      if(e.code==='Space') { e.preventDefault(); if(!e.repeat) { writerIntentAt = Date.now(); art.toggle(); } }
       if(e.key==='Enter') { e.preventDefault(); if(!e.repeat) art.fullscreen=!art.fullscreen; }
       if(e.key==='ArrowLeft' || e.key==='ArrowRight') { e.preventDefault(); art.currentTime=Math.max(0,Math.min(art.duration,art.currentTime+(e.key==='ArrowRight'?5:-5))); }
       if(e.key==='ArrowUp' || e.key==='ArrowDown') { e.preventDefault(); adjustVolume(e.key==='ArrowUp'?0.05:-0.05); }
@@ -299,6 +363,11 @@
       // If audible autoplay is blocked, wait for the viewer to press play without muting.
       art.play().catch(() => {});
     });
+    art.template.$player.addEventListener('pointerdown', () => { writerIntentAt = Date.now(); }, { capture: true });
+    art.on('video:play', () => {   // autoplay and programmatic play never claim; a recent explicit action does
+      if (writer && writer.status !== 'writing' && Date.now() - writerIntentAt < 1500) claimWriter('open');
+    });
+    art.on('destroy', () => writer?.dispose());
     art.on('video:playing', () => { if (!releaseId) played = true; });
     art.on('video:seeked', () => { if (releaseId) lastPosition = art.currentTime; });
     art.on('video:error', () => { if (!audioSwitching) playbackFailure(); });
@@ -1020,7 +1089,7 @@
   addEventListener('resize', renderRows);
   $('#close-danmu-search').innerHTML = icon('close'); $('#danmu-back').innerHTML = icon('back');
   renderDisplay(); renderBlocked(); renderShot();
-  $('#playback-source').addEventListener('change', async e => { await saveProgress(); location.assign(e.target.value); });
+  $('#playback-source').addEventListener('change', async e => { await saveProgress(); if (writer) await writer.release().catch(() => {}); location.assign(e.target.value); });
 
   (async () => {
     try {
@@ -1045,6 +1114,7 @@
           finished:record.finished,release,viewing_session_supported:true};
       }
       viewingLease();
+      openWriter();
       $('#playing-file').textContent = media.name;
       if (media.show_id) $('#playing-subtitle-library').href = '/subtitle-library?show=' + media.show_id;
       $('#danmu-q').value = media.show_id ? '' : media.folder;
