@@ -51,7 +51,7 @@ def test_automatic_match_fallback_exact_title_and_stable_episode_url(library):
     _, _, calls = upstream_for(player)
     before = db.show(1)
     result = player.auto_danmu(key)
-    assert result['status'] == 'matched' and len(result['comments']) == 1
+    assert result['status'] == 'matched' and 'comments' not in result and sum(len(s['comments']) for s in result['sources']) == 1
     count = len(calls)
     assert count >= 4
     assert player.auto_danmu(key) == result and len(calls) == count
@@ -154,7 +154,7 @@ def test_comments_preserve_independent_source_clocks_and_stable_identity(library
     assert first[0]['source_identity'] == second[0]['source_identity']
     player.danmu = lambda *args: {'comments': [{'p':'10,1,16777215','m':'same'}]}
     result = player.comments([x['source_key'] for x in first])
-    assert len(result['comments']) == 1  # Legacy combined response remains compatible.
+    assert 'comments' not in result  # per-source rows only; the player mixes them itself
     assert len(result['sources']) == 2
     assert all(s['comments'][0]['time'] == 10 for s in result['sources'])
     assert result['sources'][0]['source_identity'] != result['sources'][1]['source_identity']
@@ -245,7 +245,7 @@ def test_saved_danmu_source_survives_restart_and_rejects_unbound_urls(library):
     restored.danmu = upstream
     result = restored.comments([source[0]['source_key']])
     assert result['sources'][0]['source_identity'] == source[0]['source_identity']
-    assert result['comments'][0]['text'] == 'saved'
+    assert result['sources'][0]['comments'][0]['text'] == 'saved'
     assert calls == ['https://www.bilibili.com/video/BV1234567890/?p=2']
     for invalid in ['unknown', 'http://127.0.0.1:4870/']:
         with pytest.raises(ValueError):
@@ -281,7 +281,7 @@ def test_auto_merges_providers_ugc_uses_title_not_part_index(library):
     assert result['status'] == 'matched'
     assert len(result['selected']) == len(seen) == 2
     assert 'bahamut' in result['selected'][0]['title']
-    assert len(result['comments']) == 1
+    assert 'comments' not in result and [len(s['comments']) for s in result['sources']] == [1, 1]  # the player dedupes across sources
 
 
 @pytest.mark.parametrize('suffix', [' 第12集', ' 第13集 解说', ' 第1-13集', ' 第13集 PV', ''])
