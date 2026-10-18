@@ -47,6 +47,7 @@
 !/scripts/supervisor.py
 !/scripts/stop_danmu.py
 !/scripts/stop_https.py
+!/docs/ORDINARY-MEDIA-VERSION-ISSUANCE.md
 /docs/*
 !/docs/SUBTITLE-ISSUE-REVIEW.md
 !/docs/CLAUDE-SUBTITLE-RESEARCH.md
