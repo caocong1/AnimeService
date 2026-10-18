@@ -328,8 +328,16 @@
   function audioLabel(value) {
     return audioTracks.find(t => String(t.index) === value)?.label || '文件默认';
   }
+  // Dolby/DTS/FLAC can leave a native video playing silently without firing error.
+  // The existing cache keeps video packets and converts these audio codecs to AAC.
+  function needsCompatibleAudio(track) {
+    return !!track?.codec && !['aac', 'mp3'].includes(track.codec);
+  }
+  function showAudioControls() {
+    return audioTracks.length > 1 || audioTracks.some(needsCompatibleAudio);
+  }
   function renderAudioSetting() {
-    if (audioTracks.length <= 1) {
+    if (!showAudioControls()) {
       if (art.setting.find('audio-track')) art.setting.remove('audio-track');
       return;
     }
@@ -354,7 +362,7 @@
       const d = await web(`/media/${id}/audio-tracks`);
       audioTracks = d.tracks; audioFingerprint = d.fingerprint;
       audioCopySupported = d.supported;
-      $('#audio-track-row').hidden = audioTracks.length <= 1;
+      $('#audio-track-row').hidden = !showAudioControls();
       sel.innerHTML = '<option value="">文件默认</option>' + audioTracks.map(t => `<option value="${t.index}">${esc(t.label)}${t.default ? '（默认标记）' : ''}</option>`).join('');
       sel.disabled = !d.supported || !audioTracks.length;
       note.textContent = !audioTracks.length ? '未检测到音轨' : !d.supported ? '此视频请用本机播放器切换音轨' : '';
@@ -364,6 +372,9 @@
       const saved = readSaved(audioStorageKey);
       if (saved?.fingerprint === audioFingerprint && audioTracks.some(t => String(t.index) === saved.index)) {
         await changeAudioTrack(saved.index);
+      } else {
+        const track = audioTracks.find(t => t.default) || audioTracks[0];
+        if (needsCompatibleAudio(track)) await changeAudioTrack(String(track.index));
       }
     } catch (e) { note.textContent = '音轨读取失败，可刷新重试或用本机播放器'; }
   }
@@ -427,7 +438,8 @@
       lastPosition = art.currentTime;
       screenState('');
       await changeSubtitle().catch(() => {}); await applyDanmu().catch(() => {});
-      note.textContent = '';
+      note.textContent = value && needsCompatibleAudio(audioTracks.find(t => String(t.index) === value))
+        ? '兼容音频 AAC · 画面保持原码流' : '';
       if (!snapshot.paused) {
         try { await art.play(); } catch (_) { note.textContent = '音轨已切换，点击播放继续'; }
       }
