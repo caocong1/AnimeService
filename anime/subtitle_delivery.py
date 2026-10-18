@@ -759,7 +759,7 @@ class SubtitleDelivery:
         """The durable receipt ledger of one job (v1 and legacy provenance), oldest first; readers fall back to events."""
         if not _exists(self.db, 'dispatch_receipts'):
             return []
-        rows = self.db.rows('SELECT * FROM dispatch_receipts WHERE job_id=? ORDER BY recorded_at,receipt_id', (identity,))
+        rows = self.db.rows('SELECT * FROM dispatch_receipts WHERE job_id=? ORDER BY recorded_at,rowid', (identity,))
         return [{**r, 'envelope': json.loads(r['envelope']), 'result': json.loads(r['result'])} for r in rows]
 
     def record_blocked(self, identity, thread_id, reasons, owner_stopped=False):

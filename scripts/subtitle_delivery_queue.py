@@ -1,14 +1,17 @@
 """Local delivery control plane; never instantiate Engine or call a downloader.
 
 Use status for read-only snapshots. Mutations are explicit subcommands. Lease and
-dispatch tokens stay in the local DB/process and are never printed or exported.
+dispatch tokens stay in the local DB/process or private begin-ticket archive;
+they are never printed or included in public receipt exports.
 """
 import argparse
+import base64
 import hashlib
 import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import threading
 
@@ -61,16 +64,58 @@ def load_ticket(path):
 def save_ticket(db_path, result):
     """Archive the ticket with its tokens next to the database (private); only the path is printed."""
     tickets = Path(db_path).resolve().parent / 'subtitle-delivery-tickets'
-    tickets.mkdir(parents=True, exist_ok=True)
+    tickets.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if tickets.resolve() != tickets or tickets.is_symlink():
+        raise ValueError('ticket directory must not be a redirected path')
+    protect_ticket_directory(tickets)
     # Hash the job identifier: even a malformed identifier cannot escape this directory.
     job = hashlib.sha256(result['id'].encode()).hexdigest()[:16]
     path = tickets / f"{job}-r{result['revision']}-{hashlib.sha256(result['ticket']['dispatch_token'].encode()).hexdigest()[:8]}.json"
     # Exclusive creation prevents overwriting another archived ticket. On Windows
-    # this inherits the private DB directory's ACL; 0600 only enforces POSIX mode.
+    # the file inherits only the newly protected ticket directory's two ACL rules.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, 'w', encoding='utf-8') as stream:
         stream.write(json.dumps(result['ticket'], ensure_ascii=False, indent=2) + '\n')
     return str(path)
+
+
+def protect_ticket_directory(path):
+    """Restrict only the ticket directory, never the DB/parent ACL. Fail before writing secrets.
+
+    https://learn.microsoft.com/dotnet/api/system.io.directory.setaccesscontrol
+    https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.setaccessruleprotection
+    Paths are encoded as data; no shell interpolation of paths or credentials.
+    """
+    if os.name != 'nt':
+        os.chmod(path, 0o700)
+        return
+    encoded_path = base64.b64encode(str(path).encode('utf-8')).decode('ascii')
+    script = r"""$ErrorActionPreference='Stop'
+$target=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('PATH_BASE64'))
+$current=[Security.Principal.WindowsIdentity]::GetCurrent().User
+$system=[Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$acl=[Security.AccessControl.DirectorySecurity]::new()
+$acl.SetAccessRuleProtection($true,$false)
+foreach($sid in @($current,$system)) {
+  $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
+}
+[IO.Directory]::SetAccessControl($target,$acl)
+$actual=Get-Acl -LiteralPath $target
+$rules=@($actual.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+$expected=@($current.Value,$system.Value) | Sort-Object -Unique
+if(-not $actual.AreAccessRulesProtected -or $rules.Count -ne $expected.Count) {throw 'ticket ACL protection failed'}
+foreach($rule in $rules) {
+  if($rule.IdentityReference.Value -notin $expected -or $rule.AccessControlType -ne 'Allow' -or $rule.FileSystemRights -ne 'FullControl') {throw 'unexpected ticket ACL'}
+}
+""".replace('PATH_BASE64', encoded_path)
+    command = base64.b64encode(script.encode('utf-16le')).decode('ascii')
+    powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    try:
+        subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-EncodedCommand', command],
+                       check=True, capture_output=True, timeout=10,
+                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError('cannot secure the ticket directory; dispatch remains protected, reconcile required') from None
 
 
 def evidence_file(path):

@@ -405,3 +405,29 @@ def test_ticket_archive_is_exclusive_and_does_not_accept_job_paths(delivery, tmp
     with pytest.raises(FileExistsError):
         cli.save_ticket(tmp_path / 'anime.db', result)
     assert path.read_bytes() == content
+
+
+def test_ticket_acl_failure_never_writes_a_ticket_or_releases_committing(delivery, tmp_path, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    db, scheduler, ready, now = delivery
+    identity, intent = begin(scheduler)
+    spec = importlib.util.spec_from_file_location('queue_acl_cli', Path(__file__).resolve().parents[1] / 'scripts/subtitle_delivery_queue.py')
+    cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+    def denied(path):
+        raise ValueError('cannot secure the ticket directory')
+    monkeypatch.setattr(cli, 'protect_ticket_directory', denied)
+    with pytest.raises(ValueError, match='cannot secure'):
+        cli.save_ticket(tmp_path / 'anime.db', intent)
+    assert list((tmp_path / 'subtitle-delivery-tickets').iterdir()) == []
+    assert scheduler.get(identity)['dispatch_state'] == 'committing'
+
+
+def test_ledger_preserves_recording_order_when_receipt_times_are_equal(delivery):
+    db, scheduler, ready, now = delivery
+    identity, intent = begin(scheduler)
+    scheduler.record_dispatch_receipt(intent['ticket'], 'failed', receipt_id='f' * 64)
+    scheduler.record_dispatch_receipt(intent['ticket'], 'interrupted', receipt_id='a' * 64)
+    ledger = scheduler.receipts(identity)
+    assert [r['outcome'] for r in ledger] == ['failed', 'interrupted']
+    assert ledger[0]['recorded_at'] == ledger[1]['recorded_at']
