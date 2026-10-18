@@ -5,24 +5,58 @@ an AI turn, releases a lease, or interrupts an episode production thread.
 """
 import argparse
 import json
+import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = {
-    '01a10c1a-eea3-7070-bd80-5f8cee6426a1': 'automation-3',
-    '01a125c3-0885-7191-9acd-0789c73f6ebb': 'automation-2',
-}
-# Explicit recovery turns dispatched by this repair; all other manual work is
-# excluded. These immutable IDs become inert once their turns have ended.
-RECOVERY_TURNS = {
-    '01a10c1a-eea3-7070-bd80-5f8cee6426a1': '01a13f9c-66e7-7ad0-bd73-3997b6cfc773',
-    '01a125c3-0885-7191-9acd-0789c73f6ebb': '01a13f9c-6b91-74b0-b187-b05b71fee152',
-}
-WAIT_SECONDS = 20 * 60
-RUN_DIR = ROOT / 'data/diagnostics/codex-dispatch-guard'
+# Dispatcher thread ids, their heartbeat automation ids, the explicitly registered
+# recovery turns (inert once ended), the project path and the Codex database names
+# live in one file shared with codex_dispatch_control.cjs; ANIMESERVICE_DISPATCH_CONFIG
+# points both scripts at another copy.
+CONFIG_PATH = Path(os.environ.get('ANIMESERVICE_DISPATCH_CONFIG') or ROOT / 'scripts/codex_dispatch.json')
+DEFAULTS = {'cwd': 'D:/AnimeService', 'targets': {}, 'recovery_turns': {}, 'wait_seconds': 20 * 60, 'node': None,
+            'codex_home': None, 'db_files': {'state': 'state_5.sqlite', 'history': 'thread_history_1.sqlite', 'logs': 'logs_2.sqlite'},
+            'run_dir': 'data/diagnostics/codex-dispatch-guard'}
+
+
+def normalize_cwd(cwd):
+    return str(cwd).replace('\\', '/').removeprefix('//?/').rstrip('/').lower()
+
+
+def load_config(path=CONFIG_PATH):
+    config = {**DEFAULTS, **json.loads(Path(path).read_text(encoding='utf-8'))}
+    if not isinstance(config['targets'], dict) or not config['targets']:
+        raise ValueError(f'{path}: targets must map dispatcher thread ids to automation ids')
+    wait = config['wait_seconds']  # seconds without log progress before a scheduled turn counts as stale
+    if isinstance(wait, bool) or not isinstance(wait, int) or not 60 <= wait <= 86400:
+        config['wait_seconds'] = DEFAULTS['wait_seconds']  # outside 60..86400 or not an integer: the former hard-coded 20 minutes
+    if not isinstance(config['cwd'], str) or not config['cwd'].strip():
+        raise ValueError(f'{path}: cwd must name the dispatcher project directory')
+    missing = {'state', 'history', 'logs'} - set(config['db_files'] or {})
+    if missing:
+        raise ValueError(f'{path}: db_files is missing {sorted(missing)}')
+    return config
+
+
+CONFIG = load_config()
+TARGETS = CONFIG['targets']
+RECOVERY_TURNS = CONFIG['recovery_turns']
+WAIT_SECONDS = CONFIG['wait_seconds']
+RUN_DIR = ROOT / CONFIG['run_dir']
+
+
+def node_path(config):
+    """node from PATH first, else the configured absolute path; None when neither exists."""
+    found = shutil.which('node')
+    if found:
+        return found
+    configured = config.get('node')
+    return configured if configured and Path(configured).exists() else None
 
 
 def readonly(path):
@@ -32,33 +66,36 @@ def readonly(path):
     return con
 
 
-def decide(thread_id, cwd, turn, items, last_log, now):
-    normalized = str(cwd).replace('\\', '/').removeprefix('//?/').rstrip('/').lower()
-    if thread_id not in TARGETS or normalized != 'd:/animeservice':
+def decide(thread_id, cwd, turn, items, last_log, now, config=None):
+    config = config or CONFIG
+    targets, recovery_turns = config['targets'], config['recovery_turns']
+    if thread_id not in targets or normalize_cwd(cwd) != normalize_cwd(config['cwd']):
         return 'outside_scope'
     if not turn or turn['status'] != 'inProgress':
         return 'idle'
     # Only scheduled turns or the two explicitly registered recovery turns.
     user = next((x for x in items if x.get('type') == 'userMessage'), None)
     text = ''.join(x.get('text', '') for x in (user or {}).get('content', []) if x.get('type') == 'text')
-    scheduled = '<heartbeat>' in text and f'<automation_id>{TARGETS[thread_id]}</automation_id>' in text
+    scheduled = '<heartbeat>' in text and f'<automation_id>{targets[thread_id]}</automation_id>' in text
     # App-delivered recovery prompts are functionCallOutput delegation items,
     # not userMessage items. Exact pre-registered turn IDs are the authority.
-    recovery = turn.get('turn_id') == RECOVERY_TURNS.get(thread_id)
+    recovery = turn.get('turn_id') == recovery_turns.get(thread_id)
     if not scheduled and not recovery:
         return 'not_scheduled_turn'
     if any(x.get('status') in ('inProgress', 'running', 'pending') for x in items):
         return 'tool_in_progress'
     progress = max(float(turn.get('started_at') or now), float(last_log or 0))
-    if now - progress < WAIT_SECONDS:
+    if now - progress < config['wait_seconds']:
         return 'recent_progress'
     return 'interrupt_stale_model_wait'
 
 
-def snapshot(home, now):
+def snapshot(home, now, config=None):
+    config = config or CONFIG
+    files = config['db_files']
     out = []
-    with readonly(home / 'state_5.sqlite') as state, readonly(home / 'thread_history_1.sqlite') as history, readonly(home / 'logs_2.sqlite') as logs:
-        for tid in TARGETS:
+    with readonly(home / files['state']) as state, readonly(home / files['history']) as history, readonly(home / files['logs']) as logs:
+        for tid in config['targets']:
             thread = state.execute('SELECT cwd FROM threads WHERE id=?', (tid,)).fetchone()
             row = history.execute('SELECT turn_id,status,started_at,rollout_ordinal FROM thread_turns WHERE thread_id=? ORDER BY rollout_ordinal DESC LIMIT 1', (tid,)).fetchone()
             turn = dict(row) if row else None
@@ -66,34 +103,58 @@ def snapshot(home, now):
             # Indexed lookup stays small; do not scan multi-GB rollout files.
             last = logs.execute('SELECT ts FROM logs WHERE thread_id=? ORDER BY id DESC LIMIT 1', (tid,)).fetchone()
             latest = last[0] if last else 0
-            reason = decide(tid, thread['cwd'] if thread else '', turn, items, latest, now)
+            reason = decide(tid, thread['cwd'] if thread else '', turn, items, latest, now, config)
             out.append({'thread_id': tid, 'turn_id': turn['turn_id'] if turn else None, 'decision': reason, 'last_log_at': latest})
     return out
+
+
+def run(apply, home=None, now=None, config=None):
+    """One guard pass. The status file is always written, with `error` set when the
+    Codex projections could not be read; control results are recorded per thread."""
+    config = config or CONFIG
+    now = now or time.time()
+    home = Path(home or config.get('codex_home') or Path.home() / '.codex')
+    run_dir = Path(config['run_dir'])
+    run_dir = run_dir if run_dir.is_absolute() else ROOT / run_dir
+    status = {'at': now, 'apply': apply, 'threshold_seconds': config['wait_seconds'], 'threads': [], 'error': None}
+    run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        status['threads'] = snapshot(home, now, config)
+    except Exception as e:
+        status['error'] = f'{type(e).__name__}: {e}'
+    for row in status['threads']:
+        if not apply or row['decision'] != 'interrupt_stale_model_wait':
+            continue
+        # Native expected-turn check closes the race with completion/new work.
+        control = ROOT / 'scripts/codex_dispatch_control.cjs'
+        node = node_path(config)
+        try:
+            if not node:
+                raise FileNotFoundError('node not found on PATH and the configured path does not exist')
+            p = subprocess.run([node, str(control), row['thread_id'], row['turn_id']], capture_output=True, text=True, encoding='utf-8', timeout=25,
+                               env={**os.environ, 'ANIMESERVICE_DISPATCH_CONFIG': str(CONFIG_PATH)}, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            row['control_exit_code'] = p.returncode
+            row['control_receipt'] = p.stdout.strip()[:2000]
+            row['control_error'] = p.stderr.strip()[:500]
+        except Exception as e:  # the decision stays on record even when the control step could not run
+            row['control_exit_code'] = None
+            row['control_receipt'] = ''
+            row['control_error'] = f'{type(e).__name__}: {e}'[:500]
+        with (run_dir / 'actions.jsonl').open('a', encoding='utf-8') as f:
+            f.write(json.dumps({'at': now, **row}, ensure_ascii=False) + '\n')
+    tmp = run_dir / 'status.tmp'
+    tmp.write_text(json.dumps(status, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    tmp.replace(run_dir / 'status.json')
+    return status
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
-    now = time.time()
-    rows = snapshot(Path.home() / '.codex', now)
-    RUN_DIR.mkdir(parents=True, exist_ok=True)
-    for row in rows:
-        if not args.apply or row['decision'] != 'interrupt_stale_model_wait':
-            continue
-        # Native expected-turn check closes the race with completion/new work.
-        control = ROOT / 'scripts/codex_dispatch_control.cjs'
-        p = subprocess.run(['C:/Program Files/nodejs/node.exe', str(control), row['thread_id'], row['turn_id']], capture_output=True, text=True, encoding='utf-8', timeout=25, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-        row['control_exit_code'] = p.returncode
-        row['control_receipt'] = p.stdout.strip()[:2000]
-        row['control_error'] = p.stderr.strip()[:500]
-        with (RUN_DIR / 'actions.jsonl').open('a', encoding='utf-8') as f:
-            f.write(json.dumps({'at': now, **row}, ensure_ascii=False) + '\n')
-    status = {'at': now, 'apply': args.apply, 'threshold_seconds': WAIT_SECONDS, 'threads': rows}
-    tmp = RUN_DIR / 'status.tmp'
-    tmp.write_text(json.dumps(status, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    tmp.replace(RUN_DIR / 'status.json')
+    status = run(args.apply)
     print(json.dumps(status, ensure_ascii=False))
+    sys.exit(1 if status['error'] else 0)
 
 
 if __name__ == '__main__':

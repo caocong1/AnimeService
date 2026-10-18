@@ -125,3 +125,4 @@
 !/scripts/verify_bahamut_alignment.py
 
 !/scripts/verify_danmu_alignment_controls.cjs
+!/scripts/codex_dispatch.json

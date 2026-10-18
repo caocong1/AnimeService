@@ -1,0 +1,16 @@
+{
+  "cwd": "D:/AnimeService",
+  "targets": {
+    "01a10c1a-eea3-7070-bd80-5f8cee6426a1": "automation-3",
+    "01a125c3-0885-7191-9acd-0789c73f6ebb": "automation-2"
+  },
+  "recovery_turns": {
+    "01a10c1a-eea3-7070-bd80-5f8cee6426a1": "01a13f9c-66e7-7ad0-bd73-3997b6cfc773",
+    "01a125c3-0885-7191-9acd-0789c73f6ebb": "01a13f9c-6b91-74b0-b187-b05b71fee152"
+  },
+  "wait_seconds": 1200,
+  "node": "C:/Program Files/nodejs/node.exe",
+  "codex_home": null,
+  "db_files": {"state": "state_5.sqlite", "history": "thread_history_1.sqlite", "logs": "logs_2.sqlite"},
+  "run_dir": "data/diagnostics/codex-dispatch-guard"
+}
