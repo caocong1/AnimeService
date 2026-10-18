@@ -57,6 +57,11 @@ scripts/subtitle_delivery_queue.py blocked JOB_ID --thread-id RESPONSIBLE_THREAD
 scripts/subtitle_delivery_queue.py accepted JOB_ID --thread-id RESPONSIBLE_THREAD_ID --build-id VERIFIED_PUBLISHED_BUILD
 scripts/subtitle_delivery_queue.py release-lease JOB_ID --owner DISPATCHER_THREAD_ID --revision CURRENT_REVISION
 scripts/subtitle_delivery_queue.py not-created JOB_ID --evidence ABSENCE_RECORD.json
+scripts/subtitle_delivery_queue.py confirm JOB_ID --thread-id RETURNED_THREAD_ID --ticket TICKET.json
+scripts/subtitle_delivery_queue.py not-created JOB_ID --evidence ABSENCE_RECORD.json --ticket TICKET.json
+scripts/subtitle_delivery_queue.py failed JOB_ID --ticket TICKET.json --note SHORT_NOTE
+scripts/subtitle_delivery_queue.py interrupted JOB_ID --ticket TICKET.json --note SHORT_NOTE
+scripts/subtitle_delivery_queue.py receipts JOB_ID
 ```
 
 `release-lease`只归还尚未进入派发（没有committing/unknown/acknowledged）的租约，由同一owner和当前revision确认；`begin`在持久意图失败时会自动归还刚领取的租约并输出`lease_released`。`not-created`把unknown派发记为已核实未创建：证据文件必须是含`checked_at`、`method`、`checked_by`的JSON，文件名和sha256随回执一起写入事件；它不能替代`confirm`，也不能清掉已有负责人会话。
@@ -106,6 +111,16 @@ jobs/events保存派发/回执/阻塞/完成时间；单集run另记各阶段实
 
 ## 完整待审稿授权（2026-10-13最新）
 用户已明确先交完整可看待审稿，原声等未核内容单列，不冒充验收。允许从既有书完整快照另存私有review分支，不以三项声音accept作为该分支导出前提。私有待审包单writer、固定source/hash/原稿保留；不写原共享书、不改旧production owner或未知派发/lease，不直接default/accepted/publish。当前精简chat已交付魔王E2 review-draft-20261013-v2，正式质量门禁保持，任务不重复派发或唤醒旧大图正文。
+# 派发回执 v1（dispatch-receipt/v1）
+
+契约见 [DISPATCH-RECEIPT-CONTRACT.md](DISPATCH-RECEIPT-CONTRACT.md)：回执只证明"负责聊天已创建/复用"或"本次派发确实未创建"，不证明字幕完成；成品完成仍走 `record_finished` 与既有核验。
+
+* `begin` 成功后把本次派发的不可变票据（`dispatch-ticket/v1`：job_id、revision、dispatch/lease token、owner、input_key、dispatch_action、thread_id、issued_at）写到数据库同目录的 `subtitle-delivery-tickets/`，只打印路径；票据文件含 token，属于本机私有文件。
+* 带 `--ticket` 的 `confirm`、`not-created`，以及 `failed`、`interrupted`，把回执绑定到票据而不是数据库里"当前"的 token/revision：票据里的 dispatch/revision/input_key/owner 任一与当前 job 不符，回执记为 `receipt_accepted=0`（`dispatch_mismatch`、`revision_moved`、`input_moved`、`owner_mismatch`），job 不变。范围、已看、停止或状态冲突时事实仍记录（`receipt_accepted=1`）但 `state_changed=0`（`scope_changed`、`state_conflict`、`already_acknowledged`）；只有 created/not_created 在同一事务内通过全部门禁才推动派发状态。`failed`/`interrupted` 只记诊断，不释放租约、不重投、不改负责人。
+* `receipt_id` 是规范化请求包（schema、job、expected_revision、token 摘要、owner、input_key、动作、线程、结果、证据、host_ref；UTF-8、键排序、紧凑分隔、null 与缺省同义、只允许有限数字）的 SHA-256，可由调用方预先给出；重放先于 revision 比较，原样返回首次结果；同一 id 换内容则拒绝并写 `dispatch-receipt-rejected` 事件。回执台账 `dispatch_receipts` 只存 token 摘要。
+* `not-created --ticket` 的证据文件仍需 `checked_at`（带时区、不早于票据签发、不晚于现在 5 分钟）、`method`、`checked_by`、`job_id` 与票据的 `dispatch_token` 或其摘要；文件名与 SHA-256 由工具计算，证据内同名字段无效；证据上限 16 KiB。对复用票据的 not-created 永远不会清掉已有负责聊天。
+* 过渡：不带 `--ticket` 的 `confirm`/`not-created`/`unknown` 仍走旧路径，输出带 `receipt: legacy`，并在台账写一行 `dispatch-receipt/legacy` 来源记录。kv `dispatch_receipts_required=true` 时旧路径被拒绝；默认关闭，须先迁移调用方及其归档票据，经 owner 审查后再全局要求。`receipts JOB_ID` 只读列出台账（v1 与 legacy），没有台账行的旧 job 以事件为准。
+
 # 操作回执的证据绑定
 
 `not-created --evidence` 的 JSON 除 `checked_at`、`method`、`checked_by` 外，还必须含当前 `job_id` 与 `dispatch_token`。检查时间须带时区且晚于当前派发状态；旧派发证据不能释放新的未知派发。证据文件名和实际内容 SHA-256 由工具计算，证据内同名字段不能覆盖它们。回执只供本机留存，不公开 token。

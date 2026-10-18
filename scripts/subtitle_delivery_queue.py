@@ -4,7 +4,9 @@ Use status for read-only snapshots. Mutations are explicit subcommands. Lease an
 dispatch tokens stay in the local DB/process and are never printed or exported.
 """
 import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -13,7 +15,7 @@ import threading
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from anime.db import Store
-from anime.subtitle_delivery import SubtitleDelivery
+from anime.subtitle_delivery import SubtitleDelivery, validate_ticket
 
 
 class ControlStore(Store):
@@ -47,9 +49,42 @@ def public(value):
     return value
 
 
+def load_ticket(path):
+    """The begin ticket archived by `begin`; a v1 receipt is bound to it, never to the live job's current tokens."""
+    try:
+        data = json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, ValueError):
+        raise ValueError('dispatch ticket must be a readable UTF-8 JSON file') from None
+    return validate_ticket(data)
+
+
+def save_ticket(db_path, result):
+    """Archive the ticket with its tokens next to the database (private); only the path is printed."""
+    tickets = Path(db_path).resolve().parent / 'subtitle-delivery-tickets'
+    tickets.mkdir(parents=True, exist_ok=True)
+    path = tickets / f"{result['id'].replace(':', '-')}-r{result['revision']}-{hashlib.sha256(result['ticket']['dispatch_token'].encode()).hexdigest()[:8]}.json"
+    path.write_text(json.dumps(result['ticket'], ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return str(path)
+
+
+def evidence_file(path):
+    """v1: the file's content plus the tool-computed name and sha256; the service validates and binds it."""
+    raw = Path(path).read_bytes()
+    try:
+        data = json.loads(raw.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError('absence evidence must be a UTF-8 JSON object') from None
+    if not isinstance(data, dict):
+        raise ValueError('absence evidence must be a JSON object')
+    return {**data, 'file': Path(path).name, 'sha256': hashlib.sha256(raw).hexdigest()}
+
+
 def absence_evidence(path,record=None):
-    """The verification record itself, bound by hash: who checked which chat list when, and how."""
-    import hashlib
+    """Legacy path: the verification record itself, bound by hash: who checked which chat list when, and how."""
     raw = Path(path).read_bytes()
     try:
         data = json.loads(raw.decode('utf-8'))
@@ -98,11 +133,21 @@ def main():
     absent = sub.add_parser('not-created', help='record independently verified absence of a chat for an unknown dispatch')
     absent.add_argument('job_id')
     absent.add_argument('--evidence', required=True, help='JSON file describing how the absence was verified')
+    absent.add_argument('--ticket', help='begin ticket file: records a dispatch-receipt/v1 instead of the legacy path')
+    for name in ('failed', 'interrupted'):
+        p = sub.add_parser(name, help=f'diagnostic dispatch-receipt/v1 ({name}); changes no job state')
+        p.add_argument('job_id')
+        p.add_argument('--ticket', required=True, help='begin ticket file')
+        p.add_argument('--note', default='', help='short bounded note kept as evidence')
+    receipts = sub.add_parser('receipts', help='read-only receipt ledger of one job')
+    receipts.add_argument('job_id')
     for name in ('confirm', 'unknown', 'blocked', 'accepted', 'finished'):
         p = sub.add_parser(name)
         p.add_argument('job_id')
         if name != 'unknown':
             p.add_argument('--thread-id', required=True)
+        if name == 'confirm':
+            p.add_argument('--ticket', help='begin ticket file: records a dispatch-receipt/v1 instead of the legacy path')
         if name == 'blocked':
             p.add_argument('--reason', action='append', required=True)
             p.add_argument('--stopped', action='store_true')
@@ -112,11 +157,14 @@ def main():
             p.add_argument('--release', required=True)
             p.add_argument('--player-report', required=True)
     args = parser.parse_args()
-    db = ReadStore(args.db) if args.command == 'status' else ControlStore(args.db)
-    delivery = SubtitleDelivery(db, initialize=args.command != 'status')
+    reading = args.command in ('status', 'receipts')
+    db = ReadStore(args.db) if reading else ControlStore(args.db)
+    delivery = SubtitleDelivery(db, initialize=not reading)
     try:
         if args.command == 'status':
             result = delivery.snapshot()
+        elif args.command == 'receipts':
+            result = delivery.receipts(args.job_id)
         elif args.command == 'refresh':
             result = delivery.refresh()
         elif args.command == 'progress':
@@ -153,23 +201,44 @@ def main():
             result['suggested_title'] = f"{db.show(sid)['title']} 第{ep}集字幕" + (' v1精校细调' if result['kind']=='refinement' else ' V2审核' if result['kind']=='late' else ' v0→v1整集制作')
             template = (ROOT / 'docs/SUBTITLE-SESSION-PROMPT.txt').read_text(encoding='utf-8')
             result['session_prompt'] = template.replace('{{JOB_ID}}', result['id']).replace('{{SHOW_ID}}', str(sid)).replace('{{EPISODE}}', str(ep)).replace('{{INPUT_KEY}}', result['input_key'])
+            result['ticket_path'] = save_ticket(args.db, result)
         elif args.command == 'release-lease':
             result = delivery.release(args.job_id, args.owner, args.revision, reason='operator release')
+        elif args.command == 'not-created' and args.ticket:
+            ticket = load_ticket(args.ticket)
+            if ticket['job_id'] != args.job_id:
+                raise ValueError('ticket belongs to another job')
+            result = delivery.record_dispatch_receipt(ticket, 'not_created', evidence=evidence_file(args.evidence),
+                                                      recorded_by='subtitle_delivery_queue not-created')
         elif args.command == 'not-created':
             record=delivery.get(args.job_id)
             result = delivery.reconcile_dispatch(args.job_id, record['dispatch_token'],
                                                  definitely_not_created=True, absence_evidence=absence_evidence(args.evidence,record))
+            result['receipt'] = 'legacy'
+        elif args.command == 'confirm' and args.ticket:
+            ticket = load_ticket(args.ticket)
+            if ticket['job_id'] != args.job_id:
+                raise ValueError('ticket belongs to another job')
+            result = delivery.record_dispatch_receipt(ticket, 'created', thread_id=args.thread_id,
+                                                      recorded_by='subtitle_delivery_queue confirm')
+        elif args.command in ('failed', 'interrupted'):
+            ticket = load_ticket(args.ticket)
+            if ticket['job_id'] != args.job_id:
+                raise ValueError('ticket belongs to another job')
+            result = delivery.record_dispatch_receipt(ticket, args.command, evidence={'note': args.note[:500]} if args.note else None,
+                                                      recorded_by=f'subtitle_delivery_queue {args.command}')
         elif args.command in ('confirm', 'unknown'):
             record = delivery.get(args.job_id)
             result = delivery.reconcile_dispatch(args.job_id, record['dispatch_token'],
                                                  thread_id=args.thread_id if args.command == 'confirm' else None)
+            result['receipt'] = 'legacy'
         elif args.command == 'blocked':
             result = delivery.record_blocked(args.job_id, args.thread_id, args.reason, owner_stopped=args.stopped)
         elif args.command == 'finished':
             result = delivery.record_finished(args.job_id, args.thread_id, args.release, args.player_report)
         else:
             result = delivery.record_accepted(args.job_id, args.thread_id, args.build_id)
-        if args.command != 'status':
+        if not reading:
             from anime.subtitle_delivery_view import export_view
             try:
                 export_view(db, ROOT if Path(args.db).resolve() == (ROOT/'data/anime.db').resolve() else None)

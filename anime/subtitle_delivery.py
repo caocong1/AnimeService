@@ -7,8 +7,10 @@ default is deliberately conservative while actual audio/player capability is
 unavailable. Dispatch is an external side effect: unknown outcomes are reconciled,
 never retried just because a lease expired.
 """
+import datetime
 import hashlib
 import json
+import math
 import time
 import uuid
 from pathlib import Path
@@ -20,6 +22,16 @@ from .viewing_workflow import lane, queue_snapshot, scope_blocker, RESEARCH_MODE
 STATES = {'preparing', 'ready', 'production', 'blocked', 'accepted', 'finished', 'late-review'}
 PROTECTED_DISPATCH = {'committing', 'unknown', 'acknowledged'}
 RETAINED_DISPATCH = PROTECTED_DISPATCH | {'blocked-stopped'}
+# docs/DISPATCH-RECEIPT-CONTRACT.md: a receipt proves chat creation/absence for one exact dispatch,
+# never subtitle completion. v1 is carried by the immutable begin ticket; enforcement stays off
+# (kv RECEIPT_REQUIRED_KEY) until callers and their archived tickets have migrated.
+TICKET_SCHEMA = 'dispatch-ticket/v1'
+RECEIPT_SCHEMA = 'dispatch-receipt/v1'
+LEGACY_RECEIPT_SCHEMA = 'dispatch-receipt/legacy'
+RECEIPT_OUTCOMES = ('created', 'not_created', 'failed', 'interrupted')
+RECEIPT_REQUIRED_KEY = 'dispatch_receipts_required'
+EVIDENCE_LIMIT = 16 * 1024          # canonical UTF-8 bytes of bound evidence
+EVIDENCE_FUTURE_TOLERANCE = 300     # seconds of clock skew tolerated on checked_at
 
 
 def _json(value):
@@ -28,6 +40,81 @@ def _json(value):
 
 def _hash(value):
     return hashlib.sha256(_json(value).encode('utf-8')).hexdigest()
+
+
+def _digest(token):
+    """Receipts carry digests of authority tokens, never the tokens themselves."""
+    return hashlib.sha256(token.encode('utf-8')).hexdigest() if token else ''
+
+
+def _canonical(value):
+    """Canonical receipt envelope: sorted keys, UTF-8, compact separators, None dropped (absent equals
+    null), only finite numbers; identical retries hash identically, changed evidence does not."""
+    def clean(v):
+        if isinstance(v, dict):
+            return {str(k): clean(x) for k, x in v.items() if x is not None}
+        if isinstance(v, (list, tuple)):
+            return [clean(x) for x in v]
+        if isinstance(v, float):
+            if not math.isfinite(v):
+                raise ValueError('receipt numbers must be finite')
+            return v
+        if v is None or isinstance(v, (bool, int, str)):
+            return v
+        raise ValueError('receipt envelope allows only strings, numbers, booleans, lists and objects')
+    return _json(clean(value))
+
+
+def validate_ticket(ticket):
+    """The immutable begin ticket a v1 receipt must carry; nothing is read from the live job to fill gaps."""
+    if not isinstance(ticket, dict) or ticket.get('schema') != TICKET_SCHEMA:
+        raise ValueError('dispatch ticket required (schema dispatch-ticket/v1)')
+    for key in ('job_id', 'dispatch_token', 'lease_token', 'owner', 'input_key', 'dispatch_action', 'thread_id'):
+        if not isinstance(ticket.get(key), str):
+            raise ValueError(f'dispatch ticket field {key} must be a string')
+    revision = ticket.get('revision')
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise ValueError('dispatch ticket revision must be a positive integer')
+    if not (ticket['job_id'] and ticket['dispatch_token'] and ticket['owner'] and ticket['input_key']):
+        raise ValueError('dispatch ticket is incomplete')
+    if ticket['dispatch_action'] not in ('create', 'reuse') or bool(ticket['thread_id']) != (ticket['dispatch_action'] == 'reuse'):
+        raise ValueError('dispatch ticket action and responsible thread disagree')
+    issued = ticket.get('issued_at')
+    if isinstance(issued, bool) or not isinstance(issued, (int, float)) or not math.isfinite(issued):
+        raise ValueError('dispatch ticket issued_at must be a number')
+    return ticket
+
+
+def validate_absence_evidence(evidence, job_id, dispatch_token, issued_at, now):
+    """Shared boundary for verified-absence evidence: who checked which chat list, when and how, bound to
+    one dispatch. The file name and sha256 come from the tool that read the file, not from the file."""
+    if not isinstance(evidence, dict):
+        raise ValueError('absence evidence must be a JSON object')
+    if not all(isinstance(evidence.get(k), str) and evidence[k].strip() for k in ('checked_at', 'method', 'checked_by')):
+        raise ValueError('absence evidence needs checked_at, method and checked_by')
+    if not (isinstance(evidence.get('sha256'), str) and len(evidence['sha256']) == 64 and isinstance(evidence.get('file'), str)):
+        raise ValueError('absence evidence needs the tool-computed file name and sha256')
+    if evidence.get('job_id') != job_id:
+        raise ValueError('absence evidence must identify this job_id')
+    digest = _digest(dispatch_token)
+    if evidence.get('dispatch_token') != dispatch_token and evidence.get('dispatch_digest') != digest:
+        raise ValueError('absence evidence must identify this dispatch')
+    try:
+        checked = datetime.datetime.fromisoformat(evidence['checked_at'])
+        if checked.tzinfo is None:
+            raise ValueError()
+        stamp = checked.timestamp()
+    except (TypeError, ValueError):
+        raise ValueError('absence evidence checked_at must be timezone-aware ISO 8601') from None
+    if stamp < issued_at:
+        raise ValueError('absence evidence checked_at precedes the dispatch it claims to verify')
+    if stamp > now + EVIDENCE_FUTURE_TOLERANCE:
+        raise ValueError('absence evidence checked_at lies in the future')
+    bound = {k: v for k, v in evidence.items() if k != 'dispatch_token'}
+    bound['dispatch_digest'] = digest
+    if len(_canonical(bound).encode('utf-8')) > EVIDENCE_LIMIT:
+        raise ValueError('absence evidence exceeds the receipt size limit')
+    return bound
 
 
 def _exists(db, table):
@@ -144,6 +231,14 @@ class SubtitleDelivery:
               source_hash TEXT NOT NULL, text_hash TEXT NOT NULL, job_id TEXT,
               disposition TEXT NOT NULL, evidence TEXT NOT NULL, created REAL NOT NULL,
               PRIMARY KEY(show_id,episode,baseline_build_id,source_hash));
+            CREATE TABLE IF NOT EXISTS dispatch_receipts(
+              receipt_id TEXT PRIMARY KEY, schema TEXT NOT NULL, job_id TEXT NOT NULL,
+              expected_revision INTEGER NOT NULL, request_digest TEXT NOT NULL, envelope TEXT NOT NULL,
+              outcome TEXT NOT NULL, receipt_accepted INTEGER NOT NULL, state_changed INTEGER NOT NULL,
+              reason TEXT NOT NULL DEFAULT '', resulting_state TEXT NOT NULL DEFAULT '',
+              resulting_dispatch_state TEXT NOT NULL DEFAULT '', resulting_revision INTEGER,
+              result TEXT NOT NULL, recorded_at REAL NOT NULL, recorded_by TEXT NOT NULL DEFAULT '');
+            CREATE INDEX IF NOT EXISTS dispatch_receipts_job ON dispatch_receipts(job_id,recorded_at);
             ''')
 
     @staticmethod
@@ -459,13 +554,20 @@ class SubtitleDelivery:
                       (token, self.clock(), identity))
             self._event(c, identity, 'dispatch-started', {'input_key': row['input_key']})
             record = dict(c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone())
+            # The immutable ticket a v1 receipt must present; the CLI archives it privately with its tokens.
+            ticket = {'schema': TICKET_SCHEMA, 'job_id': identity, 'revision': record['revision'], 'dispatch_token': token,
+                      'lease_token': row['lease_token'], 'owner': owner, 'input_key': row['input_key'],
+                      'dispatch_action': 'reuse' if row['thread_id'] else 'create', 'thread_id': row['thread_id'] or '',
+                      'issued_at': self.clock()}
             return {**record, 'job_id': identity, 'payload': json.loads(record['payload']),
                     'assessment': json.loads(row['payload'])['assessment'],
-                    'action': 'reuse-thread' if row['thread_id'] else 'create-thread'}
+                    'action': 'reuse-thread' if row['thread_id'] else 'create-thread', 'ticket': ticket}
 
     def reconcile_dispatch(self, identity, dispatch_token, thread_id=None, definitely_not_created=False,
                            absence_evidence=None):
-        """Record a receipt or verified absence; lost responses remain non-retryable."""
+        """Legacy receipt path (no begin ticket); lost responses remain non-retryable."""
+        if self.db.get(RECEIPT_REQUIRED_KEY, False):
+            raise ValueError('dispatch-receipt/v1 ticket required; the legacy reconcile path is disabled')
         if thread_id and definitely_not_created:
             raise ValueError('Contradictory dispatch receipt')
         if definitely_not_created and not absence_evidence:
@@ -497,7 +599,139 @@ class SubtitleDelivery:
             self._event(c, identity, 'dispatch-reconciled', {'result': status, 'thread_id': thread_id,
                                                               **({'absence_evidence': absence_evidence} if definitely_not_created else {})})
             record = dict(c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone())
+            self._legacy_receipt(c, identity, row, status, thread_id, record)
             return {**record, 'payload': json.loads(record['payload'])}
+
+    def _legacy_receipt(self, c, identity, before, status, thread_id, after):
+        """Provenance row for the legacy path so readers see one ledger; it validates nothing beyond reconcile."""
+        outcome = {'acknowledged': 'created', 'not-created': 'not_created'}.get(status, 'unknown')
+        envelope = {'schema': LEGACY_RECEIPT_SCHEMA, 'job_id': identity, 'expected_revision': before['revision'],
+                    'dispatch_digest': _digest(before['dispatch_token']), 'thread_id': thread_id or '', 'outcome': outcome,
+                    'recorded_at': self.clock()}
+        canonical = _canonical(envelope)
+        digest = hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+        c.execute('INSERT OR IGNORE INTO dispatch_receipts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                  (digest, LEGACY_RECEIPT_SCHEMA, identity, before['revision'], digest, canonical, outcome, 1, 1, 'legacy',
+                   after['state'], after['dispatch_state'], after['revision'], _json({'legacy': True}), self.clock(), 'reconcile_dispatch'))
+
+    def record_dispatch_receipt(self, ticket, outcome, thread_id=None, evidence=None, host_ref=None,
+                                recorded_by='', receipt_id=None):
+        """dispatch-receipt/v1: one durable, idempotent receipt bound to the begin ticket.
+
+        created/not_created drive the existing dispatch reconciliation only; failed/interrupted are
+        diagnostics. Nothing here releases a lease, retries, moves ownership or marks delivery finished.
+        Binding failures leave the receipt unaccepted; a true fact that cannot be applied is kept with
+        receipt_accepted=1 and state_changed=0."""
+        validate_ticket(ticket)
+        if outcome not in RECEIPT_OUTCOMES:
+            raise ValueError('receipt outcome must be created, not_created, failed or interrupted')
+        if outcome == 'created':
+            if not isinstance(thread_id, str) or not thread_id.strip() or len(thread_id) > 200:
+                raise ValueError('a created receipt must name the confirmed chat thread')
+            if ticket['dispatch_action'] == 'reuse' and thread_id != ticket['thread_id']:
+                raise ValueError('a reuse ticket can only confirm its own responsible thread')
+        elif thread_id:
+            raise ValueError('only a created receipt names a thread')
+        if outcome == 'not_created':
+            evidence = validate_absence_evidence(evidence, ticket['job_id'], ticket['dispatch_token'], ticket['issued_at'], self.clock())
+        elif evidence is not None and not isinstance(evidence, dict):
+            raise ValueError('receipt evidence must be a JSON object')
+        for name, value in (('host_ref', host_ref), ('recorded_by', recorded_by)):
+            if value is not None and (not isinstance(value, str) or len(value) > 200):
+                raise ValueError(f'{name} must be a short string')
+        envelope = {'schema': RECEIPT_SCHEMA, 'job_id': ticket['job_id'], 'expected_revision': ticket['revision'],
+                    'dispatch_digest': _digest(ticket['dispatch_token']), 'lease_digest': _digest(ticket['lease_token']),
+                    'owner': ticket['owner'], 'input_key': ticket['input_key'], 'dispatch_action': ticket['dispatch_action'],
+                    'ticket_thread_id': ticket['thread_id'], 'thread_id': thread_id or '', 'outcome': outcome,
+                    'evidence': evidence or {}, 'host_ref': host_ref or ''}
+        canonical = _canonical(envelope)
+        if len(canonical.encode('utf-8')) > 2 * EVIDENCE_LIMIT:
+            raise ValueError('receipt envelope exceeds the size limit')
+        request_digest = hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+        if receipt_id is None:
+            receipt_id = request_digest
+        elif not (isinstance(receipt_id, str) and len(receipt_id) == 64 and all(ch in '0123456789abcdef' for ch in receipt_id)):
+            raise ValueError('receipt_id must be a 64-hex digest')
+        reused = self.db.one('SELECT request_digest FROM dispatch_receipts WHERE receipt_id=?', (receipt_id,))
+        if reused and reused['request_digest'] != request_digest:
+            with self.db.connect() as c:
+                self._event(c, ticket['job_id'], 'dispatch-receipt-rejected', {'receipt_id': receipt_id, 'reason': 'id_reused'})
+            raise ValueError('receipt id reused with different content')
+        with self.db.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            existing = c.execute('SELECT request_digest,result FROM dispatch_receipts WHERE receipt_id=?', (receipt_id,)).fetchone()
+            if existing:  # idempotent replay comes before any comparison with the job's current revision
+                if existing['request_digest'] != request_digest:
+                    raise ValueError('receipt id reused with different content')
+                return {**json.loads(existing['result']), 'replayed': True}
+            row = c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (ticket['job_id'],)).fetchone()
+            if not row:
+                raise ValueError('Unknown subtitle delivery job')
+            reason, accepted = self._receipt_binding(c, row, ticket, envelope)
+            changed = 0
+            if accepted and not reason and outcome in ('created', 'not_created'):
+                if outcome == 'created':
+                    state, status = 'production', 'acknowledged'
+                else:
+                    state, status = ('late-review' if row['kind'] == 'late' else 'ready'), 'not-created'
+                c.execute('UPDATE subtitle_delivery_jobs SET state=?,dispatch_state=?,thread_id=?,lease_expires=0,revision=revision+1,updated=? WHERE id=?',
+                          (state, status, thread_id or row['thread_id'], self.clock(), ticket['job_id']))
+                self._event(c, ticket['job_id'], 'dispatch-reconciled', {'result': status, 'thread_id': thread_id, 'receipt_id': receipt_id,
+                                                                         **({'absence_evidence': evidence} if outcome == 'not_created' else {})})
+                changed = 1
+            else:
+                self._event(c, ticket['job_id'], 'dispatch-receipt', {'outcome': outcome, 'receipt_id': receipt_id,
+                                                                      'receipt_accepted': accepted, 'reason': reason})
+            after = dict(c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (ticket['job_id'],)).fetchone())
+            job = {k: v for k, v in after.items() if k not in ('lease_token', 'dispatch_token')}
+            job['payload'] = json.loads(job['payload'])
+            result = {'receipt_id': receipt_id, 'schema': RECEIPT_SCHEMA, 'outcome': outcome, 'receipt_accepted': accepted,
+                      'state_changed': changed, 'reason': reason, 'resulting_state': after['state'],
+                      'resulting_dispatch_state': after['dispatch_state'], 'resulting_revision': after['revision'], 'job': job}
+            c.execute('INSERT INTO dispatch_receipts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                      (receipt_id, RECEIPT_SCHEMA, ticket['job_id'], ticket['revision'], request_digest, canonical, outcome,
+                       accepted, changed, reason, after['state'], after['dispatch_state'], after['revision'], _json(result),
+                       self.clock(), recorded_by or ''))
+            return result
+
+    def _receipt_binding(self, c, row, ticket, envelope):
+        """Binding failures (receipt not accepted) come before gating failures (fact kept, state unchanged)."""
+        outcome, thread_id = envelope['outcome'], envelope['thread_id']
+        if _digest(row['dispatch_token']) != envelope['dispatch_digest']:
+            return 'dispatch_mismatch', 0
+        if row['revision'] != ticket['revision']:
+            return 'revision_moved', 0
+        if row['input_key'] != ticket['input_key']:
+            return 'input_moved', 0
+        if row['lease_owner'] != ticket['owner'] or (row['lease_token'] and _digest(row['lease_token']) != envelope['lease_digest']):
+            return 'owner_mismatch', 0
+        if outcome in ('failed', 'interrupted'):
+            return '', 1
+        if _scope_transaction(c, row['show_id'], row['episode']):
+            return 'scope_changed', 1
+        watched = c.execute('SELECT finished FROM watches WHERE show_id=? AND episode=?', (row['show_id'], row['episode'])).fetchone()
+        from .subtitle_refinement import two_pass
+        if watched and watched['finished'] and (not json.loads(row['payload']).get('experience_only') or two_pass(self.db)):
+            return 'scope_changed', 1
+        if row['state'] in ('accepted', 'finished') or row['dispatch_state'] == 'blocked-stopped':
+            return 'state_conflict', 1
+        if outcome == 'created':
+            if row['dispatch_state'] == 'acknowledged' and row['thread_id'] == thread_id:
+                return 'already_acknowledged', 1
+            if row['dispatch_state'] not in ('committing', 'unknown') or (row['thread_id'] and row['thread_id'] != thread_id):
+                return 'state_conflict', 1
+            return '', 1
+        # not_created: only a creation attempt can be proven absent; an existing responsible thread is never cleared by it
+        if ticket['dispatch_action'] != 'create' or row['thread_id'] or row['dispatch_state'] not in ('committing', 'unknown'):
+            return 'state_conflict', 1
+        return '', 1
+
+    def receipts(self, identity):
+        """The durable receipt ledger of one job (v1 and legacy provenance), oldest first; readers fall back to events."""
+        if not _exists(self.db, 'dispatch_receipts'):
+            return []
+        rows = self.db.rows('SELECT * FROM dispatch_receipts WHERE job_id=? ORDER BY recorded_at,receipt_id', (identity,))
+        return [{**r, 'envelope': json.loads(r['envelope']), 'result': json.loads(r['result'])} for r in rows]
 
     def record_blocked(self, identity, thread_id, reasons, owner_stopped=False):
         """Keep the same responsible chat; a blocker does not authorize a second chat."""
