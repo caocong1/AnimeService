@@ -1,7 +1,8 @@
 # Explicit playback writer takeover — owner proposal v2
 
-Status: **isolated backend core implemented; no production imports, routes,
-advertisement or activation**. Production accepts v1 progress. Finished releases require session+sequence; ordinary
+Status: **core/resolver and passive legacy fences implemented; no production v2
+constructor, routes, advertisement or activation**. Production accepts v1 progress while the
+capability is off and no durable fence exists. Finished releases require session+sequence; ordinary
 media permits older clients, including TV, without these fields. V1 orders
 packets within a session, but a different session can still write. The existing
 `viewing-session` route protects subtitle work from active viewing; it is not a
@@ -82,8 +83,8 @@ resume legacy writes while a v2 client believes its fence is enforced.
 
 ## Implemented core boundary (owner round 12)
 
-`anime/playback_writers.py` is a standalone core, only constructed in isolated
-tests. It is not imported by the app, and creates no production tables or routes.
+`PlaybackWriters` is only constructed in isolated tests. The module is now imported
+for passive legacy guards and structured 409 handling; imports create no tables/routes.
 The capability callback defaults to false; its internal capabilities() result is
 not a production capability response. No Web/TV client has been upgraded here.
 
@@ -99,11 +100,37 @@ generation rows are never pruned, including after release, expiry or feature-off
 Claim receipts retain both accepted and rejected requests for seven days. Removal
 of a successful claim receipt cannot regrant its old expected_generation.
 
-Before activation, integrate guard_legacy into the SAME transaction of ALL old
-progress writes (ordinary, finished, external history import, and any fallback),
-and wire v2 saves atomically to the same canonical progress row. Do not activate
-only claim routes: current v1 writes would bypass the fence. This round deliberately
-leaves those production paths unchanged. A feature-off core rollback is tested;
+Owner round 15 integrates passive guards into ordinary progress, finished progress
+(including the Web alias) and external history import. Each uses BEGIN IMMEDIATE
+before checking the durable generation, before in_order/session-receipt writes.
+With no v2 table the guard creates nothing. A positive generation remains fenced
+after expiry, release or feature-off. Direct progress returns structured 409
+session_required; the importer skips/counts only fenced progress, preserving
+independently verified watched facts and manual priority.
+
+The future trusted adapter must install its enabled callback on the shared Store
+as playback_writer_enabled, including all three legacy paths, and atomically wire
+v2 saves to the same canonical row. No production callback or new KV is installed.
+A feature-off core rollback is tested;
 rolling the whole server back to an old binary without these guards is NOT safe
 and has not been accepted. Web/TV visible conflict and explicit takeover, source
 switch/pagehide, mixed-version and real-device QA remain required.
+
+## Server resolver boundary (owner round 15)
+
+PlaybackMediaResolver consumes the actual WebPlayer inventory and FinishedViewing
+catalog, not a caller alias map. Ordinary IDs must equal the server path-derived
+inventory key and pass existing file/size checks. finished:release-id and the
+catalog's signature-derived media_id resolve to the SAME progress row; distinct
+release signatures stay independent. Missing/ambiguous entries, changed mapping,
+missing/changed-size files and a manifest version moving during lookup fail.
+Resolution does not acquire a writer, create tables, or change progress/watches.
+
+Ordinary inventory identity currently hashes the path, not all video bytes. A
+same-path/same-size byte replacement is not detected by that existing check.
+Before activation, define and test trusted ordinary-version evidence or explicitly
+reject unverifiable replacements; do not market the current resolver as a content
+hash verifier. No Web/TV behavior or negotiation was upgraded in this round.
+
+Transaction references: [SQLite transactions](https://www.sqlite.org/lang_transaction.html),
+[Python sqlite3 transaction control](https://docs.python.org/3.14/library/sqlite3.html#transaction-control).

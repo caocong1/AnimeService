@@ -1,4 +1,4 @@
-"""Dormant writer-v2 core. No production routes/imports/feature advertisement.
+"""Writer-v2 core and passive legacy fences. No production v2 routes or activation.
 
 The future authenticated HTTP adapter must inject a canonical media resolver and
 call guard_legacy in the SAME transaction as every legacy progress write. This
@@ -10,6 +10,7 @@ import math
 import re
 import time
 import unicodedata
+from pathlib import Path
 
 PROTOCOL = 'playback-writer/v2'
 MAX_GENERATION = 9007199254740991
@@ -39,6 +40,69 @@ class WriterConflict(ValueError):
     def __init__(self, reason):
         self.reason = reason
         super().__init__(reason)
+
+
+class PlaybackMediaResolver:
+    """Resolve server inventory/release aliases to the EXISTING progress row.
+
+    Ordinary identity retains the inventory's path-derived key and size check;
+    this does not claim to hash or detect same-size replacement bytes. Finished
+    identity uses the trusted release manifest's video signature. No caller may
+    supply its own path, signature or alias map.
+    """
+    def __init__(self, player):
+        self.player = player
+
+    def __call__(self, requested):
+        if not isinstance(requested, str) or not 1 <= len(requested) <= 200:
+            raise ValueError('invalid media identity')
+        if requested.startswith('finished:'):
+            viewing = getattr(self.player, 'finished_viewing', None)
+            if viewing is None:
+                raise ValueError('finished media unavailable')
+            matches = [row for row in viewing.catalog()
+                       if requested in ('finished:' + row['id'], row['media_id'])]
+            keys = {row['media_id'] for row in matches}
+            if len(keys) != 1:
+                raise ValueError('unknown or ambiguous finished media identity')
+            # Revalidate existence using the same server path checks as playback.
+            checked = self.player.item('finished:' + matches[0]['id'])
+            if (checked.get('release_id') != matches[0]['id']
+                    or checked.get('release', {}).get('video_sha256') != matches[0]['video_sha256']):
+                raise ValueError('finished media identity changed during lookup')
+            return keys.pop()
+        if not re.fullmatch('[0-9a-f]{32}', requested):
+            raise ValueError('unknown media identity')
+        row = self.player.item(requested)
+        key = hashlib.sha256(str(Path(row['path'])).lower().encode()).hexdigest()[:32]
+        if row.get('id') != requested or key != requested:
+            raise ValueError('media inventory identity changed')
+        return key
+
+
+def guard_legacy_progress(c, media_key, *, enabled=False):
+    """Passive fence in an ALREADY OPEN write transaction; never create tables.
+
+    No v2 tables and disabled is a no-op. Durable generations fence forever,
+    including expiry/release/feature-off. Caller must hold BEGIN IMMEDIATE so a
+    concurrent claim cannot commit between this check and the progress write.
+    """
+    if not c.in_transaction:
+        raise ValueError('legacy progress guard requires an explicit transaction')
+    if enabled is True:
+        raise WriterConflict('session_required')
+    if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='playback_writers'").fetchone():
+        return
+    row = c.execute('SELECT generation FROM playback_writers WHERE media_key=?', (media_key,)).fetchone()
+    if row and (type(row[0]) is not int or row[0] != 0):
+        raise WriterConflict('session_required')
+
+
+def guard_legacy_write(db, c, media_key):
+    # A future trusted adapter may install this callback on the shared Store.
+    # No production caller sets it today; never read enablement from a packet.
+    enabled = getattr(db, 'playback_writer_enabled', None)
+    guard_legacy_progress(c, media_key, enabled=callable(enabled) and enabled() is True)
 
 
 class PlaybackWriters:
@@ -131,9 +195,7 @@ class PlaybackWriters:
         authorize old clients. An HTTP adapter must map this to structured 409.
         """
         key = self.key(media_key)
-        row = c.execute('SELECT generation FROM playback_writers WHERE media_key=?', (key,)).fetchone()
-        if self.enabled() is True or (row and row['generation'] > 0):
-            raise WriterConflict('session_required')
+        guard_legacy_progress(c, key, enabled=self.enabled() is True)
 
     def _packet(self, packet):
         return (identifier(packet.get('session'), 'session'),

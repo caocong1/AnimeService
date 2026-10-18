@@ -63,6 +63,9 @@ class FinishedViewing:
         if session is None: raise ValueError('播放会话无效')
         now = time.time()
         with self.db.gate, self.db.connect() as c:
+            from .playback_writers import guard_legacy_write
+            c.execute('BEGIN IMMEDIATE')
+            guard_legacy_write(self.db, c, row['media_id'])
             if not in_order(c, row['media_id'], session, sequence, now): return {'ok': True, 'ignored': True}
             c.execute('''INSERT INTO web_progress(media_id,position,duration,last_played,updated) VALUES(?,?,?,?,?)
                 ON CONFLICT(media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,

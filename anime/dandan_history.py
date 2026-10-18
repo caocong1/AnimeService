@@ -74,8 +74,9 @@ class DandanHistory:
         for x in ([] if data.get('account_scope')=='ambiguous' else data['seen']):
             t=timestamp(x.get('watched'));eid=str(x.get('episode_id',''))
             if t and eid and eid!='0':seen[eid]=max(t,seen.get(eid,0))
-        matched=0;progress_count=0;seen_count=0;watch_records={}
+        matched=0;progress_count=0;seen_count=0;watch_records={};progress_fenced=0
         with self.db.gate,self.db.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
             # Recompute exact associations each time; never carry an old show/season mapping forward.
             c.execute('UPDATE dandan_history SET show_id=NULL,episode=NULL,source_watched=NULL')
             for mid,m in media.items():
@@ -97,11 +98,17 @@ class DandanHistory:
                     position=excluded.position,duration=excluded.duration,source_watched=excluded.source_watched,updated=excluded.updated''',
                     (mid,m.get('show_id'),m.get('episode'),m['name'],m['folder'],played,pos,duration,watched,now))
                 if pos>0 and duration>0 and played:
-                    progress_count+=1
-                    c.execute('''INSERT INTO web_progress(media_id,position,duration,last_played,updated) VALUES(?,?,?,?,?)
-                        ON CONFLICT(media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,
-                        last_played=max(coalesce(web_progress.last_played,0),excluded.last_played),updated=excluded.updated
-                        WHERE coalesce(web_progress.updated,0)<excluded.updated''',(mid,pos,duration,played,played))
+                    from .playback_writers import guard_legacy_write, WriterConflict
+                    try:
+                        guard_legacy_write(self.db,c,mid)
+                    except WriterConflict:
+                        progress_fenced+=1
+                    else:
+                        progress_count+=1
+                        c.execute('''INSERT INTO web_progress(media_id,position,duration,last_played,updated) VALUES(?,?,?,?,?)
+                            ON CONFLICT(media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,
+                            last_played=max(coalesce(web_progress.last_played,0),excluded.last_played),updated=excluded.updated
+                            WHERE coalesce(web_progress.updated,0)<excluded.updated''',(mid,pos,duration,played,played))
                 # The user wants the player's existing watched flags carried over.
                 # LastPlay/exit position alone still cannot create a watched flag.
                 if watched and m.get('show_id') and m.get('episode'):
@@ -118,7 +125,7 @@ class DandanHistory:
             synced=c.execute("SELECT count(*) FROM watches WHERE method='dandan' AND finished=1").fetchone()[0]
         return {'ok':True,'success':now,'matched_files':matched,'resume_files':progress_count,
                 'seen_files':seen_count,'source_recent':len(recent),'source_seen':len(seen),'interval':60,
-                'account_scope':data.get('account_scope','unknown'),'synced_watched':synced}
+                'account_scope':data.get('account_scope','unknown'),'synced_watched':synced,'progress_fenced':progress_fenced}
 
     def source_signature(self):
         """Size and mtime of the player's history files; None when they cannot be seen."""

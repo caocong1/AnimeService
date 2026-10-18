@@ -124,6 +124,10 @@ def create_app(db=None,engine=None,start_worker=True):
             # Only the local subtitle worker needs WebAssembly compilation, not JS eval.
             response.headers['Content-Security-Policy']=response.headers['Content-Security-Policy'].replace("script-src 'self'", "script-src 'self' 'wasm-unsafe-eval'")
         return response
+    from .playback_writers import WriterConflict
+    @app.exception_handler(WriterConflict)
+    async def writer_conflict(request,e):
+        return JSONResponse({'error':'播放进度需要新的写入会话','reason':e.reason},status_code=409)
     @app.exception_handler(ValueError)
     async def value_error(request,e):return JSONResponse({'error':str(e)[:400]},status_code=400)
     @app.exception_handler(Exception)

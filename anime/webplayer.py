@@ -350,6 +350,9 @@ def register_webplayer(app,db):
         session,sequence=playback_order(p)  # optional for plain media: older clients and the TV stay unordered
         now=time.time();played=now if p.get('playing') is True and pos>0 else None
         with db.gate,db.connect() as c:
+            from .playback_writers import guard_legacy_write
+            c.execute('BEGIN IMMEDIATE')
+            guard_legacy_write(db,c,key)
             if session is not None and not in_order(c,key,session,sequence,now):return {'ok':True,'ignored':True}
             c.execute('''INSERT INTO web_progress(media_id,position,duration,last_played,updated) VALUES(?,?,?,?,?)
               ON CONFLICT(media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,

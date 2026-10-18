@@ -104,6 +104,7 @@ def test_expiry_and_release_retain_generation_and_never_restore_legacy(core):
     assert w.update('ordinary', packet(b, 2), action='release')['ok']
     assert w.state('ordinary')['generation'] == 2 and not w.state('ordinary')['active']
     with db.connect() as c, pytest.raises(WriterConflict, match='session_required'):
+        c.execute('BEGIN IMMEDIATE')
         w.guard_legacy(c, 'ordinary')
     assert w.update('ordinary', packet(b, 2, 2))['reason'] == 'expired'
 
@@ -145,8 +146,10 @@ def test_disabled_rollback_rejects_v2_and_keeps_legacy_fence_on_claimed_keys(cor
     assert w.update('ordinary', packet(a), action='progress')['reason'] == 'disabled'
     now[0] += 1000
     with db.connect() as c, pytest.raises(WriterConflict, match='session_required'):
+        c.execute('BEGIN IMMEDIATE')
         w.guard_legacy(c, 'ordinary')
     with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
         w.guard_legacy(c, 'v1')  # never fenced, feature off
     assert not db.rows('SELECT * FROM web_progress')
 
@@ -154,6 +157,7 @@ def test_disabled_rollback_rejects_v2_and_keeps_legacy_fence_on_claimed_keys(cor
 def test_enabled_legacy_guard_blocks_even_before_the_first_claim(core):
     db, w, now, enabled = core
     with db.connect() as c, pytest.raises(WriterConflict, match='session_required'):
+        c.execute('BEGIN IMMEDIATE')
         w.guard_legacy(c, 'ordinary')
     assert not db.rows('SELECT * FROM playback_writers')
 
