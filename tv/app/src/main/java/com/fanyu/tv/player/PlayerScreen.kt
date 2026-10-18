@@ -72,6 +72,7 @@ fun PlayerScreen(ui: PlayerUi, playerView: PlayerView, danmaku: DanmakuView, act
             if (left > 0) { statusVisible = true; delay(left); statusVisible = false }
         }
         if (statusVisible || ui.overlay == Overlay.Controls) StatusChip(ui.danmuLine, ui.settings.visible)
+        if (ui.progressStatus.isNotEmpty()) ProgressChip(ui.progressStatus)   // who holds progress stays visible
 
         LaunchedEffect(ui.overlay, ui.interaction, ui.playing) {
             if (ui.overlay == Overlay.Controls && ui.playing) { delay(5000); ui.overlay = Overlay.None }
@@ -113,6 +114,13 @@ private fun StatusChip(line: String, visible: Boolean) {
 }
 
 @Composable
+private fun ProgressChip(line: String) {
+    Box(Modifier.fillMaxSize().padding(top = 24.dp, start = SafeH), contentAlignment = Alignment.TopStart) {
+        BasicText(line, Modifier.background(Color(0x88000000)).padding(horizontal = 10.dp, vertical = 4.dp), style = T.small.copy(color = C.muted), maxLines = 1)
+    }
+}
+
+@Composable
 private fun Controls(ui: PlayerUi, actions: PlayerActions) {
     val play = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { play.requestFocus() } }
@@ -129,7 +137,9 @@ private fun Controls(ui: PlayerUi, actions: PlayerActions) {
                 TvButton("弹幕", { ui.overlay = Overlay.Danmu }, icon = Glyph.Danmu)
                 TvButton("字幕", { ui.overlay = Overlay.Subtitles }, icon = Glyph.Subtitle)
                 if (ui.current?.s != "watched") TvButton("标记看完", { actions.markWatched {} }, icon = Glyph.Check)
+                ui.progressTakeover?.let { TvButton(it, actions::takeoverProgress, icon = Glyph.Play) }   // explicit, focusable, never automatic
             }
+            if (ui.progressStatus.isNotEmpty()) BasicText(ui.progressStatus, Modifier.padding(top = 10.dp), style = T.meta, maxLines = 1)
         }
     }
 }

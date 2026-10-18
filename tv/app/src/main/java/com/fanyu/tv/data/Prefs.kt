@@ -2,15 +2,21 @@ package com.fanyu.tv.data
 
 import android.content.Context
 
+/** What the API client reads and writes: the configured server and its session cookies. */
+interface ServerStore {
+    var server: String
+    var cookies: Set<String>
+}
+
 /** Everything the box remembers: the server, its session cookies and the danmu display. */
-class Prefs(context: Context) {
+class Prefs(context: Context) : ServerStore {
     private val sp = context.getSharedPreferences("fanyu", Context.MODE_PRIVATE)
 
-    var server: String
+    override var server: String
         get() = sp.getString("server", "") ?: ""
         set(value) = sp.edit().putString("server", value).apply()
 
-    var cookies: Set<String>
+    override var cookies: Set<String>
         get() = sp.getStringSet("cookies", emptySet()) ?: emptySet()
         set(value) = sp.edit().putStringSet("cookies", value).apply()
 
@@ -33,6 +39,11 @@ class Prefs(context: Context) {
 
     fun setSourceOffset(media: String, identity: String, seconds: Double) =
         sp.edit().putFloat("off:$media:$identity", seconds.toFloat()).apply()
+
+    /** Display label of this box's progress writer ("电视播放器 XXXX"): a random suffix, never an identity. */
+    var writerLabel: String
+        get() = sp.getString("writer_label", "") ?: ""
+        set(value) = sp.edit().putString("writer_label", value).apply()
 
     fun globalOffset(media: String): Double = sp.getFloat("goff:$media", 0f).toDouble()
     fun setGlobalOffset(media: String, seconds: Double) = sp.edit().putFloat("goff:$media", seconds.toFloat()).apply()

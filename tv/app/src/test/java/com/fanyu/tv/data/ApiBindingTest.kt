@@ -1,0 +1,329 @@
+package com.fanyu.tv.data
+
+import com.fanyu.tv.player.PlaybackWriterClient
+import com.fanyu.tv.player.WriterTransport
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.Dispatcher
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
+import org.json.JSONObject
+import org.junit.After
+import org.junit.Assert.*
+import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+
+/**
+ * Api and WriterTransport against two real HTTP servers whose replies the test releases, so a switch
+ * (A→B, A→B→A, a failed switch rolled back, the same server forgotten) happens while a request, a
+ * bootstrap or a token refresh is in flight: nothing issued for one generation is sent to, credited to
+ * or replayed against another.
+ */
+class ApiBindingTest {
+    /** The configured server; [at] names the read of it at which [then] runs once, so a test can interleave a switch or a bootstrap at any point of an attempt. */
+    private class Store(initial: String) : ServerStore {
+        override var cookies: Set<String> = emptySet()
+        var reads = 0
+        var at = 0
+        var then: (() -> Unit)? = null
+        private var value = initial
+        override var server: String
+            get() { reads++; if (reads == at) then?.also { then = null }?.invoke(); return value }
+            set(v) { value = v }
+        fun interleave(read: Int, action: () -> Unit) { reads = 0; at = read; then = action }
+    }
+
+    /** One server stand-in: bootstrap issues "<name>-<n>"; a write must carry the current token (403 otherwise). */
+    private class Scripted(val name: String) : Dispatcher() {
+        @Volatile var expected = ""
+        @Volatile var issued = 0
+        @Volatile var bootstrapStatus = 200
+        @Volatile var hold: CountDownLatch? = null            // every request waits here while set
+        @Volatile var holdBootstrap: CountDownLatch? = null   // only the bootstrap waits
+        @Volatile var holdAfterBootstrap: CountDownLatch? = null   // becomes [hold] once a bootstrap was answered (holds the retry)
+        @Volatile var bootstrapBody: String? = null           // a custom 200 bootstrap body; @TOKEN@ is the issued token
+        fun restart() { expected = "$name-restarted" }        // the real server issues a new token on every restart
+
+        override fun dispatch(request: RecordedRequest): MockResponse {
+            hold?.await()
+            val path = request.path.orEmpty().substringBefore('?')
+            if (path == "/api/bootstrap") {
+                holdBootstrap?.await()
+                if (bootstrapStatus != 200) return json(bootstrapStatus, """{"error":"down"}""")
+                val same = bootstrapBody?.contains("@SAME@") == true               // a bootstrap that keeps the token (a capability change only)
+                if (!same) expected = "$name-${++issued}"
+                hold = holdAfterBootstrap
+                val body = bootstrapBody?.replace("@TOKEN@", expected)?.replace("@SAME@", expected)
+                    ?: """{"token":"$expected","capabilities":{"playback_writer":{"protocol":"playback-writer/v2","enabled":true}}}"""
+                return json(200, body)
+            }
+            if (request.method == "POST" && request.getHeader("X-Anime-Token") != expected) return json(403, """{"error":"token"}""")
+            return when (path) {
+                PlaybackWriterClient.STATE -> json(200, """{"media_key":"$KEY","requested_media_key":"$KEY","generation":1,"active":false,"expires":0}""")
+                PlaybackWriterClient.CLAIM -> json(200, """{"ok":true,"media_key":"$KEY","requested_media_key":"$KEY","generation":1,"expires":999}""")
+                PlaybackWriterClient.PROGRESS -> json(200, """{"ok":true,"generation":1,"sequence":${JSONObject(request.body.clone().readUtf8()).optLong("sequence")}}""")
+                else -> json(200, "{}")
+            }
+        }
+
+        private fun json(code: Int, body: String) = MockResponse().setResponseCode(code).setHeader("Content-Type", "application/json").setBody(body)
+    }
+
+    private class Box(name: String) {
+        val script = Scripted(name)
+        val server = MockWebServer().apply { dispatcher = script; start() }
+        val url = server.url("/").toString().trimEnd('/')
+        /** The next request received, in order, whether or not it was answered yet. */
+        fun next(): RecordedRequest = server.takeRequest(5, TimeUnit.SECONDS) ?: throw AssertionError("$url received nothing")
+        fun quiet() { server.takeRequest(300, TimeUnit.MILLISECONDS)?.let { throw AssertionError("$url received ${it.path}") } }
+        /** Every request received so far, in arrival order, consumed. */
+        fun drain(): List<RecordedRequest> = generateSequence { server.takeRequest(200, TimeUnit.MILLISECONDS) }.toList()
+        val received: Int get() = server.requestCount
+    }
+
+    private val a = Box("A")
+    private val b = Box("B")
+    private val store = Store(a.url)
+    private val api = Api(store)
+    private val packet = mapOf("media_key" to KEY, "session" to SESSION, "generation" to 1L, "writer_token" to "t".repeat(32), "sequence" to 1L)
+
+    @After fun down() {
+        for (box in listOf(a, b)) { box.script.hold?.countDown(); box.script.holdBootstrap?.countDown(); box.script.holdAfterBootstrap?.countDown(); box.server.shutdown() }
+    }
+
+    private fun switched(e: Throwable?) = e is ApiError && e.message == "服务器已切换"
+
+    /** A legacy write held at A while [meanwhile] runs; returns what the caller got. */
+    private suspend fun legacyInFlight(meanwhile: () -> Unit): Result<JSONObject> = coroutineScope {
+        val gate = CountDownLatch(1); a.script.hold = gate
+        val r = async(Dispatchers.IO) { runCatching { api.post("/api/web/media/x/progress", JSONObject().put("position", 1)) } }
+        a.next(); meanwhile(); gate.countDown(); a.script.hold = null
+        r.await()
+    }
+
+    companion object {
+        const val KEY = "0123456789abcdef0123456789abcdef"
+        const val SESSION = "session-aaaaaaaaaaaaaaaa"
+    }
+
+    @Test fun bootstrapIssuesForOneGenerationAndEverySwitchDropsIt() = runBlocking<Unit> {   // A→B, then A→B→A
+        api.bootstrap(); a.next()
+        val onA = api.context()
+        assertEquals("A-1", onA.token); assertTrue(PlaybackWriterClient.negotiated(api.negotiatedCapabilities))
+        store.server = b.url
+        assertNull(api.context().token); assertTrue(api.negotiatedCapabilities.isEmpty()); assertFalse(api.accepts(onA))
+        assertEquals(200, api.structured(PlaybackWriterClient.CLAIM, packet).status)       // B bootstraps for itself
+        assertEquals("/api/bootstrap", b.next().path)
+        val claim = b.next()
+        assertEquals("B-1", claim.getHeader("X-Anime-Token")); assertEquals(b.url, claim.getHeader("Origin")); assertEquals(b.url + PlaybackWriterClient.CLAIM, claim.requestUrl.toString())
+        assertEquals(1, a.received)
+        store.server = a.url                                                                // back to A: a new generation of A
+        assertNull(api.context().token); assertFalse(api.accepts(onA))
+        assertEquals(Api.SERVER_CHANGED, api.structured(PlaybackWriterClient.PROGRESS, packet, onA).status)   // the old binding sends nothing
+        assertEquals(1, a.received)
+        assertEquals(200, api.structured(PlaybackWriterClient.PROGRESS, packet).status)
+        assertEquals("/api/bootstrap", a.next().path); assertEquals("A-2", a.next().getHeader("X-Anime-Token"))   // nothing from before is reused
+    }
+
+    @Test fun aReplyArrivingAfterTheSwitchIsDropped() = runBlocking<Unit> {
+        api.bootstrap(); a.next()
+        val gate = CountDownLatch(1); a.script.hold = gate
+        val late = async(Dispatchers.IO) { api.structured(PlaybackWriterClient.PROGRESS, packet) }
+        assertEquals(PlaybackWriterClient.PROGRESS, a.next().path)                          // in flight at A
+        store.server = b.url                                                                // the user switched meanwhile
+        gate.countDown()
+        val r = late.await()
+        assertEquals(Api.SERVER_CHANGED, r.status); assertNull(r.body)
+        assertEquals(0, b.received); assertNull(api.context().token)
+    }
+
+    @Test fun anOldBootstrapNeverCreditsTheNewServer() = runBlocking<Unit> {
+        val gate = CountDownLatch(1); a.script.holdBootstrap = gate
+        val old = async(Dispatchers.IO) { runCatching { api.bootstrap() } }
+        assertEquals("/api/bootstrap", a.next().path)
+        store.server = b.url
+        gate.countDown()
+        val e = old.await().exceptionOrNull()
+        assertTrue("$e", e is ApiError && e.message == "服务器已切换")
+        assertNull(api.context().token); assertTrue(api.negotiatedCapabilities.isEmpty()); assertEquals(0, b.received)
+    }
+
+    @Test fun forgettingTheSameServerIsANewGeneration() = runBlocking<Unit> {
+        api.bootstrap(); a.next()
+        val before = api.context()
+        api.forgetServer()
+        assertNull(api.context().token); assertFalse(api.accepts(before))
+        assertEquals(Api.SERVER_CHANGED, api.structured(PlaybackWriterClient.PROGRESS, packet, before).status); assertEquals(1, a.received)
+        assertEquals(200, api.structured(PlaybackWriterClient.PROGRESS, packet).status)
+        assertEquals("/api/bootstrap", a.next().path); assertEquals("A-2", a.next().getHeader("X-Anime-Token"))
+    }
+
+    @Test fun aFailedSwitchRolledBackReissuesNothingFromBefore() = runBlocking<Unit> {
+        api.bootstrap(); a.next()
+        val before = api.context()
+        b.script.bootstrapStatus = 503
+        store.server = b.url
+        assertEquals(503, assertThrows(ApiError::class.java) { runBlocking { api.bootstrap() } }.code)
+        store.server = a.url; api.forgetServer()                                            // the connect screen rolls back
+        assertNull(api.context().token); assertFalse(api.accepts(before))
+        assertEquals(Api.SERVER_CHANGED, api.structured(PlaybackWriterClient.PROGRESS, packet, before).status); assertEquals(1, a.received)
+        assertEquals(200, api.structured(PlaybackWriterClient.PROGRESS, packet).status)
+        assertEquals("/api/bootstrap", a.next().path); assertEquals("A-2", a.next().getHeader("X-Anime-Token"))
+    }
+
+    @Test fun a403RefreshesTheTokenOnceWithinTheSameGenerationOnly() = runBlocking<Unit> {
+        api.bootstrap(); a.next()
+        a.script.restart()
+        assertEquals(200, api.structured(PlaybackWriterClient.PROGRESS, packet).status)
+        assertEquals("A-1", a.next().getHeader("X-Anime-Token")); assertEquals("/api/bootstrap", a.next().path); assertEquals("A-2", a.next().getHeader("X-Anime-Token"))
+        a.script.restart()
+        val gate = CountDownLatch(1); a.script.holdBootstrap = gate
+        val moved = async(Dispatchers.IO) { api.structured(PlaybackWriterClient.PROGRESS, packet) }
+        a.next(); assertEquals("/api/bootstrap", a.next().path)                             // the 403 came back; the refresh is in flight
+        store.server = b.url
+        gate.countDown()
+        assertEquals(Api.SERVER_CHANGED, moved.await().status); assertEquals(0, b.received)  // the packet is never replayed elsewhere
+        store.server = a.url; a.script.holdBootstrap = null                                 // the legacy write path binds the same way
+        api.bootstrap(); a.next(); a.script.restart()
+        val gate2 = CountDownLatch(1); a.script.holdBootstrap = gate2
+        val legacy = async(Dispatchers.IO) { runCatching { api.post("/api/web/media/x/progress", JSONObject().put("position", 1)) } }
+        a.next(); assertEquals("/api/bootstrap", a.next().path)
+        store.server = b.url
+        gate2.countDown()
+        val e = legacy.await().exceptionOrNull()
+        assertTrue("$e", e is ApiError && e.message == "服务器已切换"); assertEquals(0, b.received)
+    }
+
+    @Test fun aLegacyReplyIsDeliveredOnlyForItsOwnConnection() = runBlocking<Unit> {   // owner round-22 group 3
+        api.bootstrap(); a.next()
+        assertTrue(switched(legacyInFlight { store.server = b.url; api.forgetServer() }.exceptionOrNull()))   // a 200 of the old connection after A→B
+        assertEquals(0, b.received); a.quiet()
+        store.server = a.url; api.forgetServer(); api.bootstrap(); a.next()                                   // A→B→A as the connect screen does it
+        assertTrue(switched(legacyInFlight { store.server = b.url; api.forgetServer(); store.server = a.url; api.forgetServer() }.exceptionOrNull()))
+        api.bootstrap(); a.next()
+        assertTrue(switched(legacyInFlight { api.forgetServer() }.exceptionOrNull()))                         // the same base, forgotten
+        api.bootstrap(); a.next(); a.script.restart()
+        assertTrue(switched(legacyInFlight { store.server = b.url; api.forgetServer() }.exceptionOrNull()))   // a late 403 bootstraps nothing anywhere
+        assertEquals(0, b.received); a.quiet()
+        store.server = a.url; api.forgetServer(); api.bootstrap(); a.next(); a.script.restart()               // the retry's 200 after a switch
+        val gate = CountDownLatch(1); a.script.holdAfterBootstrap = gate
+        val retry = async(Dispatchers.IO) { runCatching { api.post("/api/web/media/x/progress", JSONObject().put("position", 1)) } }
+        a.next(); assertEquals("/api/bootstrap", a.next().path); assertEquals("/api/web/media/x/progress", a.next().path)   // the retry is held
+        store.server = b.url; api.forgetServer()
+        gate.countDown(); a.script.hold = null; a.script.holdAfterBootstrap = null
+        assertTrue(switched(retry.await().exceptionOrNull())); assertEquals(0, b.received)
+        store.server = a.url; api.forgetServer(); api.bootstrap(); a.next()                                   // and the plain success path still works
+        assertEquals("{}", api.post("/api/web/media/x/progress", JSONObject().put("position", 1)).toString()); a.next(); a.quiet()
+    }
+
+    @Test fun aFailedOrWithdrawnRefreshReachesTheWriterWithItsMeaning() = runBlocking<Unit> {   // owner round-22 group 4
+        class Case(val status: Int, val body: String?, val reason: String, val halted: Boolean)
+        val cases = listOf(
+            Case(401, null, "unauthorized_401", true), Case(403, null, "unauthorized_403", true), Case(404, null, "protocol_404", true),
+            Case(503, null, "disabled_503", true), Case(200, "not json", "protocol_200", true),
+            Case(200, """{"token":"@TOKEN@","capabilities":{}}""", "disabled", true),
+            Case(200, """{"token":"@TOKEN@","capabilities":{"playback_writer":{"protocol":"playback-writer/v3","enabled":true}}}""", "disabled", true),
+            Case(500, null, "server_500", false),
+        )
+        for (case in cases) {
+            api.forgetServer(); a.script.bootstrapStatus = 200; a.script.bootstrapBody = null
+            api.bootstrap(); a.next()
+            val c = PlaybackWriterClient(KEY, SESSION, "电视播放器 7F3A", WriterTransport(api))
+            assertTrue(c.claim().ok); a.next()
+            a.script.restart(); a.script.bootstrapStatus = case.status; a.script.bootstrapBody = case.body   // the refresh after the 403 fails or withdraws
+            val r = c.progress(1.0, 2.0, true)
+            assertEquals(case.reason, r.reason)
+            assertEquals(case.reason, if (case.halted) PlaybackWriterClient.Status.HALTED else PlaybackWriterClient.Status.WRITING, c.status)
+            a.next(); assertEquals(case.reason, "/api/bootstrap", a.next().path); a.quiet()                  // the packet is never replayed
+            if (case.halted) { assertEquals("halted", c.claim().reason); a.quiet() }
+        }
+        api.forgetServer(); a.script.bootstrapStatus = 200; a.script.bootstrapBody = null                   // a valid refresh in the same generation
+        api.bootstrap(); a.next()
+        val c = PlaybackWriterClient(KEY, SESSION, "电视播放器 7F3A", WriterTransport(api))
+        assertTrue(c.claim().ok); a.next()
+        a.script.restart()
+        val r = c.progress(1.0, 2.0, true)
+        assertTrue(r.ok); assertEquals(1L, r.sequence); assertEquals(PlaybackWriterClient.Status.WRITING, c.status)
+        a.next(); assertEquals("/api/bootstrap", a.next().path); assertEquals(a.script.expected, a.next().getHeader("X-Anime-Token")); a.quiet()
+    }
+
+    /** A fresh writer on A with a successful claim; A's queue drained. */
+    private suspend fun writerOnA(): PlaybackWriterClient {
+        store.server = a.url; api.forgetServer(); a.script.bootstrapStatus = 200; a.script.bootstrapBody = null
+        api.bootstrap()
+        val c = PlaybackWriterClient(KEY, SESSION, "电视播放器 7F3A", WriterTransport(api))
+        assertTrue(c.claim().ok); a.drain()
+        return c
+    }
+    private fun toB() { store.server = b.url; api.forgetServer() }
+
+    @Test fun noReadOrderLetsAWriterPacketReachAnotherServer() = runBlocking<Unit> {   // owner round-27 group 1
+        for (k in 1..6) {
+            val c = writerOnA()
+            store.interleave(k) { toB() }                                                 // the switch lands at the k-th read of the configured server
+            val r = c.progress(1.0, 2.0, true)
+            val sent = a.drain()
+            assertEquals("k=$k", 0, b.received)                                           // nothing ever reaches B
+            for (q in sent) { assertEquals("k=$k", a.url, q.getHeader("Origin")); assertEquals("k=$k", a.script.expected, q.getHeader("X-Anime-Token")) }
+            if (!r.ok) { assertEquals("k=$k", "protocol", r.reason); assertEquals("k=$k", PlaybackWriterClient.Status.HALTED, c.status) }
+            store.at = 0
+        }
+    }
+
+    @Test fun aCapabilityWithdrawnByAnotherBootstrapIsSeenByTheSendingContext() = runBlocking<Unit> {   // owner round-27 group 2
+        for (k in 1..6) {
+            val c = writerOnA()
+            a.script.bootstrapBody = """{"token":"@SAME@","capabilities":{}}"""           // the next bootstrap of A withdraws the writer, same token
+            store.interleave(k) { runBlocking { api.bootstrap() } }                      // another bootstrap in the same generation at the k-th read
+            val r = c.progress(1.0, 2.0, true)
+            val order = a.drain().map { it.path.orEmpty().substringBefore('?') }
+            val progress = order.indexOf(PlaybackWriterClient.PROGRESS); val withdrawn = order.indexOf("/api/bootstrap")
+            if (withdrawn >= 0 && progress >= 0) assertTrue("k=$k: a packet left after the withdrawal ($order)", progress < withdrawn)
+            if (withdrawn >= 0 && progress < 0) { assertEquals("k=$k", "disabled", r.reason); assertEquals("k=$k", PlaybackWriterClient.Status.HALTED, c.status) }
+            if (withdrawn < 0) assertTrue("k=$k", r.ok)
+            store.at = 0
+        }
+    }
+
+    @Test fun anInRequestRefreshNeverBootstrapsAnotherServer() = runBlocking<Unit> {   // owner round-27 group 3
+        for (k in 1..8) {                                                                   // the writer: progress 403 → refresh, switched at the k-th read
+            val c = writerOnA(); a.script.restart()
+            store.interleave(k) { toB() }
+            val r = c.progress(1.0, 2.0, true)
+            assertEquals("k=$k", 0, b.received)
+            if (!r.ok) assertEquals("k=$k", "protocol", r.reason) else assertEquals("k=$k", 1L, r.sequence)
+            a.drain(); store.at = 0
+        }
+        for (k in 1..8) {                                                                   // legacy: the same for post()
+            store.server = a.url; api.forgetServer(); api.bootstrap(); a.drain(); a.script.restart()
+            val onB = b.received
+            store.interleave(k) { toB() }
+            val r = runCatching { api.post("/api/web/media/x/progress", JSONObject().put("position", 1)) }
+            val onA = a.drain()
+            if (onA.isEmpty()) assertTrue("k=$k", r.isSuccess)                            // switched before anything started: a new request on B
+            else { assertEquals("k=$k", onB, b.received); r.exceptionOrNull()?.let { assertTrue("k=$k: $it", switched(it)) } }   // started on A: B stays untouched
+            store.at = 0
+        }
+    }
+
+    @Test fun theWriterTransportIsBoundToOneGenerationAndHaltsWhenItMoves() = runBlocking<Unit> {
+        api.bootstrap(); a.next()
+        val onA = api.context()
+        val c = PlaybackWriterClient(KEY, SESSION, "电视播放器 7F3A", WriterTransport(api))
+        assertTrue(c.claim().ok); assertEquals("A-1", a.next().getHeader("X-Anime-Token"))
+        val gate = CountDownLatch(1); a.script.hold = gate
+        val late = async(Dispatchers.IO) { c.progress(1.0, 2.0, true) }
+        assertEquals(PlaybackWriterClient.PROGRESS, a.next().path)
+        store.server = b.url
+        gate.countDown()
+        assertEquals("protocol", late.await().reason); assertEquals(PlaybackWriterClient.Status.HALTED, c.status)
+        assertEquals("halted", c.claim().reason); assertEquals(0, b.received)
+        store.server = a.url; a.script.hold = null                                          // A→B→A: a transport bound before sends nothing
+        val c2 = PlaybackWriterClient(KEY, SESSION, "电视播放器 7F3A", WriterTransport(api, onA))
+        assertEquals("protocol", c2.claim().reason); assertEquals(PlaybackWriterClient.Status.HALTED, c2.status); assertEquals(3, a.received)
+    }
+}

@@ -92,13 +92,14 @@ fun ConnectScreen(api: Api, prefs: Prefs, startPairing: Boolean, onConnected: ()
         if (url == null) { error = "地址格式不对" to "例如 https://anime.example.com:38443"; return }
         val previous = prefs.server
         prefs.server = url
+        if (url != previous) api.forgetServer()   // nothing negotiated or issued for the old server carries over
         busy = true; error = null
         scope.launch {
             try {
                 api.bootstrap(); done()
             } catch (e: ApiError) {
                 if (e.code == 401) { pairing = true; error = null; runCatching { codeFocus.requestFocus() } }
-                else { error = explain(e, url); hideKeyboard(); if (previous.isNotEmpty()) prefs.server = previous }
+                else { error = explain(e, url); hideKeyboard(); if (previous.isNotEmpty()) prefs.server = previous; api.forgetServer() }
             } finally { busy = false }
         }
     }
