@@ -7,17 +7,21 @@ const STATES = {wish: '想看', trial: '试看', watching: '在追', paused: '�
 const rows = Array.from({length: 45}, (_, i) => ({id: i + 1, title: `作品${i + 1}`, original: `Anime ${i + 1}`,
   state: i % 3 === 0 ? 'completed' : 'watching', watched: 0, total: 12, unwatched: 0, eps: [], air_date: ''}));
 const settle = () => new Promise(resolve => setImmediate(resolve));
+// The page's clock: tests advance it instead of waiting; timers are recorded, never started, and fired by the test.
+const clock = {now: 1_700_000_000_000};
+class PageDate extends Date { static now() { return clock.now; } }
 
 async function page(search = '?view=all', fail = false) {
-  const elements = new Map(), events = {}, pagers = [{}, {}], calls = [];
+  const elements = new Map(), events = {}, pagers = [{}, {}], calls = [], timers = [];
   function $(selector) {
     if (!elements.has(selector)) elements.set(selector, {hidden: false, value: '', innerHTML: '', textContent: '',
       addEventListener(name, fn) { this[name] = fn; }, focus() {}});
     return elements.get(selector);
   }
   const location = {pathname: '/', search, hash: ''};
-  const context = vm.createContext({URLSearchParams, Set, Promise, console, location, STATES, $, calls,
-    document: {querySelectorAll: () => pagers, addEventListener(name, fn) { events[name] = fn; }},
+  const document = {hidden: false, querySelectorAll: () => pagers, addEventListener(name, fn) { events[name] = fn; }};
+  const context = vm.createContext({URLSearchParams, Set, Promise, console, location, STATES, $, calls, document, Date: PageDate,
+    setInterval(fn, ms) { timers.push({fn, ms}); return timers.length; }, clearInterval() {},
     history: Object.fromEntries(['pushState', 'replaceState'].map(k => [k, (_, __, url) => {location.search = new URL(url, 'http://test').search;}])),
     window: {scrollTo() {}}, addEventListener(name, fn) {events[name] = fn;},
     shell(name) {calls.push(name);}, boot: async () => {}, applyListAiringSchedules: async list => list,
@@ -28,7 +32,8 @@ async function page(search = '?view=all', fail = false) {
   });
   vm.runInContext(fs.readFileSync('static/home.js', 'utf8'), context);
   await settle();
-  return {$, events, pagers, location, calls, context,
+  return {$, events, pagers, location, calls, context, timers, document,
+    requests() {return calls.filter(c => c.startsWith('/')).length;},
     click(selector, values) {events.click({target: {closest: s => s === selector ? values : null}});},
     ids() {return [...$('#shelf').innerHTML.matchAll(/class="name" href="\/show\/(\d+)"/g)].map(m => Number(m[1]));}};
 }
@@ -117,4 +122,52 @@ test('states without shows stay visible but disabled, and a requested empty stat
   assert.equal(empty.ids().length, 0);
   empty.click('[data-f]', {dataset: {f: 'completed'}});
   assert.equal(empty.ids().length, 15);
+});
+
+test('background refresh reloads on the timer, focus or visibility, at most once per 10 s, never hidden or while loading', async () => {
+  const p = await page();
+  const before = p.requests();
+  assert.deepEqual(p.timers.map(t => t.ms), [60000]);
+  p.timers[0].fn(); p.events.focus(); p.events.visibilitychange(); await settle();
+  assert.equal(p.requests(), before);                                        // just loaded: throttled
+  clock.now += 10001;
+  p.timers[0].fn(); await settle();
+  assert.equal(p.requests(), before + 1);                                    // the timer reloads
+  p.events.focus(); await settle();
+  assert.equal(p.requests(), before + 1);                                    // and starts a new 10 s window
+  clock.now += 10001; p.document.hidden = true;
+  p.timers[0].fn(); p.events.visibilitychange(); await settle();
+  assert.equal(p.requests(), before + 1);                                    // hidden: nothing
+  p.document.hidden = false; p.events.visibilitychange(); await settle();
+  assert.equal(p.requests(), before + 2);                                    // visible again: reload
+  clock.now += 10001;
+  let release;
+  p.context.api = async path => { p.calls.push(path); await new Promise(resolve => { release = resolve; }); return rows.slice(); };
+  p.events.focus(); p.timers[0].fn(); p.events.visibilitychange(); await settle();
+  assert.equal(p.requests(), before + 3);                                    // one load in flight, no second one
+  release(); await settle();
+  assert.equal(p.ids().length, 20);
+});
+
+test('a failed background refresh keeps the list, filter and page; a successful one keeps filter and page too', async () => {
+  const p = await page('?view=all&page=2&state=watching');
+  const ids = p.ids(), search = p.location.search;
+  assert.equal(ids.length, 10);
+  clock.now += 10001;
+  p.context.api = async path => { p.calls.push(path); throw Error('offline'); };
+  p.timers[0].fn(); await settle();
+  assert.deepEqual(p.ids(), ids);                                            // the shelf stays
+  assert.equal(p.location.search, search);
+  assert.equal(p.$('#shelf-section').hidden, false);
+  assert.equal(p.$('#watch-board').hidden, true);                            // no error board for a background failure
+  assert.equal(p.$('#screens').innerHTML, '');
+  clock.now += 10001;
+  p.context.api = async path => { p.calls.push(path); return rows.slice(); };
+  p.events.focus(); await settle();
+  assert.deepEqual(p.ids(), ids);
+  assert.equal(p.location.search, search);
+  p.context.api = async path => { p.calls.push(path); throw Error('offline'); };
+  p.click('#retry', {}); await settle();                                     // a user-initiated load still reports its failure
+  assert.equal(p.$('#watch-board').hidden, false);
+  assert.match(p.$('#screens').innerHTML, /连不上后台/);
 });
