@@ -81,6 +81,8 @@ class PlaybackWriterClient(
     private var sequence = 0L
     private var observedGeneration = 0L
     private var claiming = false
+    private var claimSerial = 0L
+    private var claimTicket = 0L          // the one claim attempt allowed to install a fence; 0 when none
     private var finalPermit: Captured? = null
     private var finalUsed = false
     private var dirty = false
@@ -173,11 +175,16 @@ class PlaybackWriterClient(
             if (status == Status.DISPOSED || status == Status.HALTED || status == Status.UNSUPPORTED) return@update ClaimResult(false, status.name.lowercase(), generation, null)
             if (claiming) return@update ClaimResult(false, "claim_in_progress", generation, null)
             claiming = true
-            epoch++; lane++; fence = null; sequence = 0; lastError = null; finalPermit = null   // every older claim, job, permit and answer is inert
+            claimTicket = ++claimSerial
+            epoch++; lane++; fence = null; sequence = 0; lastError = null; finalPermit = null; finalUsed = false   // every older claim, job, permit and answer is inert
             null
         }
         if (started != null) return started
-        val myEpoch = synchronized(lock) { epoch }
+        val myClaim = synchronized(lock) { claimTicket }
+        // The claim identity is immutable: a final, a suspend, a halt, a dispose or a newer claim closes it, and every later
+        // step of this attempt (retry, answer, verification, install) is inert. Monitor held by the caller.
+        fun mine() = claimTicket == myClaim && status != Status.DISPOSED && status != Status.HALTED && status != Status.UNSUPPORTED
+        fun closed() = ClaimResult(false, if (claimTicket == myClaim) status.name.lowercase() else "superseded", generation, null)
         try {
             val expected = expectedGeneration ?: generation
             val body = mapOf("media_key" to mediaKey, "session" to session, "request_id" to requestId, "writer_token" to token,
@@ -187,11 +194,11 @@ class PlaybackWriterClient(
             do {                                           // a network failure retries the SAME packet, never a second unknown claim
                 attempt++
                 r = post(CLAIM, body, false)
-            } while (r.status == 0 && attempt <= retries && synchronized(lock) { epoch == myEpoch && status != Status.DISPOSED })
+            } while (r.status == 0 && attempt <= retries && synchronized(lock) { mine() })
             val c = classify(r)
             val b = c.body
             val verify = update {
-                if (epoch != myEpoch || status == Status.DISPOSED) return@update ClaimResult(false, "superseded", generation, null)
+                if (!mine()) return@update closed()
                 if (c.kind == "conflict" || (c.kind == "ok" && b?.get("ok") == false)) {
                     val gen = safeLong(b?.get("generation"))
                     if (b == null || !echoed(b) || gen == null || b["active"] !is Boolean) { failLocked("protocol", c.http); return@update ClaimResult(false, lastError, generation, null) }
@@ -212,8 +219,7 @@ class PlaybackWriterClient(
             val expires = (b["expires"] as Number).toDouble()
             val current = state()                          // history is not live ownership: confirm in this epoch
             return update {
-                if (epoch != myEpoch || status == Status.DISPOSED) return@update ClaimResult(false, "superseded", generation, null)
-                if (status == Status.HALTED || status == Status.UNSUPPORTED) return@update ClaimResult(false, status.name.lowercase(), generation, null)
+                if (!mine()) return@update closed()
                 if (!current.supported || !current.active || current.generation != gen) {
                     fence = null; transition(Status.STALE, Conflict("stale", current.generation, current.device))
                     return@update ClaimResult(false, "verify_failed", current.generation, current.device)
@@ -263,6 +269,7 @@ class PlaybackWriterClient(
             }
             if (!strictSave(cl, t, sent)) return@update failLocked(if (cl.kind == "ok") "protocol" else cl.kind, cl.http)
             unsaved = false; lastError = null; dirty = true
+            if (c.path == RELEASE) { fence = null; transition(Status.RELEASED, null) }   // committed under the packet's own identity, never by a later answer
             SendResult(true, null, sequence = sent)
         }
     }
@@ -278,11 +285,7 @@ class PlaybackWriterClient(
 
     suspend fun heartbeat(): SendResult = send(HEARTBEAT, emptyMap())
 
-    suspend fun release(): SendResult {
-        val r = send(RELEASE, emptyMap())
-        if (r.ok) update { fence = null; finalPermit = null; transition(Status.RELEASED, null) }
-        return r
-    }
+    suspend fun release(): SendResult = send(RELEASE, emptyMap())
 
     /**
      * Captures the last snapshot NOW (values read on the caller's thread) and returns a job that may run
@@ -291,9 +294,11 @@ class PlaybackWriterClient(
      */
     fun final(position: Double, duration: Double, playing: Boolean): suspend () -> SendResult {
         val c = update {
+            closeIdentityLocked()
+            val existing = finalPermit
+            if (existing != null) return@update if (finalUsed) null else existing        // idempotent: the first frozen snapshot stays the one to send
             val f = fence
-            lane++
-            if (status != Status.WRITING || f == null) { finalPermit = null; return@update null }
+            if (status != Status.WRITING || f == null) return@update null
             val captured = Captured(Ticket(epoch, lane, f.generation, f.token), PROGRESS, mapOf("position" to position, "duration" to duration, "playing" to playing), true)
             finalPermit = captured; finalUsed = false
             fence = null
@@ -312,6 +317,17 @@ class PlaybackWriterClient(
             }
         }
     }
+
+    /** Stops writing without a packet (nothing to snapshot): the fence is dropped, any in-flight claim is closed; only an explicit claim resumes. */
+    fun suspendWriting() {
+        update {
+            closeIdentityLocked()
+            if (status == Status.WRITING) { fence = null; transition(Status.SUSPENDED, null) }
+        }
+    }
+
+    /** Monitor held: no claim attempt started earlier may install a fence any more, and pending regular jobs are dropped. */
+    private fun closeIdentityLocked() { claimTicket = 0; lane++ }
 
     /** Terminal: no state, claim or regular packet leaves afterwards; one final permit captured before still may. */
     fun dispose() {

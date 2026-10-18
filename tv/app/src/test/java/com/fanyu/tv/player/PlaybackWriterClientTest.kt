@@ -276,6 +276,121 @@ class PlaybackWriterClientTest {
         assertFalse(r.ok); assertEquals("verify_failed", r.reason); assertEquals(Status.STALE, c.status); assertEquals("网页播放器 1A2B", c.conflict?.device)
     }
 
+    @Test fun aLateClaimSuccessNeverRevivesAHaltedInstance() = runBlocking<Unit> {   // owner round-21 item 1
+        for (halt in listOf(Response(503, mapOf("reason" to "disabled")), Response(401, mapOf("error" to "login")),
+                            Response(200, mapOf("media_key" to KEY, "generation" to 1L, "active" to false)))) {   // disabled, unauthorized, missing fields
+            val g = Gates()
+            val fake = Fake { _, _, _ -> g.next() }
+            fake.stateAnswer = { halt }
+            val c = client(fake)
+            val claim = async { c.claim() }; g.until(1)                                   // the claim is in flight
+            assertFalse(c.state().supported); assertEquals(Status.HALTED, c.status)     // the capability went away meanwhile
+            g.list[0].complete(ok(1))                                                     // its late success
+            val r = claim.await()
+            assertFalse(r.ok); assertEquals("halted", r.reason); assertEquals(Status.HALTED, c.status)
+            assertEquals("halted", c.progress(1.0, 2.0, true).reason); assertEquals("halted", c.claim().reason)
+            assertEquals(2, fake.calls.size)
+        }
+        val g2 = Gates()                                                                  // nor does a retry leave after the halt
+        val fake2 = Fake { _, _, _ -> g2.next() }
+        fake2.stateAnswer = { Response(503, mapOf("reason" to "disabled")) }
+        val c2 = client(fake2, retries = 2)
+        val claim2 = async { c2.claim() }; g2.until(1)
+        c2.state()
+        g2.list[0].complete(Response(0, null))
+        assertEquals("halted", claim2.await().reason); assertEquals(2, fake2.calls.size)
+    }
+
+    @Test fun aFinalOrSuspendClosesAnInFlightClaimEvenWithoutAFence() = runBlocking<Unit> {   // owner round-21 item 2
+        val g = Gates()                                                                   // 1) the first send is in flight
+        val fake = Fake { _, _, _ -> g.next() }
+        val c = client(fake)
+        val claim = async { c.claim() }; g.until(1)
+        val job = c.final(1.0, 2.0, false)                                                // onStop before any fence: nothing to snapshot
+        assertEquals(Status.IDLE, c.status)
+        g.list[0].complete(ok(1))
+        assertEquals("superseded", claim.await().reason); assertEquals(Status.IDLE, c.status)
+        assertEquals("no_claim", c.progress(1.0, 2.0, true).reason); assertEquals("no_claim", job().reason)
+        assertEquals(1, fake.calls.size)
+        val g2 = Gates()                                                                  // 2) a retry of the same packet is in flight
+        val fake2 = Fake { _, _, _ -> g2.next() }
+        val c2 = client(fake2, retries = 2)
+        val claim2 = async { c2.claim() }; g2.until(1); g2.list[0].complete(Response(0, null)); g2.until(2)
+        c2.suspendWriting()
+        g2.list[1].complete(ok(1))
+        assertEquals("superseded", claim2.await().reason); assertEquals(Status.IDLE, c2.status); assertEquals(2, fake2.calls.size)
+        val g3 = Gates()                                                                  // 3) the verification through state is in flight
+        val fake3 = Fake { _, _, _ -> g3.next() }
+        fake3.stateAnswer = { g3.next() }
+        val c3 = client(fake3)
+        val claim3 = async { c3.claim() }; g3.until(1); g3.list[0].complete(ok(2, 999.0, "replayed" to true)); g3.until(2)
+        c3.final(1.0, 2.0, false)
+        g3.list[1].complete(state(2, true, "电视播放器 7F3A"))
+        assertEquals("superseded", claim3.await().reason); assertEquals(Status.IDLE, c3.status); assertNull(c3.conflict)
+        assertEquals("no_claim", c3.heartbeat().reason); assertEquals(2, fake3.calls.size)
+        val again = async { c3.claim() }; g3.until(3); g3.list[2].complete(ok(3))        // an explicit claim works afterwards
+        assertTrue(again.await().ok); assertEquals(Status.WRITING, c3.status)
+    }
+
+    @Test fun repeatedFinalsKeepTheFirstSnapshotEvenAcrossDispose() = runBlocking<Unit> {   // owner round-21 item 3
+        val g = Gates()
+        val fake = Fake { _, _, _ -> g.next() }
+        val c = client(fake)
+        val first = async { c.claim() }; g.until(1); g.list[0].complete(ok(1)); first.await()
+        val stop1 = c.final(30.0, 100.0, false)                                           // onStop
+        val stop2 = c.final(31.0, 100.0, false)                                           // a second lifecycle exit before the first job ran
+        assertEquals(Status.SUSPENDED, c.status)
+        c.dispose()
+        val sent = async { stop2() }; g.until(2)
+        assertEquals(30.0, fake.calls[1].body["position"]); assertEquals(1L, fake.calls[1].body["sequence"])   // the first frozen snapshot
+        g.list[1].complete(applied(1, 1)); assertTrue(sent.await().ok)
+        assertEquals("stale_response", stop1().reason); assertEquals(2, g.list.size)      // sent exactly once
+        val g2 = Gates()                                                                  // a used permit is not re-minted by another final
+        val fake2 = Fake { _, _, _ -> g2.next() }
+        val c2 = client(fake2)
+        val f2 = async { c2.claim() }; g2.until(1); g2.list[0].complete(ok(1)); f2.await()
+        val a = c2.final(5.0, 9.0, false)
+        val s = async { a() }; g2.until(2); g2.list[1].complete(applied(1, 1)); assertTrue(s.await().ok)
+        assertEquals("suspended", c2.final(6.0, 9.0, false)().reason); assertEquals(2, g2.list.size)
+    }
+
+    @Test fun aReleaseAnsweredAfterANewerClaimNeverReleasesIt() = runBlocking<Unit> {   // owner round-21 item 4
+        val g = Gates()
+        var gen = 0L
+        val fake = Fake { path, _, _ -> if (path.endsWith("/claim")) ok(++gen) else g.next() }
+        val c = client(fake)
+        c.claim()
+        val rel = async { c.release() }; g.until(1)                                       // the release is in flight under generation 1
+        assertTrue(c.claim().ok); assertEquals(2L, c.generation)                          // an explicit re-claim meanwhile
+        g.list[0].complete(applied(1, 1))
+        assertEquals("stale_response", rel.await().reason); assertEquals(Status.WRITING, c.status); assertEquals(2L, c.generation)
+        val p = async { c.progress(1.0, 2.0, true) }; g.until(2)
+        assertEquals(2L, fake.calls[3].body["generation"]); assertEquals(1L, fake.calls[3].body["sequence"])
+        g.list[1].complete(applied(2, 1)); assertTrue(p.await().ok)
+        val own = async { c.release() }; g.until(3); g.list[2].complete(applied(2, 2))    // its own answer commits the release
+        assertTrue(own.await().ok); assertEquals(Status.RELEASED, c.status); assertEquals("released", c.heartbeat().reason)
+        val reentrant = client(Fake { path, _, _ -> if (path.endsWith("/claim")) ok(++gen) else applied(gen, 1) })   // the owner's repro: a claim from the RELEASED notification
+        reentrant.claim()
+        val started = mutableListOf<kotlinx.coroutines.Deferred<PlaybackWriterClient.ClaimResult>>()
+        reentrant.onChange { if (it == Status.RELEASED) started += async { reentrant.claim() } }
+        assertTrue(reentrant.release().ok)
+        assertTrue(started.single().await().ok); assertEquals(Status.WRITING, reentrant.status); assertEquals(4L, reentrant.generation)
+        assertEquals(1L, reentrant.progress(1.0, 2.0, true).sequence); assertEquals(Status.WRITING, reentrant.status)   // the old release commits nothing afterwards
+    }
+
+    @Test fun suspendWritingDropsTheFenceAndPendingJobsUntilAnExplicitClaim() = runBlocking<Unit> {
+        val g = Gates()
+        val fake = Fake { _, _, _ -> g.next() }
+        val c = client(fake)
+        val first = async { c.claim() }; g.until(1); g.list[0].complete(ok(1)); first.await()
+        val p = async { c.progress(3.0, 9.0, true) }; g.until(2)
+        c.suspendWriting(); assertEquals(Status.SUSPENDED, c.status)
+        g.list[1].complete(applied(1, 1)); assertEquals("stale_response", p.await().reason); assertFalse(c.unsaved)
+        assertEquals("suspended", c.progress(4.0, 9.0, true).reason); assertEquals("suspended", c.final(4.0, 9.0, false)().reason)
+        val again = async { c.claim() }; g.until(3); g.list[2].complete(ok(2)); assertTrue(again.await().ok)
+        assertEquals(3, g.list.size)
+    }
+
     @Test fun anOlderServerLeavesTheClientUnsupportedBeforeAnyClaim() = runBlocking<Unit> {
         val fake = Fake { _, _, _ -> throw AssertionError("must not be called") }
         fake.stateAnswer = { Response(503, mapOf("reason" to "disabled")) }
