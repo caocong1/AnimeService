@@ -762,6 +762,46 @@ class SubtitleDelivery:
         rows = self.db.rows('SELECT * FROM dispatch_receipts WHERE job_id=? ORDER BY recorded_at,rowid', (identity,))
         return [{**r, 'envelope': json.loads(r['envelope']), 'result': json.loads(r['result'])} for r in rows]
 
+    def reconciliation_plan(self, ticket, receipt_id):
+        """Read-only review of a recorded created fact after revision changes.
+
+        This is NOT a new ticket or authorization to apply. A future mutation
+        needs explicit owner-reviewed host reverification plus a fresh current
+        revision CAS, retaining the ORIGINAL dispatch/input/owner binding.
+        """
+        validate_ticket(ticket)
+        if not (isinstance(receipt_id, str) and len(receipt_id) == 64 and all(ch in '0123456789abcdef' for ch in receipt_id)):
+            raise ValueError('original receipt id must be a 64-hex digest')
+        source = self.db.one('SELECT * FROM dispatch_receipts WHERE receipt_id=?', (receipt_id,))
+        td = _digest(_canonical(ticket))
+        issued = self.db.rows("SELECT payload FROM subtitle_delivery_events WHERE job_id=? AND kind='dispatch-ticket-issued'", (ticket['job_id'],))
+        if not any(json.loads(r['payload']).get('ticket_digest') == td for r in issued):
+            raise ValueError('original begin ticket is not server-bound')
+        if not source or source['schema'] != RECEIPT_SCHEMA or source['job_id'] != ticket['job_id']:
+            raise ValueError('original v1 receipt required')
+        envelope = json.loads(source['envelope'])
+        if source['outcome'] != 'created' or envelope.get('ticket_digest') != td:
+            raise ValueError('a created fact bound to this original ticket is required')
+        row = self.get(ticket['job_id'])
+        reasons = []
+        if _digest(row['dispatch_token']) != _digest(ticket['dispatch_token']): reasons.append('dispatch_mismatch')
+        if row['input_key'] != ticket['input_key']: reasons.append('input_moved')
+        if row['lease_owner'] != ticket['owner'] or _digest(row['lease_token']) != _digest(ticket['lease_token']): reasons.append('owner_mismatch')
+        from .subtitle_refinement import two_pass
+        if _scope(self.db, row['show_id'], row['episode']) or (_finished(self.db, row['show_id'], row['episode'])
+                and (not row['payload'].get('experience_only') or two_pass(self.db))): reasons.append('scope_changed')
+        already = row['dispatch_state'] == 'acknowledged' and row['thread_id'] == envelope['thread_id']
+        if (row['state'] in ('accepted', 'finished') or row['dispatch_state'] == 'blocked-stopped'
+                or (row['thread_id'] and row['thread_id'] != envelope['thread_id'])
+                or (row['dispatch_state'] == 'acknowledged' and not already)
+                or row['dispatch_state'] not in ('committing', 'unknown', 'acknowledged')):
+            reasons.append('state_conflict')
+        return {'job_id': ticket['job_id'], 'source_receipt_id': receipt_id, 'ticket_revision': ticket['revision'],
+                'current_revision': row['revision'], 'recorded_thread_id': envelope['thread_id'],
+                'status': 'blocked' if reasons else 'already_acknowledged' if already else 'requires_host_reverification',
+                'blockers': reasons, 'can_apply': False, 'read_only': True,
+                'next_action': 'owner review of authoritative host fact and explicit current-revision CAS; no credential retrofit'}
+
     def record_blocked(self, identity, thread_id, reasons, owner_stopped=False):
         """Keep the same responsible chat; a blocker does not authorize a second chat."""
         with self.db.connect() as c:

@@ -190,6 +190,10 @@ def main():
         p.add_argument('--note', default='', help='short bounded note kept as evidence')
     receipts = sub.add_parser('receipts', help='read-only receipt ledger of one job')
     receipts.add_argument('job_id')
+    plan = sub.add_parser('reconcile-plan', help='read-only owner review; does not reconcile or issue a new ticket')
+    plan.add_argument('job_id')
+    plan.add_argument('--ticket', required=True)
+    plan.add_argument('--receipt-id', required=True)
     for name in ('confirm', 'unknown', 'blocked', 'accepted', 'finished'):
         p = sub.add_parser(name)
         p.add_argument('job_id')
@@ -209,7 +213,7 @@ def main():
     args = parser.parse_args()
     if getattr(args, 'host_ref', None) and not getattr(args, 'ticket', None):
         raise ValueError('--host-ref requires the original --ticket')
-    reading = args.command in ('status', 'receipts')
+    reading = args.command in ('status', 'receipts', 'reconcile-plan')
     db = ReadStore(args.db) if reading else ControlStore(args.db)
     delivery = SubtitleDelivery(db, initialize=not reading)
     try:
@@ -217,6 +221,11 @@ def main():
             result = delivery.snapshot()
         elif args.command == 'receipts':
             result = delivery.receipts(args.job_id)
+        elif args.command == 'reconcile-plan':
+            ticket = load_ticket(args.ticket)
+            if ticket['job_id'] != args.job_id:
+                raise ValueError('ticket belongs to another job')
+            result = delivery.reconciliation_plan(ticket, args.receipt_id)
         elif args.command == 'refresh':
             result = delivery.refresh()
         elif args.command == 'progress':
