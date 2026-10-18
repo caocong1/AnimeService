@@ -66,23 +66,36 @@ class Api(private val prefs: ServerStore) {
 
     /**
      * Writer traffic keeps the structured 409/503 bodies instead of throwing; a 403 refreshes the token
-     * once and retries the SAME request, like post(). A GET is sent when [body] is null.
+     * once and retries the SAME request, like post(), but only inside [bound]'s generation and only if
+     * [stillValid] accepts the refreshed context (the writer checks its capability there). A refresh that
+     * fails is delivered as a structured reply with its status, never as an exception. A GET is sent when
+     * [body] is null.
      */
-    suspend fun structured(path: String, body: Map<String, Any?>?, bound: AuthState.Context = context()): StructuredReply {
-        var ctx = context()
-        if (ctx.snapshot != bound.snapshot) return StructuredReply(SERVER_CHANGED, null)
-        if (ctx.token == null && body != null) ctx = refreshed(bound) ?: return StructuredReply(SERVER_CHANGED, null)
-        val first = exchange(path, body, ctx)
+    suspend fun structured(path: String, body: Map<String, Any?>?, bound: AuthState.Context = context(),
+                           stillValid: (AuthState.Context) -> Boolean = { true }): StructuredReply {
+        if (context().snapshot != bound.snapshot) return StructuredReply(SERVER_CHANGED, null)
+        if (context().token == null && body != null) refreshFailure(bound, stillValid)?.let { return it }
+        val first = exchange(path, body, context())
         if (first.status != 403 || body == null) return first
         if ((first.body?.get("error") as? String)?.contains("不受信任") == true) return first
-        val again = refreshed(bound) ?: return StructuredReply(SERVER_CHANGED, null)   // never replay the packet against another server/generation
-        return exchange(path, body, again)
+        if (!accepts(bound)) return StructuredReply(SERVER_CHANGED, null)         // a late 403 of an old connection refreshes nothing
+        refreshFailure(bound, stillValid)?.let { return it }
+        return exchange(path, body, context())                                   // same generation, verified by refreshFailure
     }
 
-    /** A fresh token for [bound]'s generation, or null once that generation is gone; any other bootstrap failure propagates. */
-    private suspend fun refreshed(bound: AuthState.Context): AuthState.Context? {
-        try { bootstrap() } catch (e: ApiError) { if (accepts(bound)) throw e }
-        return context().takeIf { it.snapshot == bound.snapshot }
+    /**
+     * Refreshes the token for [bound]'s generation. Null means the refreshed context may carry the request;
+     * otherwise the reply to deliver instead: the generation moved, the bootstrap failed with a status the
+     * caller must see (TLS counts as unreachable, a bad body as a protocol failure), or [stillValid] rejected
+     * the refreshed context.
+     */
+    private suspend fun refreshFailure(bound: AuthState.Context, stillValid: (AuthState.Context) -> Boolean): StructuredReply? {
+        try { bootstrap() }
+        catch (e: ApiError) { return if (!accepts(bound)) StructuredReply(SERVER_CHANGED, null) else StructuredReply(if (e.code == ApiError.TLS) 0 else e.code, e.details) }
+        catch (e: org.json.JSONException) { return if (!accepts(bound)) StructuredReply(SERVER_CHANGED, null) else StructuredReply(200, null) }
+        val ctx = context()
+        if (ctx.snapshot != bound.snapshot) return StructuredReply(SERVER_CHANGED, null)
+        return if (stillValid(ctx)) null else StructuredReply(CAPABILITY_WITHDRAWN, null)
     }
 
     /** One request from one immutable context: URL, Origin and token all come from it, never from the mutable base. */
@@ -102,23 +115,31 @@ class Api(private val prefs: ServerStore) {
         }
     }
 
-    suspend fun get(path: String): String = call(Request.Builder().url(url(path)).build())
+    /** A reply is delivered only while the connection it was sent on is still the current one. */
+    private fun delivered(ctx: AuthState.Context, text: String): String =
+        if (accepts(ctx)) text else throw ApiError(0, "服务器已切换")
+
+    suspend fun get(path: String): String {
+        val ctx = context()
+        return delivered(ctx, call(Request.Builder().url(ctx.snapshot.server + path).build()))
+    }
     suspend fun getObject(path: String) = JSONObject(get(path))
     suspend fun getArray(path: String) = JSONArray(get(path))
 
     suspend fun post(path: String, body: JSONObject = JSONObject()): JSONObject {
         if (token == null && path != LOGIN) bootstrap()
         val ctx = context()
-        return try {
-            JSONObject(call(postRequest(path, body, ctx)))
+        val text = try {
+            call(postRequest(path, body, ctx))
         } catch (e: ApiError) {
-            // The server issues a new token on every restart.
+            if (!accepts(ctx)) throw ApiError(0, "服务器已切换")               // an old connection's answer triggers nothing on the new one
             if (e.code != 403 || e.untrusted || path == LOGIN) throw e
-            bootstrap()
+            bootstrap()                                                         // the server issues a new token on every restart
             val again = context()
             if (again.snapshot != ctx.snapshot) throw ApiError(0, "服务器已切换")   // the same connection identity, or nothing
-            JSONObject(call(postRequest(path, body, again)))
+            call(postRequest(path, body, again))
         }
+        return JSONObject(delivered(ctx, text))
     }
 
     /** "tv" asks the server for the long session a box in someone else's home needs. */
@@ -156,6 +177,8 @@ class Api(private val prefs: ServerStore) {
         private val JSON = "application/json".toMediaType()
         /** Structured reply status: the server bound to this request changed underneath it. */
         const val SERVER_CHANGED = -2
+        /** Structured reply status: the token refresh succeeded but the caller's [stillValid] rejected the refreshed context. */
+        const val CAPABILITY_WITHDRAWN = -3
 
         /** What one request carries on the wire, derived from its immutable context only. */
         data class RequestSpec(val url: String, val origin: String, val token: String)
