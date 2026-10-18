@@ -39,8 +39,9 @@
   async function writerKey() {
     if (!releaseId) return media?.id === id ? media.id : null;
     const release = media?.release;
+    if (!/^[0-9a-f]{64}$/.test(release?.video_sha256 || '')) return null;
     const record = await api('/finished-viewing/' + encodeURIComponent(releaseId)).catch(() => null);
-    if (!release || !record || typeof record.media_id !== 'string' || !record.media_id || record.video_sha256 !== release.video_sha256) return null;
+    if (!record || !/^finished:[0-9a-f]{32}$/.test(record.media_id || '') || record.video_sha256 !== release.video_sha256) return null;
     return record.media_id;
   }
   async function openWriter() {

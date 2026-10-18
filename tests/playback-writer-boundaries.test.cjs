@@ -78,3 +78,12 @@ test('replayed claim verification cannot erase a protocol halt and permit anothe
  assert.equal((await w.claim()).reason,'verify_failed');assert.equal(w.status,'unsupported');
  assert.equal((await w.claim()).reason,'unsupported');assert.equal(posts,1);
 });
+test('loaded version binding rejects missing SHA on both sides and malformed canonical keys',async()=>{
+ const x=setup();x.context.releaseId='synthetic-release';x.context.media={release:{}};
+ let record={media_id:'finished:'+KEY};x.context.api=async()=>record;
+ vm.runInContext(body('writerKey'),x.context);
+ assert.equal(await vm.runInContext('writerKey()',x.context),null);
+ x.context.media.release.video_sha256='a'.repeat(64);record.video_sha256='a'.repeat(64);
+ assert.equal(await vm.runInContext('writerKey()',x.context),'finished:'+KEY);
+ record.media_id='not-a-canonical-key';assert.equal(await vm.runInContext('writerKey()',x.context),null);
+});
