@@ -1,0 +1,47 @@
+name: Android
+
+# Unsigned build of the TV client plus its JVM unit tests. The release keystore never
+# reaches CI: `signingConfigs` is only created when tv/keystore.properties exists, so the
+# release variant here compiles and tests unsigned, and the uploaded APK is the debug build.
+# Signed publishing stays on the original machine (`./gradlew publishRelease`, DEVELOPMENT.md).
+on:
+  push:
+    paths: ['tv/**', '.github/workflows/android.yml']
+  pull_request:
+    paths: ['tv/**', '.github/workflows/android.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: tv
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gradle/actions/wrapper-validation@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-36 platform-tools'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests (release variant is the project's testBuildType)
+        run: ./gradlew --no-daemon --stacktrace :app:testReleaseUnitTest
+      - name: Unsigned debug APK
+        run: ./gradlew --no-daemon --stacktrace :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fanyu-tv-debug-unsigned
+          path: tv/app/build/outputs/apk/debug/*.apk
+          retention-days: 7
+          if-no-files-found: error

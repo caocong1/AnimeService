@@ -115,7 +115,7 @@ B站 UGC标题搜索保留原查询，最多追加两次去版本/标点、去�
 
 `tv/` 是安卓盒子用的 APK（Kotlin、Compose、Media3），只做追番列表、作品分集和带自动弹幕的播放，接口与网页播放器相同。盒子不在家里时走现有的外网 HTTPS 地址（`public_authorities`），首次连接输入网页后台生成的配对码；盒子配对时声明 `device: tv`，会话有效期 365 天（其他设备仍为 30 天），「退出所有外部设备」同样立即作废。证书须由公共机构签发，App 内置 Let's Encrypt 根证书以兼容 Android 7.0 及更早的盒子。同一局域网内也可用 HTTP：设置 `bind_host`、`lan_authority`（盒子里填的 `IP:4871`）和 `lan_network`。
 
-构建需要 JDK 17+ 和 Android SDK：`cd tv && ./gradlew publishRelease`，输出 `tv/app/build/publish/{fanyu-tv.apk,release.json}`。签名密钥 `tv/fanyu-tv-release.jks` 与 `tv/keystore.properties` 不进 Git，须另行备份；换了密钥，已装的盒子无法覆盖升级。
+构建需要 JDK 17+ 和 Android SDK：`cd tv && ./gradlew publishRelease`，输出 `tv/app/build/publish/{fanyu-tv.apk,release.json}`。GitHub Actions 的 `android.yml` 只在 `tv/` 变化时跑无签名构建：校验 Gradle wrapper，执行 `:app:testReleaseUnitTest` 与 `:app:assembleDebug`，上传 debug APK 作为 7 天制品；它不接触签名密钥，也不发布。签名密钥 `tv/fanyu-tv-release.jks` 与 `tv/keystore.properties` 不进 Git，须另行备份；换了密钥，已装的盒子无法覆盖升级。
 
 升级：每次发布先改 `tv/app/build.gradle.kts` 的 `appVersionCode`（递增）和 `appVersionName`，更新 `tv/release-notes.txt`，执行 `publishRelease`，再把两个输出文件复制到服务端 `data/tv/`。盒子启动时检查 `/api/tv/release`，有新版本就提示下载，校验 SHA-256 后交给系统安装；第一次升级需要在系统设置里允许番屿安装应用。
 
