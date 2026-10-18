@@ -1,7 +1,11 @@
 const net = require('node:net');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const [threadId, turnId] = process.argv.slice(2);
-const allowed = new Set(['01a10c1a-eea3-7070-bd80-5f8cee6426a1', '01a125c3-0885-7191-9acd-0789c73f6ebb']);
+// Same dispatcher list as codex_dispatch_guard.py; ANIMESERVICE_DISPATCH_CONFIG points both at another copy.
+const config = JSON.parse(fs.readFileSync(process.env.ANIMESERVICE_DISPATCH_CONFIG || path.join(__dirname, 'codex_dispatch.json'), 'utf8'));
+const allowed = new Set(Object.keys(config.targets || {}));
 if (!allowed.has(threadId) || !/^[0-9a-f-]{36}$/.test(turnId || '')) throw Error('outside dispatcher scope');
 const method = 'thread-follower-interrupt-turn', versionText = '4', targetClientId = undefined;
 const params = {conversationId:threadId, mode:'system', expectedTurnId:turnId};

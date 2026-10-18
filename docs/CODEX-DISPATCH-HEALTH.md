@@ -20,6 +20,6 @@ automation-2/3沿原聊天、原周期及全部业务限制保持ACTIVE。提示
 
 本次两个明确恢复轮次另按精确不可变ID登记相同保护；守卫不处理其他手动用户轮次、压缩、任何单集production owner，不打开AnimeService数据库，不释放租约，不创建AI轮次或重投下载。下次原heartbeat按最新持久台账继续；未知回执/有效租约/停止owner保护照旧，不能因守卫中断而抢占。守卫异常保持原状态，不以直接改DB或杀整个应用兜底。
 
-状态在 `data/diagnostics/codex-dispatch-guard/status.json`，只有实际中断写 `actions.jsonl`。Windows任务一分钟自身时限、禁止重叠；未登录或应用未运行不能保证执行。保护降低再次空挂一整天的风险，不声称修复了OpenAI服务端或所有网络故障。
+状态在 `data/diagnostics/codex-dispatch-guard/status.json`（每次运行都写，读取失败时带 `error`），只有实际中断尝试写 `actions.jsonl`（含控制结果或控制步骤本身的错误）。目标、路径与数据库文件名见 `scripts/codex_dispatch.json`。Windows任务一分钟自身时限、禁止重叠；未登录或应用未运行不能保证执行。保护降低再次空挂一整天的风险，不声称修复了OpenAI服务端或所有网络故障。
 
 停用：`Disable-ScheduledTask -TaskName AnimeService-CodexDispatchGuard`。本机任务配置快照与本次诊断在 `data/diagnostics/stuck-20261015/`。

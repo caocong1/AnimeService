@@ -41,7 +41,7 @@
 
 守卫源码为 `scripts/codex_dispatch_guard.py` 和 `scripts/codex_dispatch_control.cjs`。只有指定调度会话、项目路径、匹配 heartbeat（或精确登记的恢复轮次）、inProgress、至少20分钟无日志进展、无运行工具同时成立才经应用 IPC 按 expectedTurnId 中断。它只读 Codex 状态，不改 Anime DB、不释放业务租约、不创建 AI 轮次、不杀应用、不处理中途工作的单集 owner。
 
-不带 `--apply` 只判断并写私有诊断快照，带 `--apply` 才可能中断。脚本包含原部署会话白名单、Windows 路径与应用内部 IPC/数据库版本约定；克隆不会注册 Windows 任务，新环境不能直接认为可运行。迁移应先改明确目标和依赖，再隔离测试和人工核对。详见 [调度健康](CODEX-DISPATCH-HEALTH.md)。
+不带 `--apply` 只判断并写私有诊断快照，带 `--apply` 才可能中断。调度会话白名单、恢复轮次、项目路径、`node` 路径、Codex 数据库文件名与状态目录都在 `scripts/codex_dispatch.json`，两个脚本共用；`ANIMESERVICE_DISPATCH_CONFIG` 可指向另一份。`wait_seconds` 单位为秒，范围 60–86400，非整数或越界回退旧默认 1200；`targets` 为空、`cwd` 为空或 `db_files` 缺项则拒绝启动。`node` 先取 PATH 再取配置路径。每次运行都会写 `status.json`，读取 Codex 状态失败时 `error` 字段说明原因，控制步骤的结果与错误按线程记在 `actions.jsonl`。克隆不会注册 Windows 任务，新环境不能直接认为可运行；迁移应先改配置文件中的目标和依赖，再隔离测试和人工核对。详见 [调度健康](CODEX-DISPATCH-HEALTH.md)。
 
 ## 模板与迁移
 
