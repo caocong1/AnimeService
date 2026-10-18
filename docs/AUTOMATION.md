@@ -47,6 +47,12 @@
 
 ## 模板与迁移
 
+Owner round 14: the standalone diagnostic collector is not imported by the worker and requires no worker restart. Supported migration sets are state 1..61, history 1..8 and logs 1..2; unknown sets fail closed. Dispatcher cwd and item locators are checked, but matched locators are NOT authenticated ticket-to-host binding. Bad JSON, invalid time/type data, scope conflicts and truncation produce incomplete nonzero reports. SQL VM work uses a deadline progress handler; busy waits and total rows are bounded. Large SQLite values and the report have size caps.
+
+Provide an existing private output directory (POSIX owner-only; Windows current user and SYSTEM only). Permissions are checked, never repaired. Both report and sha256 names are reserved exclusively. Bounds: --time-limit 0.05..30 seconds (default 20), --max-rows 1..1000 (default 200). The SQL deadline does not guarantee that operating-system filesystem I/O can be interrupted. Real historical dry-run requires the ORIGINAL archived begin ticket; never fabricate it from a current job or substitute a synthetic test ticket. No verifier injection, prompt migration or enforcement enablement is included.
+
+References: [Python sqlite3 progress handler](https://docs.python.org/3.14/library/sqlite3.html#sqlite3.Connection.set_progress_handler), [SQLite URI read-only mode](https://www.sqlite.org/uri.html).
+
 本次从本机三个任务的 prompt 字段生成 [提示词模板目录](automation-prompts/README.md)，不复制账号、真实目标 threadId 或其它项目配置。manifest 记录原提示词 SHA-256，原自动化文件仍在本机。模板中的线程占位符必须重新绑定；先读当前规则，不能粘贴模板就继承旧用户授权。
 
 用户请求迁移/修改时，通过应用的任务工具读取后更新，保留无关字段并回读结果；本文不建议直接写运行中的 automation.toml。项目采用的准备、唯一派发、完整制作和守卫限制来自本机实现，不是通用产品保证。[OpenAI 官方定时任务说明](https://developers.openai.com/training/walkthroughs/scheduled-tasks)可供了解周期入口和本机运行条件；本项目具体规则以这里及实时台账为准。
