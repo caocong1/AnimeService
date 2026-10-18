@@ -147,8 +147,9 @@ class PlaybackWriterClient(
         return update {
             if (t.epoch != epoch || t.lane != lane || status == Status.DISPOSED) return@update StateResult(false, "stale_response", generation, false, null)
             if (c.kind == "disabled" || c.kind == "protocol" || c.kind == "unauthorized") {
+                val untouched = status == Status.IDLE                 // never claimed: the capability is simply absent here
                 failLocked(c.kind, c.http)
-                if (fence == null && status != Status.HALTED) transition(Status.UNSUPPORTED, null)
+                if (untouched) transition(Status.UNSUPPORTED, null)   // either way this instance refuses claims
                 return@update StateResult(false, lastError, generation, false, null)
             }
             if (c.kind != "ok") return@update StateResult(false, c.kind, generation, false, null)

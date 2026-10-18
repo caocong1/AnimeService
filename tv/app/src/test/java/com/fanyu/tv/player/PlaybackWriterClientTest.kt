@@ -220,7 +220,7 @@ class PlaybackWriterClientTest {
         g.list[1].complete(applied(1, 1))
         assertEquals("stale_response", inflight.await().reason); assertEquals("stale_response", queued.await().reason)
         assertEquals("disposed", c.claim().reason); assertEquals("disposed", c.state().reason); assertEquals("disposed", c.heartbeat().reason)
-        assertEquals("stale_response", c.final(1.0, 2.0, false)().reason)                     // no permit can be minted after dispose
+        assertEquals("disposed", c.final(1.0, 2.0, false)().reason)                            // no permit can be minted after dispose
         assertEquals(2, g.list.size); assertEquals(Status.DISPOSED, c.status)
     }
 
