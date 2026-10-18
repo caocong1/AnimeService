@@ -106,3 +106,6 @@ jobs/events保存派发/回执/阻塞/完成时间；单集run另记各阶段实
 
 ## 完整待审稿授权（2026-10-13最新）
 用户已明确先交完整可看待审稿，原声等未核内容单列，不冒充验收。允许从既有书完整快照另存私有review分支，不以三项声音accept作为该分支导出前提。私有待审包单writer、固定source/hash/原稿保留；不写原共享书、不改旧production owner或未知派发/lease，不直接default/accepted/publish。当前精简chat已交付魔王E2 review-draft-20261013-v2，正式质量门禁保持，任务不重复派发或唤醒旧大图正文。
+# 操作回执的证据绑定
+
+`not-created --evidence` 的 JSON 除 `checked_at`、`method`、`checked_by` 外，还必须含当前 `job_id` 与 `dispatch_token`。检查时间须带时区且晚于当前派发状态；旧派发证据不能释放新的未知派发。证据文件名和实际内容 SHA-256 由工具计算，证据内同名字段不能覆盖它们。回执只供本机留存，不公开 token。

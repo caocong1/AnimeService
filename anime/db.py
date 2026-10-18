@@ -129,8 +129,7 @@ class Store:
     def prune_events(self,keep_days=None,now=None):
         """Drop events older than events_keep_days (default 30) that are not among the newest 2000 rows."""
         keep_days=keep_days if keep_days is not None else self.get('events_keep_days',30);now=now or time.time()
-        try:keep_days=min(max(int(keep_days),1),3650)
-        except (TypeError,ValueError):keep_days=30
+        if type(keep_days) is not int or not 1<=keep_days<=3650:keep_days=30
         floor=self.one('SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET 2000')  # the newest 2000 rows always stay
         if not floor:return 0
         with self.connect() as c:

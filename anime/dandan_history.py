@@ -28,7 +28,7 @@ def number(value):
 
 class DandanHistory:
     def __init__(self,db):
-        self.db=db;self.player=WebPlayer(db);self.lock=threading.Lock()
+        self.db=db;self.player=WebPlayer(db);self.lock=threading.Lock();self._source_signature=None;self._source_data=None
         db.execute('''CREATE TABLE IF NOT EXISTS dandan_history(
             media_id TEXT PRIMARY KEY,show_id INTEGER,episode INTEGER,name TEXT,title TEXT,
             last_played REAL,position REAL,duration REAL,source_watched REAL,updated REAL)''')
@@ -124,16 +124,20 @@ class DandanHistory:
         """Size and mtime of the player's history files; None when they cannot be seen."""
         try:
             root=Path(self.db.get('dandan_exe')).parent;source=root/'Cache/dandanplay.litedb'
-            return [[p.stat().st_size,p.stat().st_mtime_ns] if p.exists() else None for p in (source,source.with_name('dandanplay-log.litedb'))]
+            return [str(source.resolve()),*[[p.stat().st_size,p.stat().st_mtime_ns] if p.exists() else None for p in (source,source.with_name('dandanplay-log.litedb'))]]
         except (TypeError,OSError):return None
     def sync(self):
         if not self.lock.acquire(blocking=False):return {**(self.db.get('dandan_history_health') or {}),'busy':True}
         try:
-            old=self.db.get('dandan_history_health') or {};signature=self.source_signature()
-            if signature and old.get('ok') is True and old.get('source_signature')==signature:
-                # Nothing was written by the player since the last import: no copy, no PowerShell.
-                result={**old,'checked':time.time(),'unchanged':True};self.db.set('dandan_history_health',result);return result
-            result={**self.merge(self.extract()),'source_signature':signature};self.db.set('dandan_history_health',result);return result
+            signature=self.source_signature()
+            unchanged=bool(signature and self._source_data is not None and self._source_signature==signature)
+            if not unchanged:
+                self._source_data=self.extract();self._source_signature=signature
+            # Library membership can change even when LiteDB does not: merge the
+            # cached extraction against current media, without another PowerShell.
+            result=self.merge(self._source_data)
+            if unchanged:result={**result,'checked':time.time(),'unchanged':True}
+            self.db.set('dandan_history_health',result);return result
         except Exception as ex:
             old=self.db.get('dandan_history_health') or {}
             msg=str(ex) if isinstance(ex,ValueError) else '本机历史读取暂时失败，将自动重试'

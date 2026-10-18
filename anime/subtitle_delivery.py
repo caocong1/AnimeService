@@ -485,6 +485,8 @@ class SubtitleDelivery:
                     raise ValueError('Invalid chat receipt')
                 state, status = 'production', 'acknowledged'
             elif definitely_not_created:
+                if row['thread_id'] or row['dispatch_state'] not in ('committing', 'unknown'):
+                    raise ValueError('A responsible chat or resolved dispatch must be preserved')
                 # Caller must have independently established no chat was created.
                 state = 'late-review' if row['kind'] == 'late' else 'ready'
                 status = 'not-created'

@@ -56,6 +56,8 @@ class WebPlayer:
         self.alignment_lock=threading.Lock()
         self.inventory=[]
         self.inventory_mtime=0
+        self.inventory_lock=threading.Lock()
+        self._inventory_rows=None;self._inventory_source=None
         inventory=db.path.parent/'inventory.json'
         if inventory.exists():self.inventory=json.loads(inventory.read_text(encoding='utf-8'))
         with db.connect() as c:
@@ -71,18 +73,20 @@ class WebPlayer:
 
     def inventory_rows(self):
         """Legacy inventory entries with their media keys, hashed once per inventory file version rather than per request."""
-        inventory=self.db.path.parent/'inventory.json'
-        if inventory.exists() and inventory.stat().st_mtime_ns!=self.inventory_mtime:
-            self.inventory=json.loads(inventory.read_text(encoding='utf-8'));self.inventory_mtime=inventory.stat().st_mtime_ns
-            self._inventory_rows=None
-        if getattr(self,'_inventory_rows',None) is None or self._inventory_source is not self.inventory:
-            rows=[]
-            for x in self.inventory:
-                if x.get('legacy_active'):continue
-                path=Path(x['path']);key=hashlib.sha256(str(path).lower().encode()).hexdigest()[:32]
-                rows.append((x,{'id':key,'name':path.name,'folder':path.parent.name,'path':str(path),'size':x['size'],'legacy':True}))
-            self._inventory_rows=rows;self._inventory_source=self.inventory
-        return self._inventory_rows
+        with self.inventory_lock:
+            inventory=self.db.path.parent/'inventory.json'
+            version=inventory.stat().st_mtime_ns if inventory.exists() else None
+            if version is not None and version!=self.inventory_mtime:
+                self.inventory=json.loads(inventory.read_text(encoding='utf-8'));self.inventory_mtime=version
+                self._inventory_rows=None
+            if self._inventory_rows is None or self._inventory_source is not self.inventory:
+                rows=[]
+                for x in self.inventory:
+                    if x.get('legacy_active'):continue
+                    path=Path(x['path']);key=hashlib.sha256(str(path).lower().encode()).hexdigest()[:32]
+                    rows.append((x,{'id':key,'name':path.name,'folder':path.parent.name,'path':str(path),'size':x['size'],'legacy':True}))
+                self._inventory_rows=rows;self._inventory_source=self.inventory
+            return self._inventory_rows
 
     def media(self):
         rows={}

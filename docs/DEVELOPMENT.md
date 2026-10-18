@@ -71,7 +71,7 @@ Bangumi 同步入口 `/manage#bangumi`，GET `/api/bangumi-sync` 只返回非秘
 
 ## 浏览器兼容转封装缓存
 
-多 `mdat` 的 MP4 会按需做仅复制封包的转封装，缓存在数据库同目录 `cache/browser-media/`，按文件指纹命名并附校验 JSON。转封装失败时临时 `.partial.mp4` 一律清除并返回「浏览器兼容转封装失败」；缓存总量超过 `kv browser_media_cache_bytes`（默认 8 GiB）时按最后修改时间淘汰最旧的副本（刚生成和正在生成的保留），原片永不改动。弹弹play 历史导入在播放器数据库文件大小与修改时间都未变化时跳过复制与 PowerShell 读取，健康记录带 `unchanged`。
+多 `mdat` 的 MP4 会按需做仅复制封包的转封装，缓存在数据库同目录 `cache/browser-media/`，按文件指纹命名并附校验 JSON。转封装失败时临时 `.partial.mp4` 一律清除并返回「浏览器兼容转封装失败」；缓存总量超过 `kv browser_media_cache_bytes`（默认 8 GiB）时淘汰最久未使用的副本，命中会刷新修改时间。刚生成、正在生成和 Windows 打开中无法删除的副本保留，因此该预算允许临时超出，原片永不改动。弹弹play 历史导入在来源路径、数据库文件大小与修改时间都未变化时复用进程内解析结果，跳过复制与 PowerShell 读取，但每轮仍合并当前片库，健康记录带 `unchanged`。
 
 ## 播放进度写入契约
 

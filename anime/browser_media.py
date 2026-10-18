@@ -33,17 +33,29 @@ class BrowserMedia:
         if limit is None:
             limit=self.sub.db.get('browser_media_cache_bytes',self.LIMIT)
             if type(limit) is not int or limit<=0:limit=self.LIMIT
-        copies=sorted((p for p in self.root.glob('*.mp4') if p!=keep and not p.name.endswith('.partial.mp4')),key=lambda p:p.stat().st_mtime)
-        total=sum(p.stat().st_size for p in copies)+(keep.stat().st_size if keep.exists() else 0)
-        for p in copies:
-            if total<=limit:break
-            if p.stem in self.jobs and self.jobs[p.stem].locked():continue
-            total-=p.stat().st_size;p.unlink(missing_ok=True);p.with_suffix('.json').unlink(missing_ok=True)
+        with self.lock:
+            copies=[]
+            for p in self.root.glob('*.mp4'):
+                if p==keep or p.name.endswith('.partial.mp4'):continue
+                try:copies.append((p,p.stat()))
+                except OSError:continue
+            total=sum(s.st_size for _,s in copies)+(keep.stat().st_size if keep.exists() else 0)
+            for p,s in sorted(copies,key=lambda item:item[1].st_mtime_ns):
+                if total<=limit:break
+                if p.stem in self.jobs and self.jobs[p.stem].locked():continue
+                try:p.unlink(missing_ok=True)
+                except OSError:continue  # An active Windows reader is not a playback failure.
+                total-=s.st_size
+                try:p.with_suffix('.json').unlink(missing_ok=True)
+                except OSError:pass
     def cached(self,item):
         fingerprint=self.sub.fingerprint(item);target=self.root/(fingerprint+'.mp4');proof=self.root/(fingerprint+'.json')
         try:
             record=json.loads(proof.read_text(encoding='utf-8'))
-            if record.get('fingerprint')==fingerprint and record.get('mode')=='packet_copy' and target.is_file() and target.stat().st_size==record.get('size'):return target
+            if record.get('fingerprint')==fingerprint and record.get('mode')=='packet_copy' and target.is_file() and target.stat().st_size==record.get('size'):
+                try:os.utime(target,None)
+                except OSError:pass
+                return target
         except (ValueError,OSError):pass
         return None
     def file(self,item):

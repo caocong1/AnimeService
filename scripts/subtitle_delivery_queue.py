@@ -47,7 +47,7 @@ def public(value):
     return value
 
 
-def absence_evidence(path):
+def absence_evidence(path,record=None):
     """The verification record itself, bound by hash: who checked which chat list when, and how."""
     import hashlib
     raw = Path(path).read_bytes()
@@ -57,7 +57,16 @@ def absence_evidence(path):
         raise ValueError('absence evidence must be a UTF-8 JSON object') from None
     if not isinstance(data, dict) or not all(isinstance(data.get(k), str) and data[k].strip() for k in ('checked_at', 'method', 'checked_by')):
         raise ValueError('absence evidence needs checked_at, method and checked_by')
-    return {'file': Path(path).name, 'sha256': hashlib.sha256(raw).hexdigest(), **data}
+    if record is not None:
+        import datetime
+        if data.get('job_id')!=record['id'] or data.get('dispatch_token')!=record['dispatch_token']:
+            raise ValueError('absence evidence must identify this job_id and dispatch_token')
+        try:
+            checked=datetime.datetime.fromisoformat(data['checked_at'])
+            if checked.tzinfo is None or checked.timestamp()<record['updated']:raise ValueError()
+        except (TypeError,ValueError):raise ValueError('absence evidence checked_at must be timezone-aware and after the current dispatch state') from None
+    # Evidence must not supply its own trusted file/hash fields.
+    return {**data,'file': Path(path).name, 'sha256': hashlib.sha256(raw).hexdigest()}
 
 
 def main():
@@ -127,7 +136,11 @@ def main():
                 result = delivery.begin_dispatch(args.job_id, args.owner, lease['lease_token'], lease['revision'])
             except Exception as error:
                 # The lease was ours and nothing was dispatched: hand it back so the single slot is not held hostage.
-                released = delivery.release(args.job_id, args.owner, lease['revision'], lease['lease_token'], reason='begin failed: ' + str(error)[:200])
+                try:
+                    released = delivery.release(args.job_id, args.owner, lease['revision'], lease['lease_token'], reason='begin failed: ' + str(error)[:200])
+                except Exception:
+                    raise SystemExit(json.dumps({'error': str(error), 'lease_released': False,
+                        'reconcile_required': True}, ensure_ascii=False)) from None
                 raise SystemExit(json.dumps({'error': str(error), 'lease_released': True, 'state': released['state'],
                                              'revision': released['revision']}, ensure_ascii=False))
             sid, ep = result['show_id'], result['episode']
@@ -143,8 +156,9 @@ def main():
         elif args.command == 'release-lease':
             result = delivery.release(args.job_id, args.owner, args.revision, reason='operator release')
         elif args.command == 'not-created':
-            result = delivery.reconcile_dispatch(args.job_id, delivery.get(args.job_id)['dispatch_token'],
-                                                 definitely_not_created=True, absence_evidence=absence_evidence(args.evidence))
+            record=delivery.get(args.job_id)
+            result = delivery.reconcile_dispatch(args.job_id, record['dispatch_token'],
+                                                 definitely_not_created=True, absence_evidence=absence_evidence(args.evidence,record))
         elif args.command in ('confirm', 'unknown'):
             record = delivery.get(args.job_id)
             result = delivery.reconcile_dispatch(args.job_id, record['dispatch_token'],

@@ -385,7 +385,7 @@ class Engine:
             for source in self.db.rows("""SELECT sources.* FROM sources JOIN shows ON shows.id=sources.show_id
                 WHERE sources.enabled=1 AND shows.authorized=1 AND shows.cleanup_hold=0
                 AND (shows.state IN ('trial','watching') OR (shows.auto_download=1 AND shows.state='wish'))
-                ORDER BY CASE WHEN shows.selected=1 AND NOT EXISTS
+                ORDER BY sources.last_attempt,CASE WHEN shows.selected=1 AND NOT EXISTS
                     (SELECT 1 FROM episodes e WHERE e.show_id=shows.id AND e.status='complete') THEN 0
                     WHEN shows.selected=1 THEN 1 ELSE 2 END,sources.next_attempt,sources.id"""):
                 if not self.db.eligible(source['show_id']):continue

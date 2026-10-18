@@ -52,7 +52,7 @@ def test_not_created_requires_evidence_and_keeps_it_with_the_receipt(delivery,tm
     monkeypatch.setattr(sys,'argv',['queue','--db',str(db.path),'not-created',identity,'--evidence',str(bad)])
     with pytest.raises(ValueError,match='checked_at, method and checked_by'):queue_cli.main()
     assert scheduler.get(identity)['dispatch_state']=='unknown'
-    good=tmp_path/'absence.json';good.write_text(json.dumps({'checked_at':'2026-10-18T02:00:00+08:00','method':'listed all chats of the dispatcher, none for this job','checked_by':'operator'}),encoding='utf-8')
+    good=tmp_path/'absence.json';good.write_text(json.dumps({'checked_at':'2026-10-18T02:00:00+08:00','method':'listed all chats of the dispatcher, none for this job','checked_by':'operator','job_id':identity,'dispatch_token':intent['dispatch_token']}),encoding='utf-8')
     monkeypatch.setattr(sys,'argv',['queue','--db',str(db.path),'not-created',identity,'--evidence',str(good)])
     queue_cli.main();out=json.loads(capsys.readouterr().out)
     assert out['dispatch_state']=='not-created' and out['state']=='ready' and 'dispatch_token' not in out

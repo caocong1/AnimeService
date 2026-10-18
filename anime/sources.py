@@ -93,6 +93,18 @@ def update_health(db,site,change):
         con.execute('BEGIN IMMEDIATE')
         row=con.execute('SELECT value FROM kv WHERE key=?',(key,)).fetchone()
         state=json.loads(row[0]) if row else {}
+        if not state.get('alias_health_merged'):
+            # A family key must inherit restrictions held by its old host keys.
+            for host,family in HOST_SITE.items():
+                if family!=site or host==site:continue
+                prior=con.execute('SELECT value FROM kv WHERE key=?',('site_health_'+host,)).fetchone()
+                if not prior:continue
+                old=json.loads(prior[0])
+                if old.get('last_error_at',0)>state.get('last_error_at',0):state['error']=old.get('error','')
+                for field in ('next_attempt','last_request','last_error_at','failures'):
+                    state[field]=max(state.get(field,0),old.get(field,0))
+                for field,count in old.get('stats',{}).items():state.setdefault('stats',{})[field]=state.setdefault('stats',{}).get(field,0)+count
+            state['alias_health_merged']=True
         result=change(state)
         con.execute('INSERT OR REPLACE INTO kv VALUES(?,?)',(key,json.dumps(state,ensure_ascii=False)))
     return result
