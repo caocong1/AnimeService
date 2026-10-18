@@ -43,3 +43,7 @@
 | [调度健康](CODEX-DISPATCH-HEALTH.md) | 实际卡住诊断与受限本机守卫 |
 
 旧文档可能同时含有按日期追加的更正。发生冲突时，执行用户当前明确授权和 [当前规则](PROJECT-RULES.md)，不要凭旧章节恢复 UI heartbeat、逐句轮转或首版无限研究。原始 `AGENTS.md`、`PROGRESS.md`、`HANDOFF.md`、`DECISIONS.md`、`REQUIREMENTS.md` 及私人实评台账继续保留在本机；可复用结论已整理入本目录。
+
+## 播放验收与会话接管
+
+[播放验收隔离](PLAYER-QA.md)规定生产GET-only检查与合成播放夹具的使用边界。[显式会话接管契约](PLAYBACK-SESSION-CONTRACT.md)是尚未实现或启用的v2提案；当前客户端继续使用v1，不能把文档当作已上线API。
