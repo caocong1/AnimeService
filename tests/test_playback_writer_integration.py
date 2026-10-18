@@ -333,3 +333,24 @@ def test_client_digest_cannot_enrol_or_rebind_a_content_version(media):
     assert response.status_code==400 and response.json()['reason']=='invalid_request'
     assert db.one('SELECT sha256 FROM ordinary_media_versions')['sha256']==hashlib.sha256(b'video').hexdigest()
     assert not db.rows('SELECT * FROM playback_writers')
+
+
+@pytest.mark.parametrize('alias_kind',['ordinary','release','canonical_finished'])
+def test_adapter_binds_requested_alias_to_canonical_identity_without_client_hashes(media,alias_kind):
+    db,app,client,resolve,key,*_=media
+    canonical=resolve('finished:test-v0') if alias_kind!='ordinary' else key
+    requested='finished:test-v0' if alias_kind=='release' else canonical
+    writers=PlaybackWriters(db,resolve,enabled=lambda:True)
+    register_playback_writer_api(app,db,writers)
+    state=client.get('/api/playback-sessions/state',params={'media_key':requested}).json()
+    assert state['requested_media_key']==requested and state['media_key']==canonical
+    p=claim(requested)
+    for _ in range(2):
+        accepted=client.post('/api/playback-sessions/claim',json=p)
+        assert accepted.status_code==200
+        assert accepted.json()['requested_media_key']==requested and accepted.json()['media_key']==canonical
+    conflict=claim(requested,'other');conflict['expected_generation']=1
+    response=client.post('/api/playback-sessions/claim',json=conflict)
+    assert response.status_code==409
+    assert response.json()['requested_media_key']==requested and response.json()['media_key']==canonical
+    assert 'writer_token' not in response.json()

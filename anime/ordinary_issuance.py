@@ -16,6 +16,7 @@ import shutil
 import stat
 import time
 import uuid
+from types import MappingProxyType
 
 from .playback_versions import fingerprint, file_identity
 
@@ -107,12 +108,15 @@ def load(stream):
 
 
 class PublicationLease:
-    def __init__(self, issuer, stream, binding, version, path, manifest_digest, deadline):
+    def __init__(self, issuer, stream, binding, version, path, manifest_digest, deadline, content_sha256):
         self._issuer, self._stream, self._binding = issuer, stream, binding
         self._deadline, self._active = deadline, True
         self.path, self.version_id, self.manifest_sha256 = path, version, manifest_digest
         self.media_key = digest(str(path).lower().encode())[:32]
         self.size = binding['size']
+        # Registration consumes this immutable, validated snapshot, never mutable display attributes.
+        self._proof = MappingProxyType({'media_key': self.media_key, 'path_key': str(path).lower(),
+            'size': self.size, 'sha256': content_sha256, 'association_digest': binding['association_digest']})
 
     def assert_live(self):
         if not self._active or self._stream.closed or self._issuer.clock() > self._deadline:
@@ -127,6 +131,11 @@ class PublicationLease:
     def read(self, count=-1):
         self.assert_live()
         return self._stream.read(count)
+
+    def proof(self):
+        """Validated immutable facts, only for trusted same-transaction registration."""
+        self.assert_live()
+        return self._proof
 
 
 class OrdinaryIssuer:
@@ -329,7 +338,7 @@ class OrdinaryIssuer:
                     raise ValueError('ordinary alias rebind forbidden')
                 self.source(evidence)  # freshness must still hold after potentially long IO
                 self.budget(deadline)
-                lease = PublicationLease(self, stream, initial, version, target, manifest_digest, deadline)
+                lease = PublicationLease(self, stream, initial, version, target, manifest_digest, deadline, p['sha256'])
                 yield lease
         except OSError:
             raise ValueError('publication storage or file unavailable') from None

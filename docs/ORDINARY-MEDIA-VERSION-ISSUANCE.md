@@ -39,7 +39,11 @@ OrdinaryIssuer只允许显式注入受信source验证密钥、独立publication�
 
 先在专用根的随机独占pending目录写副本/完整清单并fsync，再rename到不可覆盖的版本目录；最后以临时文件+独占hard-link发布alias，不存在部分JSON。重试验证现有对象与清单，不覆盖损坏/冲突对象。失败只清理本次创建的pending固定文件；不删除原片、已发布版本或别人的pending。崩溃可能留下孤儿对象/pending，后续只读列计划，不能自动清旧媒体。rename/fsync不被描述为断电后的完整事务保证。
 
-大文件工作全在DB事务外。未来组合应：取得live PublicationLease → 短Store事务读当前授权/映射/输入 → lease.check_binding(事务内读取的权威事实) → 幂等写版本/alias映射 → 提交前再次assert_live → 提交后释放句柄。check_binding不查文件/活库/IPC，不在DB写锁内等待hash。此流程仍非文件系统与SQLite原子事务；崩溃后对象已发布但DB未登记应可验证重试，不能凭磁盘孤儿推导进度或观看事实。现有OrdinaryMediaVersions.register尚未接入该lease，禁止把两次独立调用说成同事务保证。
+大文件工作全在DB事务外。组合顺序：取得live PublicationLease → 短Store事务读当前授权/映射/输入 → 幂等登记版本 → 提交前再次assert_live → 提交后释放句柄。check_binding不查文件/活库/IPC，不在DB写锁内等待hash。此流程仍非文件系统与SQLite原子事务；崩溃后对象已发布但DB未登记应可验证重试，不能凭磁盘孤儿推导进度或观看事实。
+
+隔离登记接口现为`OrdinaryMediaVersions.register_publication(c, lease, current_source)`：只接受该Store的现有事务与真实live PublicationLease，消费lease.proof()的不可变已核验快照，核current_source后同key同值幂等插入/冲突拒绝。不打开新事务、不commit、不查文件/hash、不调用外部resolver；current_source必须由受信调用方使用同一c读取真实授权、映射与输入事实，绝不能来自HTTP或事务外旧快照。这个权威facts builder尚未实现生产版本；接口无法替调用方证明传入dict来自何处。现有无lease的register仍仅供原隔离用法，不宣称与新接口具有相同窗口保证。
+
+调用方须在lease上下文内完成事务提交，提交前assert_live，任何异常回滚；不能拿返回key当作提交完成/已登记inventory/已保存进度。proof使用的canonical路径、SHA、大小、association为内部不可变快照，不采用可变展示属性。隔离测试已经用真实临时Store、WebPlayer、PlaybackMediaResolver与PlaybackWriters证明两个已证source alias登记一个版本/一个canonical进度行；登记本身不新增进度、不把未知legacy位置迁移过去。该测试的合成episodes登记仅存在临时库，不是生产导入流程。
 
 ## 默认off组合与迁移验收矩阵
 

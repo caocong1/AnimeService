@@ -24,14 +24,14 @@ def register_playback_writer_api(app, db, writers):
     def state(media_key:str):
         disabled=ready()
         if disabled is not None:return disabled
-        try:return writers.state(media_key)
+        try:return {**writers.state(media_key), 'requested_media_key':media_key}
         except ValueError:return invalid()
 
     @app.post('/api/playback-sessions/claim')
     def claim(p:dict):
         disabled=ready()
         if disabled is not None:return disabled
-        try:return reply(writers.claim(p))
+        try:return reply({**writers.claim(p), 'requested_media_key':p['media_key']})
         except ValueError:return invalid()
 
     def update(p,action):

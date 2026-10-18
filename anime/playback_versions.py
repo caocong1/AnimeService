@@ -97,3 +97,33 @@ class OrdinaryMediaVersions:
         if self.binding(self.player.item(key))!=(key,path,association):
             raise ValueError('ordinary mapping changed during verification')
         return proof['sha256']
+
+    def register_publication(self, c, lease, current_source):
+        """Trusted control plane only: caller owns an existing short write transaction.
+
+        Caller reads current authorization/mapping/input facts with THIS connection,
+        then passes the resulting binding. No hash, file lookup, callback, transaction
+        creation or commit happens here. The publication lease must span commit;
+        caller must assert_live immediately before committing and roll back failures.
+        This does not enrol inventory aliases or migrate legacy progress.
+        """
+        from .ordinary_issuance import PublicationLease
+        if not c.in_transaction:
+            raise ValueError('publication registration requires an explicit transaction')
+        database = next((row[2] for row in c.execute('PRAGMA database_list') if row[1] == 'main'), '')
+        if os.path.normcase(os.path.abspath(database)) != os.path.normcase(os.path.abspath(self.db.path)):
+            raise ValueError('publication registration requires the same Store')
+        if type(lease) is not PublicationLease:
+            raise ValueError('trusted live publication lease required')
+        lease.check_binding(current_source)
+        proof = lease.proof()
+        key = proof['media_key']
+        wanted = tuple(proof[k] for k in ('path_key','size','sha256','association_digest'))
+        old = c.execute('SELECT path_key,size,sha256,association_digest FROM ordinary_media_versions WHERE media_key=?', (key,)).fetchone()
+        if old:
+            if tuple(old) != wanted:
+                raise ValueError('ordinary alias rebind forbidden')
+        else:
+            c.execute('INSERT INTO ordinary_media_versions VALUES(?,?,?,?,?,?)',(key,*wanted,time.time()))
+        lease.check_binding(current_source)
+        return key

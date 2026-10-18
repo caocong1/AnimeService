@@ -167,6 +167,25 @@ release share sequence and target the existing canonical progress row. Registeri
 evidence, changing enablement and client-provided aliases/digests are not public
 operations. No production injection/activation or new key is introduced here.
 
+Owner round 19: validated state and claim responses now include both
+`requested_media_key` (the exact requested alias, after server resolution) and
+`media_key` (the canonical progress identity). This applies to successful/replayed
+claims and generation/takeover conflicts; invalid/disabled replies need not include
+either. A client validates the requested echo, remembers the canonical identity
+for its media epoch, and requires subsequent responses to keep that binding.
+Pin the canonical key to the loaded media version using trusted server metadata
+(finished-viewing already returns media_id plus video_sha256); require state to
+agree, then send that canonical key in claim/updates. Do not keep resolving a
+mutable release alias between state and claim: an alias moving to another version
+must fail, rather than claiming the new version and detecting the mismatch later.
+`finished:<release-id>` is not equal to `finished:<canonical-hash>`; rejecting that
+normal alias transition after an accepted claim creates an orphan writer. Do not
+solve it by accepting arbitrary mismatched keys or computing client path hashes.
+Progress/heartbeat/release success still requires exact generation/sequence.
+The optional future bootstrap capability shape is unchanged and remains absent
+in production. Missing binding fields are a visible protocol failure after v2
+selection, never permission to fall back to legacy.
+
 Transaction references: [SQLite transactions](https://www.sqlite.org/lang_transaction.html),
 [Python sqlite3 transaction control](https://docs.python.org/3.14/library/sqlite3.html#transaction-control).
 Content evidence references: [Python hashlib](https://docs.python.org/3.14/library/hashlib.html),
