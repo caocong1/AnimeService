@@ -54,7 +54,7 @@ Bangumi 同步入口 `/manage#bangumi`，GET `/api/bangumi-sync` 只返回非秘
 | lan_authority、lan_network | 可选 HTTP LAN Host 和来源 CIDR；显式启用后该网段无需配对，保留写操作 token / Origin 校验 |
 | certificate | 现有本机 HTTPS 适配器的证书路径；仅用于已有部署 |
 
-仓库不提供 DNS 凭据、反向代理配置、证书签发或路由器映射脚本。已有部署的 edge 模块只有检测到本机证书、配置和程序后才会运行；自动续期与端口映射属于本机保留脚本。新部署自行配置可信 HTTPS 反向代理，代理头仅信任回环地址。
+仓库不提供 DNS 凭据、私有反向代理配置或证书。HTTPS 维护通用脚本见下文；已有部署的 edge 模块只有检测到本机证书、配置和程序后才会运行，本机原计划任务不会因拉取脚本自动切换。新部署自行配置可信 HTTPS 反向代理，代理头仅信任回环地址。
 
 迅雷 UI 执行遵循持久队列的领取、界面核对、preflight、单次提交及台账回读；锁屏等待解锁，不绕过认证。无法确认失败任务已停止时不能改用 qB。网页浏览、收藏或播放不代表完成这些步骤。
 
@@ -137,7 +137,13 @@ B站 UGC标题搜索保留原查询，最多追加两次去版本/标点、去�
 
 ## HTTPS 维护脚本
 
-`scripts/https_renew.py`（lego DNS-01 续期）、`scripts/https_upnp.ps1`（UPnP 端口映射）与 `scripts/stop_https.py`（只结束本项目的 nginx 边缘进程）是脱敏后的通用版本：域名、邮箱、DNS 提供商、ddns-go 配置路径、解析器、内网地址与端口全部来自私有且不入库的 `data/https.json`（键见各脚本开头的说明），凭据只在内存中从 ddns-go 的配置读取，失败输出只打印固定状态类别并脱敏。原机若仍使用带本机值的旧脚本，先按说明写好 `data/https.json`，核对行为一致后再把计划任务指向新脚本；证书、私钥与配置始终留在本机。
+`scripts/https_renew.py`（lego DNS-01 续期）、`scripts/https_upnp.ps1`（UPnP 端口映射）与已有 `scripts/stop_https.py`（只结束本项目的 nginx 边缘进程）是脱敏后的通用版本。域名、邮箱、DNS提供商、ddns-go配置路径、解析器、内网地址与端口来自私有且不入库的 `data/https.json`；凭据只在内存中从唯一匹配的ddns-go配置读取，provider输出一律不打印，失败仅固定类别/非零退出。renew脚本针对原机lego **5.5.2** 的 `run --renew-days`，不适用于旧版 `renew --days`；迁移前核对本机 `--help`，勿直接换二进制。
+
+私有JSON包含domain、email、dns_provider（目前仅tencentcloud）、ddns_go_config、可选resolver、propagation_timeout（整数30–3600秒，默认1800）、renew_days（整数1–90，默认30）；另含upnp对象：internal_client（IPv4）、port（整数1–65535，默认38443）、description（1–64字符，无控制字符，默认AnimeService-HTTPS）。域名仅接受非通配ASCII DNS名称，证书路径固定在data/tls；不支持的部署需先审查扩展。`https_upnp.ps1 -ConfigPath`可指定另一私有配置；`-LibraryOnly`仅装载隔离测试函数，不读取配置或创建COM对象。
+
+续期子进程总时限为propagation_timeout+600秒，超时退出1；不会打印异常/原始provider日志。UPnP仅新增空闲的指定TCP端口或接受完全匹配且启用的原映射；冲突保留原项并退出3，不把冲突报成成功，不更新别人的映射。UPnP COM本身不承诺可中断期限，应由既有任务执行时限约束。
+
+原机若仍用带本机值的旧脚本，先由owner准备受限data/https.json，核对现有端口/证书/任务与回滚，再在独立维护步骤切计划任务。拉取代码不会创建私有配置、签发证书、运行UPnP或停止edge；证书、私钥与配置始终留本机。`tests/test_https_maintenance.py`仅用临时配置、假子进程和合成映射验证，不能冒充真实续期/路由器验收。
 
 ## 设备配对与重启
 
