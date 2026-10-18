@@ -252,7 +252,7 @@ def test_cli_begin_archives_the_ticket_and_v1_commands_use_it(delivery, tmp_path
     queue_cli.main()
     failed = json.loads(capsys.readouterr().out)
     assert failed['outcome'] == 'failed' and failed['state_changed'] == 0 and failed['receipt_accepted'] == 1
-    monkeypatch.setattr(sys, 'argv', ['queue', '--db', str(dbfile), 'confirm', identity, '--thread-id', 'chat-cli', '--ticket', str(ticket_path)])
+    monkeypatch.setattr(sys, 'argv', ['queue', '--db', str(dbfile), 'confirm', identity, '--thread-id', 'chat-cli', '--ticket', str(ticket_path), '--host-ref', 'synthetic-operation-1'])
     queue_cli.main()
     confirmed = json.loads(capsys.readouterr().out)
     assert confirmed['schema'] == 'dispatch-receipt/v1' and confirmed['state_changed'] == 1 and confirmed['job']['thread_id'] == 'chat-cli'
@@ -260,6 +260,7 @@ def test_cli_begin_archives_the_ticket_and_v1_commands_use_it(delivery, tmp_path
     queue_cli.main()
     ledger = json.loads(capsys.readouterr().out)
     assert [r['outcome'] for r in ledger] == ['failed', 'created'] and ticket['dispatch_token'] not in json.dumps(ledger)
+    assert ledger[1]['envelope']['host_ref'] == 'synthetic-operation-1'
 
 
 def test_cli_not_created_with_ticket_binds_the_evidence_file(delivery, tmp_path, monkeypatch, capsys):

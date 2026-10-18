@@ -181,10 +181,12 @@ def main():
     absent.add_argument('job_id')
     absent.add_argument('--evidence', required=True, help='JSON file describing how the absence was verified')
     absent.add_argument('--ticket', help='begin ticket file: records a dispatch-receipt/v1 instead of the legacy path')
+    absent.add_argument('--host-ref', help='host operation/request reference bound into a v1 receipt')
     for name in ('failed', 'interrupted'):
         p = sub.add_parser(name, help=f'diagnostic dispatch-receipt/v1 ({name}); changes no job state')
         p.add_argument('job_id')
         p.add_argument('--ticket', required=True, help='begin ticket file')
+        p.add_argument('--host-ref', help='host operation/request reference bound into the receipt')
         p.add_argument('--note', default='', help='short bounded note kept as evidence')
     receipts = sub.add_parser('receipts', help='read-only receipt ledger of one job')
     receipts.add_argument('job_id')
@@ -195,6 +197,7 @@ def main():
             p.add_argument('--thread-id', required=True)
         if name in ('confirm', 'unknown'):
             p.add_argument('--ticket', help='begin ticket file: records a dispatch-receipt/v1 instead of the legacy path')
+            p.add_argument('--host-ref', help='host operation/request reference; requires --ticket')
         if name == 'blocked':
             p.add_argument('--reason', action='append', required=True)
             p.add_argument('--stopped', action='store_true')
@@ -204,6 +207,8 @@ def main():
             p.add_argument('--release', required=True)
             p.add_argument('--player-report', required=True)
     args = parser.parse_args()
+    if getattr(args, 'host_ref', None) and not getattr(args, 'ticket', None):
+        raise ValueError('--host-ref requires the original --ticket')
     reading = args.command in ('status', 'receipts')
     db = ReadStore(args.db) if reading else ControlStore(args.db)
     delivery = SubtitleDelivery(db, initialize=not reading)
@@ -256,6 +261,7 @@ def main():
             if ticket['job_id'] != args.job_id:
                 raise ValueError('ticket belongs to another job')
             result = delivery.record_dispatch_receipt(ticket, 'not_created', evidence=evidence_file(args.evidence),
+                                                      host_ref=args.host_ref,
                                                       recorded_by='subtitle_delivery_queue not-created')
         elif args.command == 'not-created':
             record=delivery.get(args.job_id)
@@ -267,18 +273,21 @@ def main():
             if ticket['job_id'] != args.job_id:
                 raise ValueError('ticket belongs to another job')
             result = delivery.record_dispatch_receipt(ticket, 'interrupted', evidence={'note': 'dispatch response unknown'},
+                                                      host_ref=args.host_ref,
                                                       recorded_by='subtitle_delivery_queue unknown --ticket')
         elif args.command == 'confirm' and args.ticket:
             ticket = load_ticket(args.ticket)
             if ticket['job_id'] != args.job_id:
                 raise ValueError('ticket belongs to another job')
             result = delivery.record_dispatch_receipt(ticket, 'created', thread_id=args.thread_id,
+                                                      host_ref=args.host_ref,
                                                       recorded_by='subtitle_delivery_queue confirm')
         elif args.command in ('failed', 'interrupted'):
             ticket = load_ticket(args.ticket)
             if ticket['job_id'] != args.job_id:
                 raise ValueError('ticket belongs to another job')
             result = delivery.record_dispatch_receipt(ticket, args.command, evidence={'note': args.note[:500]} if args.note else None,
+                                                      host_ref=args.host_ref,
                                                       recorded_by=f'subtitle_delivery_queue {args.command}')
         elif args.command in ('confirm', 'unknown'):
             record = delivery.get(args.job_id)
