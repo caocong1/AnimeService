@@ -31,6 +31,12 @@ must not become a v1-accepted transition by borrowing current credentials.
 Ship enforcement off initially and preserve the old workflow as explicitly
 legacy. Migrate callers and their archived begin tickets through an owner-reviewed
 rollout before requiring v1 globally. No task/prompt edits as a hidden migration.
+Add explicit thread_id and dispatch_action=create|reuse: created requires the
+confirmed thread id. A not-created result for an attempted resume never proves
+that the already responsible thread disappeared and cannot clear that owner.
+Bind the host operation/request id where available. An empty chat-list search
+alone cannot prove an unknown creation request will not complete later: require
+authoritative terminal absence evidence, otherwise preserve unknown.
 
 Store a digest/reference for dispatch/lease credentials rather than duplicating
 raw authority tokens in exported receipt JSON. The live token still has to be
