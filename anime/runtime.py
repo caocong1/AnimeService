@@ -1,4 +1,4 @@
-"""Process-level facts for a cheap health check: version, start time and liveness from kv only."""
+"""Lightweight process health and small operator summaries from the local database."""
 import os,subprocess,sys,threading,time
 from .db import ROOT
 
@@ -32,7 +32,7 @@ def problems(db,now):
 
 
 def health(db,now=None):
-    """Liveness and version without table scans: /api/status stays the heavy, detailed view."""
+    """Liveness, version and operator summaries; /api/status stays the detailed view."""
     now=now or time.time();heartbeat=db.get('heartbeat') or {};maintenance=db.get('download_maintenance_at',0)
     age=round(now-heartbeat['time']) if heartbeat.get('time') else None
     worker=any(t.name=='anime-worker' and t.is_alive() for t in threading.enumerate())

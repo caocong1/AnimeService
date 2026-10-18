@@ -67,7 +67,7 @@ Bangumi 同步入口 `/manage#bangumi`，GET `/api/bangumi-sync` 只返回非秘
 
 `git clean -fdx` 会删除被忽略的数据，禁止在生产目录执行。不要从其他电脑复制测试数据库覆盖生产库。仓库没有自动部署机制；`scripts/supervisor.py` 只负责本机进程：子进程退出后按 5 秒起步、最长 5 分钟的退避重启，子进程存活期间每 30 秒探测 `/api/health`，连续 6 次失败视为挂死并重启；`data/stop.request` 出现时先让 `anime.run` 自行退出（它同样监视该文件），30 秒后才强制结束；`logs/supervisor.log` 与 `logs/process.log` 超过 5 MiB 保留一代轮转。探测地址取 `deployment.json` 的 `bind_host`。正在停止时再次启动会等待旧 supervisor 退出后接管，不会静默失败。
 
-`GET /api/health` 只读 kv，不扫描表：返回服务名、`ok`（心跳不超过 max(600 秒, 3×poll_seconds)）、心跳阶段与年龄、维护循环年龄、下载器与字幕工坊健康、`cycle_errors`（调度各步最近一次失败的错误、次数与起始时间）、进程 pid、启动时间与代码版本（`git rev-parse --short HEAD`）。`/api/status` 仍是详细视图。调度循环里的每一步（来源登记、选源、字幕工坊 discover/tick 等）各自隔离：一步失败只记入 `cycle_errors` 并在第 1、5、20、100 次写事件，其余步骤与空闲心跳照常。
+`GET /api/health` 读取 kv，并查询待核查任务及最近最多60条 error 事件摘要，返回服务名、`ok`（心跳不超过 max(600 秒, 3×poll_seconds)）、心跳阶段与年龄、维护循环年龄、下载器与字幕工坊健康、`cycle_errors`（调度各步最近一次失败的错误、次数与起始时间）、进程 pid、启动时间与代码版本（`git rev-parse --short HEAD`）。新增 `problems` 包含 review/uncertain 数量、最近可操作错误与下载门禁；查询只读且不发网络请求，不再承诺仅访问 kv。`/api/status` 仍是详细视图。事件每小时维护：始终保留最新2000条，其外仅删除早于 `events_keep_days` 的行；合法配置为1–3650的整数，否则回退30天。调度循环里的每一步（来源登记、选源、字幕工坊 discover/tick 等）各自隔离：一步失败只记入 `cycle_errors` 并在第 1、5、20、100 次写事件，其余步骤与空闲心跳照常。
 
 ## 浏览器兼容转封装缓存
 
