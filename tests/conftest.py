@@ -21,11 +21,14 @@ def pytest_collection_modifyitems(config, items):
     original machine, which has both, still runs everything (nothing is skipped there).
     """
     lab = pytest.mark.skip(reason=f'private subtitle core not installed at {LAB_CORE.parent.parent}')
-    ffmpeg = pytest.mark.skip(reason='ffmpeg/ffprobe not on PATH')
+    from anime.db import DEFAULTS
+    bundled=Path(DEFAULTS['dandan_exe']).parent/'ffmpeg'
+    has_tools=all(shutil.which(name) or (bundled/(name+'.exe')).is_file() for name in ('ffmpeg','ffprobe'))
+    ffmpeg = pytest.mark.skip(reason='ffmpeg/ffprobe not on PATH or in bundled directory')
     for item in items:
         if 'requires_lab' in item.keywords and not LAB_CORE.is_file():
             item.add_marker(lab)
-        if 'requires_ffmpeg' in item.keywords and not (shutil.which('ffmpeg') and shutil.which('ffprobe')):
+        if 'requires_ffmpeg' in item.keywords and not has_tools:
             item.add_marker(ffmpeg)
 
 
