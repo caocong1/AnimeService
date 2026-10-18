@@ -272,9 +272,23 @@ class BangumiSync:
                     'failures': failures, 'next_attempt': time.time() + min(3600, 60 * 2 ** min(failures - 1, 6))})
 
     def run(self, stop):
+        failures = 0
         while not stop.is_set():
-            self.tick()
-            self.wake.wait(5)
+            delay = 5
+            try:
+                self.tick()
+                failures = 0
+            except Exception as error:
+                # Even options/account/health reads can fail while SQLite is busy.
+                # Keep this thread alive when the database cannot record health yet.
+                failures += 1
+                delay = min(3600, 60 * 2 ** min(failures - 1, 6))
+                try:
+                    self.db.set('bangumi_sync_health', {'ok': False, 'auth_required': False,
+                        'error': safe_error(error), 'failures': failures, 'next_attempt': time.time() + delay})
+                except Exception:
+                    pass
+            self.wake.wait(delay)
             self.wake.clear()
 
 

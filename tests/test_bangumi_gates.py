@@ -1,5 +1,5 @@
 """Only a credential problem asks for a new Bangumi login; an unset airing offset stays unset; numbering can be diffed read-only."""
-import importlib.util,json,time
+import importlib.util,json,time,threading
 from pathlib import Path
 from unittest.mock import Mock
 import pytest
@@ -33,6 +33,30 @@ def test_missing_or_mismatched_credentials_still_require_a_new_login(setup):
     assert health['auth_required'] is True and '不匹配' in health['error']
     db.set('bangumi_sync_health',{});sync.vault.read=Mock(side_effect=ValueError('Bangumi 凭据读取失败，请在本机重新连接账号'))
     sync.tick();assert db.get('bangumi_sync_health')['auth_required'] is True
+
+
+@pytest.mark.parametrize('health_write_fails',[False,True])
+def test_sync_thread_survives_database_errors_before_tick_guard(setup,health_write_fails):
+    db,remote,sync=setup
+    stop=threading.Event()
+    sync.options=Mock(side_effect=RuntimeError('private database detail'))
+    original_tick=sync.tick
+    def recover():
+        sync.options=Mock(return_value={'enabled':False})
+        original_tick()
+        stop.set()
+    sync.tick=Mock(side_effect=[original_tick,recover])
+    # Mock side_effect functions must be called, not merely returned.
+    actions=iter((original_tick,recover))
+    sync.tick.side_effect=lambda:next(actions)()
+    if health_write_fails:db.set=Mock(side_effect=RuntimeError('database unavailable'))
+    sync.wake=Mock()
+    sync.run(stop)
+    assert sync.tick.call_count==2
+    assert sync.wake.wait.call_args_list[0].args==(60,)
+    if not health_write_fails:
+        health=db.get('bangumi_sync_health')
+        assert health['auth_required'] is False and 'private' not in health['error']
 
 
 def test_mapping_save_keeps_an_unset_airing_offset_unset(tmp_path,monkeypatch):
