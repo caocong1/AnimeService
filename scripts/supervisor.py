@@ -24,9 +24,10 @@ def authority(root=ROOT):
     return f'http://[{host}]:4871' if ':' in host else f'http://{host}:4871'
 
 
-def probe(base,opener=urllib.request.urlopen):
+def probe(base,opener=None):
     """'ours' when AnimeService answers, 'other' when something else holds the port, 'down' otherwise."""
-    for path in ('/api/health','/api/status'):  # a service older than /api/health still answers /api/status
+    opener=opener or urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+    for path in ('/api/health','/api/status'):  # local health does not depend on outbound proxies
         try:
             with opener(base+path,timeout=3) as r:state=json.load(r)
             return 'ours' if isinstance(state,dict) and state.get('service')=='AnimeService' else 'other'

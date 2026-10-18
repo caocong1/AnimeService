@@ -39,6 +39,16 @@ def test_probe_distinguishes_ours_other_and_down():
     assert supervisor.probe('http://x',opener_for({'health':TimeoutError()}))=='down'
 
 
+def test_local_probe_ignores_outbound_proxies_and_application_degradation(monkeypatch):
+    opened=Mock()
+    opened.open.side_effect=lambda *a,**k:io.BytesIO(b'{"service":"AnimeService","ok":false}')
+    builder=Mock(return_value=opened)
+    monkeypatch.setattr(supervisor.urllib.request,'build_opener',builder)
+    monkeypatch.setenv('HTTP_PROXY','http://unreachable.invalid:8080')
+    assert supervisor.probe('http://127.0.0.1:4871')=='ours'
+    assert builder.call_args.args[0].proxies=={}
+
+
 def test_authority_follows_the_deployment_bind_host(tmp_path):
     assert supervisor.authority(tmp_path)=='http://127.0.0.1:4871'
     (tmp_path/'data').mkdir();(tmp_path/'data/deployment.json').write_text(json.dumps({'bind_host':'0.0.0.0'}))

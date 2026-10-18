@@ -72,6 +72,23 @@ def test_refresh_is_idempotent_and_never_changes_media_or_watch(delivery):
     assert scheduler.get('episode:42:1')['state'] == 'ready'
 
 
+def test_refresh_recovers_an_unchanged_episode_after_isolated_failure(delivery):
+    db,scheduler,ready,now=delivery
+    original=scheduler._assessment
+    def fail_one(sid,ep,source):
+        if (sid,ep)==(42,1):raise RuntimeError('synthetic assessment failure')
+        return original(sid,ep,source)
+    scheduler._assessment=fail_one
+    before=db.rows('SELECT * FROM subtitle_delivery_jobs ORDER BY id')
+    scheduler.refresh()
+    key='subtitle_delivery_refresh_error_episode:42:1'
+    assert db.get(key)['error'].startswith('RuntimeError：')
+    assert db.rows('SELECT * FROM subtitle_delivery_jobs ORDER BY id')==before
+    scheduler._assessment=original
+    scheduler.refresh()
+    assert db.get(key) is None
+
+
 def test_later_completed_episode_enters_queue_while_first_is_blocked(delivery):
     db, scheduler, ready, now = delivery
     db.execute('DELETE FROM subtitle_studio_jobs WHERE show_id=42')

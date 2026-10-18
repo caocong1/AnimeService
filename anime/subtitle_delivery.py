@@ -255,6 +255,7 @@ class SubtitleDelivery:
                                          'scope_blocker': blocker, 'finished': value['finished']}
                                 key, state = old['input_key'], old['state']
                             if old['payload'] == _json(value) and old['state'] == state:
+                                c.execute('DELETE FROM kv WHERE key=?', (error_key,))
                                 continue
                             c.execute('UPDATE subtitle_delivery_jobs SET state=?,revision=revision+1,input_key=?,payload=?,updated=? WHERE id=?',
                                       (state, key, _json(value), self.clock(), identity))
