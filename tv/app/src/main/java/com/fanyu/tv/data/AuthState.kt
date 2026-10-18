@@ -22,11 +22,11 @@ class AuthState {
         Context(snap, token, capabilities)
     }
 
-    /** Installs a bootstrap result only if the generation it was requested for is still the current one. */
-    fun install(ctx: Context, server: String, newToken: String, newCapabilities: Map<String, Any?>): Boolean = synchronized(lock) {
-        if (binding.bind(server) != ctx.snapshot) return false
+    /** Installs a bootstrap result only if the generation it was requested for is still the current one; the installed context, or null. */
+    fun install(ctx: Context, server: String, newToken: String, newCapabilities: Map<String, Any?>): Context? = synchronized(lock) {
+        if (binding.bind(server) != ctx.snapshot) return null
         token = newToken; capabilities = newCapabilities; installedFor = ctx.snapshot
-        true
+        Context(ctx.snapshot, newToken, newCapabilities)
     }
 
     /** Still the same server and generation the context was captured for. */

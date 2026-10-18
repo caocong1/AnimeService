@@ -51,11 +51,28 @@ class Api(private val prefs: ServerStore) {
     /** Optional capabilities the bootstrap advertised for the CURRENT server and generation; anything else is none. */
     val negotiatedCapabilities: Map<String, Any?> get() = auth.context(base).capabilities
 
-    suspend fun bootstrap(): JSONObject {
-        val ctx = context()                                   // captured before the request: a switch mid-flight never credits the new server
+    /** A new connection: bootstraps the configured server for its current generation. */
+    suspend fun bootstrap(): JSONObject = fetchBootstrap(context()).first
+
+    /**
+     * Bootstraps the server of [ctx] and installs the result for that generation only: a context whose
+     * generation already moved gets "服务器已切换" before any request leaves, and an install that lost the
+     * race gets it afterwards; nothing is ever requested from, or credited to, another server.
+     */
+    private suspend fun fetchBootstrap(ctx: AuthState.Context): Pair<JSONObject, AuthState.Context> {
+        if (!accepts(ctx)) throw ApiError(0, "服务器已切换")
         val d = JSONObject(call(Request.Builder().url(ctx.snapshot.server + "/api/bootstrap").build()))
-        if (!auth.install(ctx, base, d.optString("token"), capabilityWhitelist(d.optJSONObject("capabilities")))) throw ApiError(0, "服务器已切换")
-        return d
+        val installed = auth.install(ctx, base, d.optString("token"), capabilityWhitelist(d.optJSONObject("capabilities")))
+            ?: throw ApiError(0, "服务器已切换")
+        return d to installed
+    }
+
+    /** The current context of [bound]'s generation, sampled once for one attempt; null once that generation is gone. */
+    private fun sample(bound: AuthState.Context): AuthState.Context? = context().takeIf { it.snapshot == bound.snapshot }
+
+    private sealed class Refresh {
+        class Ok(val context: AuthState.Context) : Refresh()
+        class Failed(val reply: StructuredReply) : Refresh()
     }
 
     /** The server changed, a switch was rolled back or pairing ended: a new generation; nothing old may be reused. */
@@ -73,29 +90,27 @@ class Api(private val prefs: ServerStore) {
      */
     suspend fun structured(path: String, body: Map<String, Any?>?, bound: AuthState.Context = context(),
                            stillValid: (AuthState.Context) -> Boolean = { true }): StructuredReply {
-        if (context().snapshot != bound.snapshot) return StructuredReply(SERVER_CHANGED, null)
-        if (context().token == null && body != null) refreshFailure(bound, stillValid)?.let { return it }
-        val first = exchange(path, body, context())
+        var ctx = sample(bound) ?: return StructuredReply(SERVER_CHANGED, null)   // ONE immutable context per attempt: URL, Origin, token and capabilities
+        if (ctx.token == null && body != null) ctx = when (val r = refreshed(ctx, stillValid)) { is Refresh.Ok -> r.context; is Refresh.Failed -> return r.reply }
+        if (!stillValid(ctx)) return StructuredReply(CAPABILITY_WITHDRAWN, null)  // verified on the very object that sends
+        val first = exchange(path, body, ctx)
         if (first.status != 403 || body == null) return first
         if ((first.body?.get("error") as? String)?.contains("不受信任") == true) return first
-        if (!accepts(bound)) return StructuredReply(SERVER_CHANGED, null)         // a late 403 of an old connection refreshes nothing
-        refreshFailure(bound, stillValid)?.let { return it }
-        return exchange(path, body, context())                                   // same generation, verified by refreshFailure
+        val again = when (val r = refreshed(ctx, stillValid)) { is Refresh.Ok -> r.context; is Refresh.Failed -> return r.reply }
+        return exchange(path, body, again)                                       // the refreshed context of the same generation, nothing resampled
     }
 
     /**
-     * Refreshes the token for [bound]'s generation. Null means the refreshed context may carry the request;
-     * otherwise the reply to deliver instead: the generation moved, the bootstrap failed with a status the
-     * caller must see (TLS counts as unreachable, a bad body as a protocol failure), or [stillValid] rejected
-     * the refreshed context.
+     * A fresh token for [ctx]'s server and generation, requested from that server only: the verified context
+     * to send with, or the reply to deliver instead (the generation moved, the bootstrap failed with a status
+     * the caller must see with TLS as unreachable and a bad body as a protocol failure, or [stillValid]
+     * rejected the refreshed context).
      */
-    private suspend fun refreshFailure(bound: AuthState.Context, stillValid: (AuthState.Context) -> Boolean): StructuredReply? {
-        try { bootstrap() }
-        catch (e: ApiError) { return if (!accepts(bound)) StructuredReply(SERVER_CHANGED, null) else StructuredReply(if (e.code == ApiError.TLS) 0 else e.code, e.details) }
-        catch (e: org.json.JSONException) { return if (!accepts(bound)) StructuredReply(SERVER_CHANGED, null) else StructuredReply(200, null) }
-        val ctx = context()
-        if (ctx.snapshot != bound.snapshot) return StructuredReply(SERVER_CHANGED, null)
-        return if (stillValid(ctx)) null else StructuredReply(CAPABILITY_WITHDRAWN, null)
+    private suspend fun refreshed(ctx: AuthState.Context, stillValid: (AuthState.Context) -> Boolean): Refresh {
+        val fresh = try { fetchBootstrap(ctx).second }
+        catch (e: ApiError) { return Refresh.Failed(if (!accepts(ctx)) StructuredReply(SERVER_CHANGED, null) else StructuredReply(if (e.code == ApiError.TLS) 0 else e.code, e.details)) }
+        catch (e: org.json.JSONException) { return Refresh.Failed(if (!accepts(ctx)) StructuredReply(SERVER_CHANGED, null) else StructuredReply(200, null)) }
+        return if (stillValid(fresh)) Refresh.Ok(fresh) else Refresh.Failed(StructuredReply(CAPABILITY_WITHDRAWN, null))
     }
 
     /** One request from one immutable context: URL, Origin and token all come from it, never from the mutable base. */
@@ -127,16 +142,14 @@ class Api(private val prefs: ServerStore) {
     suspend fun getArray(path: String) = JSONArray(get(path))
 
     suspend fun post(path: String, body: JSONObject = JSONObject()): JSONObject {
-        if (token == null && path != LOGIN) bootstrap()
-        val ctx = context()
+        var ctx = context()
+        if (ctx.token == null && path != LOGIN) ctx = fetchBootstrap(ctx).second   // bootstrapped for this connection, or 服务器已切换
         val text = try {
             call(postRequest(path, body, ctx))
         } catch (e: ApiError) {
             if (!accepts(ctx)) throw ApiError(0, "服务器已切换")               // an old connection's answer triggers nothing on the new one
             if (e.code != 403 || e.untrusted || path == LOGIN) throw e
-            bootstrap()                                                         // the server issues a new token on every restart
-            val again = context()
-            if (again.snapshot != ctx.snapshot) throw ApiError(0, "服务器已切换")   // the same connection identity, or nothing
+            val again = fetchBootstrap(ctx).second                              // the server issues a new token on every restart: the same server and generation, or nothing
             call(postRequest(path, body, again))
         }
         return JSONObject(delivered(ctx, text))
