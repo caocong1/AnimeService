@@ -25,7 +25,7 @@
   });
   let played = false, art = null, media = null, show = null, lastPosition = 0, lastSave = 0, selected = [], comments = [], activeDanmu = null, danmuRev = 0, tracks = [];
   /* ---------- explicit playback writer (v2), only when the bootstrap advertises it ---------- */
-  let writer = null, writerIntentAt = 0;
+  let writer = null, writerIntent = null, legacyFenced = false, switching = false;
   const writerLabel = () => {
     let saved = null;
     try { saved = localStorage.getItem('fanyu-writer-label'); } catch (_) {}
@@ -33,19 +33,38 @@
     try { localStorage.setItem('fanyu-writer-label', label); } catch (_) {}
     return label;
   };
-  function openWriter() {
+  /* The wire identity is the canonical key the server pinned for the loaded version: ordinary media use the
+     server inventory id; a finished release uses the finished-viewing record's media_id, accepted only when
+     that record's video SHA matches the release actually loaded. No client-side hashing, no alias guessing. */
+  async function writerKey() {
+    if (!releaseId) return id;
+    const release = releases.find(r => r.id === releaseId);
+    const record = await api('/finished-viewing/' + encodeURIComponent(releaseId)).catch(() => null);
+    if (!release || !record || typeof record.media_id !== 'string' || !record.media_id || record.video_sha256 !== release.video_sha256) return null;
+    return record.media_id;
+  }
+  async function openWriter() {
     if (!window.PlaybackWriter || !PlaybackWriter.negotiated(App.capabilities)) return;   // legacy progress stays untouched
+    const key = await writerKey();
+    if (!key) { $('#writer-status').textContent = '进度未保存：当前版本无法核验'; $('#writer-row').hidden = false; return; }   // v2 chosen: no legacy fallback
     const headers = () => ({ 'Content-Type': 'application/json', 'X-Anime-Token': App.token });
     const reply = async res => ({ status: res.status, ok: res.ok, body: await res.json().catch(() => null) });
     const failed = () => ({ status: 0, ok: false, body: null });
     writer = PlaybackWriter.create({
       post: (path, body, options) => fetch(path, { method: 'POST', keepalive: options?.keepalive === true, headers: headers(), body: JSON.stringify(body) }).then(reply, failed),
       get: path => fetch(path, { headers: { 'X-Anime-Token': App.token } }).then(reply, failed),
-      mediaKey: releaseId ? 'finished:' + releaseId : id, session: viewingSession, device: writerLabel(),
+      mediaKey: key, session: viewingSession, device: writerLabel(),
     });
     writer.subscribe(renderWriter);
     writer.state().catch(() => {}).then(renderWriter);
   }
+  /* The last snapshot when the page hides or is backgrounded: keepalive, no release, pending jobs dropped. */
+  function finalProgress() {
+    if (!writer || audioSwitching || !played || !art || !Number.isFinite(art.duration) || art.duration <= 0) return Promise.resolve();
+    const playing = finishedEndpoint ? moved : (!art.video.paused && art.currentTime - lastPosition > 0 && art.currentTime - lastPosition < 35);
+    return writer.final({ position: art.currentTime, duration: art.duration, playing }).catch(() => {});
+  }
+  const withTimeout = (promise, ms) => Promise.race([promise, new Promise(resolve => setTimeout(resolve, ms))]);
   /* Who holds progress is always visible; other devices' labels are plain text. */
   function renderWriter() {
     const row = $('#writer-row'), status = $('#writer-status'), button = $('#writer-takeover');
@@ -54,7 +73,9 @@
     const text = s.status === 'writing' ? (s.unsaved ? '进度未保存：连接失败，播放继续' : '') :
       s.status === 'conflict' || s.status === 'fenced' || s.status === 'stale' ? `由 ${owner} 持有进度 · 本机未保存` :
       s.status === 'expired' ? '进度未保存：会话已过期' :
+      s.status === 'halted' ? '进度未保存：服务不支持当前会话，刷新后重试' :
       s.status === 'error' || s.status === 'unsupported' ? '进度未保存：连接失败' :
+      s.status === 'suspended' ? '已暂停记录进度，按播放继续' :
       s.status === 'idle' || s.status === 'released' ? '进度未保存：按播放开始记录' : '';
     status.textContent = text;
     button.hidden = !['conflict', 'fenced', 'stale', 'expired'].includes(s.status);
@@ -69,13 +90,21 @@
     if (r.ok) { lastSave = Date.now(); saveProgress().catch(() => {}); }
     return r;
   }
+  /* A Play intent comes only from definite user actions and is consumed by the first real play. */
+  const noteIntent = () => { writerIntent = { at: Date.now(), used: false }; };
+  const consumeIntent = () => { const ok = !!writerIntent && !writerIntent.used && Date.now() - writerIntent.at < 1500; if (writerIntent) writerIntent.used = true; return ok; };
   document.addEventListener('click', e => {
-    if (e.target.closest('#restart, #dismiss, [data-end-next]')) writerIntentAt = Date.now();
+    if (e.target.closest('#restart, .art-control-playAndPause, .art-state')) noteIntent();
     if (e.target.closest('#writer-takeover') && writer) {
       const s = writer.snapshot();
       claimWriter('takeover', s.conflict?.generation ?? s.generation);
     }
   }, true);
+  window.addEventListener('pageshow', e => {
+    if (!e.persisted || !writer) return;        // restored from bfcache: the old instance and its answers stay dead
+    writer.dispose(); writer = null; writerIntent = null;
+    openWriter();
+  });
   let searchRev = 0;
   let detailRev = 0;
   let resultRows = [], resultContext = '本集推荐';
@@ -229,23 +258,27 @@
   async function saveProgress(keepalive = false) {
     if (audioSwitching || !played || !art || !Number.isFinite(art.duration) || art.duration <= 0) return;
     if (writer) {   // v2 was negotiated: the legacy routes are never used, even on failure
+      if (keepalive) return finalProgress();
       if (writer.status !== 'writing') { renderWriter(); return; }
       let playing;
       if (finishedEndpoint) { playing = moved; moved = false; }
       else { const delta = art.currentTime - lastPosition; playing = !art.video.paused && delta > 0 && delta < 35; lastPosition = art.currentTime; }
       const packet = { position: art.currentTime, duration: art.duration, playing };
-      const r = await writer.progress(packet, { keepalive });
+      const r = await writer.progress(packet);
       if (r.ok) tracking('续播进度已同步 · ' + clock(packet.position));
-      else if (!r.ignored && r.reason !== 'stale_response') { if (finishedEndpoint) moved ||= packet.playing; tracking('进度未保存'); }
+      else if (r.ignored) tracking('本次进度未保存（已被更新的进度取代）');
+      else if (r.reason !== 'stale_response') { if (finishedEndpoint) moved ||= packet.playing; tracking('进度未保存'); }
       renderWriter();
       return;
     }
+    if (legacyFenced) return;   // a durable writer fence exists: this client must stop writing until a new session is negotiated
     if (finishedEndpoint) {
       const body = {position:art.currentTime,duration:art.duration,playing:moved,session:viewingSession,sequence:++sequence};
       moved = false;
       const run = async () => {
         try {
           const response = await fetch(finishedEndpoint + '/progress', {method:'POST',keepalive,headers:{'Content-Type':'application/json','X-Anime-Token':App.token},body:JSON.stringify(body)});
+          if (response.status === 409 && PlaybackWriter.legacyFenced(409, await response.json().catch(() => null))) { legacyFenced = true; throw Error('进度未保存：需要新的播放会话或版本支持'); }
           if (!response.ok) throw Error('观看记录未同步，请稍后重试');
           tracking('续播进度已同步 · ' + clock(body.position));
         } catch (e) { moved ||= body.playing; tracking(e.message); }
@@ -260,7 +293,10 @@
       method: 'POST', keepalive,
       headers: { 'Content-Type': 'application/json', 'X-Anime-Token': App.token },
       body: JSON.stringify(body),
-    }).then(response => { if (!response.ok) console.warn('进度未保存', response.status); }).catch(e => console.warn('进度未保存', e.message));
+    }).then(async response => {
+      if (response.status === 409 && PlaybackWriter.legacyFenced(409, await response.json().catch(() => null))) { legacyFenced = true; tracking('进度未保存：需要新的播放会话或版本支持'); }
+      else if (!response.ok) console.warn('进度未保存', response.status);
+    }).catch(e => console.warn('进度未保存', e.message));
     if (keepalive) return send();
     progressQueue = progressQueue.then(send); return progressQueue;
   }
@@ -329,7 +365,7 @@
       if(t!==document.body && !$('#screen').contains(t) && !art.template.$player.contains(t)) return;
       if(t.closest('input, textarea, select, button, [contenteditable], #danmu-menu')) return;
       if(e.isComposing || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
-      if(e.code==='Space') { e.preventDefault(); if(!e.repeat) { writerIntentAt = Date.now(); art.toggle(); } }
+      if(e.code==='Space') { e.preventDefault(); if(!e.repeat) { noteIntent(); art.toggle(); } }
       if(e.key==='Enter') { e.preventDefault(); if(!e.repeat) art.fullscreen=!art.fullscreen; }
       if(e.key==='ArrowLeft' || e.key==='ArrowRight') { e.preventDefault(); art.currentTime=Math.max(0,Math.min(art.duration,art.currentTime+(e.key==='ArrowRight'?5:-5))); }
       if(e.key==='ArrowUp' || e.key==='ArrowDown') { e.preventDefault(); adjustVolume(e.key==='ArrowUp'?0.05:-0.05); }
@@ -363,9 +399,8 @@
       // If audible autoplay is blocked, wait for the viewer to press play without muting.
       art.play().catch(() => {});
     });
-    art.template.$player.addEventListener('pointerdown', () => { writerIntentAt = Date.now(); }, { capture: true });
-    art.on('video:play', () => {   // autoplay and programmatic play never claim; a recent explicit action does
-      if (writer && writer.status !== 'writing' && Date.now() - writerIntentAt < 1500) claimWriter('open');
+    art.on('video:play', () => {   // autoplay and programmatic play never claim; one explicit Play/Resume does, once
+      if (writer && writer.status !== 'writing' && consumeIntent()) claimWriter('open');
     });
     art.on('destroy', () => writer?.dispose());
     art.on('video:playing', () => { if (!releaseId) played = true; });
@@ -374,7 +409,7 @@
     art.on('video:timeupdate', () => {
       if (releaseId) { const delta = art.currentTime-lastPosition; lastPosition = art.currentTime;
         if (!art.video.seeking && !art.video.paused && delta > 0 && delta < 35) { played = true; moved = true; } }
-      followList(); if (Date.now() - lastSave > 15000) { lastSave = Date.now(); saveProgress().catch(() => {}); }
+      followList(); if (!document.hidden && !switching && Date.now() - lastSave > 15000) { lastSave = Date.now(); saveProgress().catch(() => {}); }
     });
     art.on('video:pause', () => saveProgress().catch(() => {}));
     art.on('video:ended', () => {
@@ -385,7 +420,7 @@
         ${n ? `<button class="btn primary" type="button" data-end-next="${n.n}">${icon('check')}看完，播放第 ${n.n} 集</button>` : ''}
         <button class="btn" type="button" data-mark="true">${icon('check')}标记看完</button><button class="btn quiet" type="button" id="dismiss">不标记</button></div>`);
     });
-    addEventListener('pagehide', () => saveProgress(true).catch(() => {}));
+    addEventListener('pagehide', () => saveProgress(true).catch(() => {}));            // writer: final snapshot, keepalive, no release
     document.addEventListener('visibilitychange', () => { if (document.hidden) saveProgress(true).catch(() => {}); });
     loadSubtitles();
     loadAudioTracks();
@@ -1089,7 +1124,12 @@
   addEventListener('resize', renderRows);
   $('#close-danmu-search').innerHTML = icon('close'); $('#danmu-back').innerHTML = icon('back');
   renderDisplay(); renderBlocked(); renderShot();
-  $('#playback-source').addEventListener('change', async e => { await saveProgress(); if (writer) await writer.release().catch(() => {}); location.assign(e.target.value); });
+  $('#playback-source').addEventListener('change', async e => {
+    switching = true;                             // stop the periodic producer, confirm the last packet, release best-effort, then leave
+    await withTimeout(saveProgress().catch(() => {}), 3000);
+    if (writer) { await withTimeout(writer.release().catch(() => {}), 2000); writer.dispose(); }
+    location.assign(e.target.value);
+  });
 
   (async () => {
     try {
