@@ -39,7 +39,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
         with:
           # dependency and wrapper caches only; written on main pushes, read-only elsewhere
-          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          cache-read-only: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+          gradle-home-cache-includes: |
+            caches
+            wrapper
       - name: Unit tests (debug variant)
         run: ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest
       - name: Non-production debug build

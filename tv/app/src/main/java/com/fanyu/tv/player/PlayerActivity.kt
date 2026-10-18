@@ -1,5 +1,6 @@
 package com.fanyu.tv.player
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -388,6 +389,10 @@ class PlayerActivity : ComponentActivity() {
         app.scope.launch { runCatching { app.api.post("/api/web/media/$id/progress", body) } }
     }
 
+    // Activity's public event hook is intentional: TV key-up/hold handling must run
+    // before child views. AndroidX core annotates its compatibility implementation
+    // RestrictedApi; keep this exemption on the override rather than all TV lint.
+    @SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         ui.interaction++
         if (ui.overlay != Overlay.None) return super.dispatchKeyEvent(event)
