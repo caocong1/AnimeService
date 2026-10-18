@@ -103,13 +103,7 @@ def match(player, item):
     fetched={s['id']:s for b in batches for s in b['sources']}
     selected.sort(key=lambda s:(not bool(fetched[s['id']].get('count')), bool(fetched[s['id']].get('error')), 'B站视频' in s['title']))
     selected=selected[:5]
-    result={'sources':[fetched[s['id']] for s in selected],'comments':[]}
-    seen=set()
-    for source in result['sources']:
-        for row in source.get('comments',[]):
-            identity=(round(row['time'],1),row['text'],row['mode'])
-            if identity not in seen:seen.add(identity);result['comments'].append(row)
-    result['comments'].sort(key=lambda r:r['time'])
+    result={'sources':[fetched[s['id']] for s in selected]}
     if all(s.get('error') for s in result['sources']):
         return {**fallback, 'status': 'error', 'retryable':True, 'message': '已匹配本集，但弹幕来源暂时不可用，请重试。'}
     return {**result, 'status': 'matched', 'title': show['title'], 'selected': selected,

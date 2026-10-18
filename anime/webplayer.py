@@ -186,20 +186,17 @@ class WebPlayer:
                 if source is None:
                     raise ValueError('保存的来源已失效，请移除后重新添加')
                 urls.append(source['url'])
-        combined=[];sources=[]
+        sources=[]
         for sid,url in zip(ids,urls):
             identity=hashlib.sha256(url.encode()).hexdigest()
             # Sender ids are only meaningful together with the site that issued them.
             site=SITES.get(urlparse(url).hostname,'')
             try:
                 rows=normalize_comments(self.danmu('comment',{'url':url,'format':'json'}))
-                combined+=rows;sources.append({'id':sid,'source_identity':identity,'site':site,'source_url':source_page_url(url),'count':len(rows),'comments':rows})
+                sources.append({'id':sid,'source_identity':identity,'site':site,'source_url':source_page_url(url),'count':len(rows),'comments':rows})
             except Exception:sources.append({'id':sid,'source_identity':identity,'site':site,'source_url':source_page_url(url),'count':0,'comments':[],'error':'来源获取失败或超时，可重试'})
-        seen=set();out=[]
-        for x in combined:
-            k=(round(x['time'],1),x['text'],x['mode'])
-            if k not in seen:seen.add(k);out.append(x)
-        return {'comments':sorted(out,key=lambda x:x['time']),'sources':sources,'fetched_at':time.time()}
+        # Per-source rows only: the player mixes them with each source's own offset, so a merged list would be dead weight.
+        return {'sources':sources,'fetched_at':time.time()}
 
     def auto_danmu(self,key):
         item=self.item(key)
@@ -209,7 +206,7 @@ class WebPlayer:
             cached=self.auto_cache.get(cache_key)
             if cached and time.time()-cached[0]<600:return cached[1]
             try:result=match_danmu(self,item)
-            except Exception:return {'status':'error','retryable':True,'message':'弹幕自动查找暂时失败，可重试或手动选择来源。','comments':[],'sources':[]}
+            except Exception:return {'status':'error','retryable':True,'message':'弹幕自动查找暂时失败，可重试或手动选择来源。','sources':[]}
             if result['status']=='matched':
                 with self.db.connect() as c:
                     c.executemany('INSERT INTO web_danmu_matches(media_id,source_key,episode_identity) VALUES(?,?,?) '

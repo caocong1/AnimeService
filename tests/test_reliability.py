@@ -365,7 +365,7 @@ def test_danmu_selection_pins_public_url_not_transient_id(setup,monkeypatch):
         assert 'source_key' not in eps[1]
         assert client.post('/api/web/danmu/comments',json={'episodes':[1]},headers=h).status_code==400
         r=client.post('/api/web/danmu/comments',json={'episodes':[eps[0]['source_key']]},headers=h)
-        assert r.status_code==200 and len(r.json()['comments'])==1
+        assert r.status_code==200 and len(r.json()['sources'][0]['comments'])==1
         assert calls[-1]==('comment',{'url':'https://www.bilibili.com/bangumi/play/ep123','format':'json'})
 
 
@@ -388,7 +388,7 @@ def test_bahamut_numeric_episode_pins_site_url(setup,monkeypatch):
         eps=client.get('/api/web/danmu/show/1').json()['bangumi']['episodes']
         assert all('source_key' not in row for row in eps[1:])
         r=client.post('/api/web/danmu/comments',json={'episodes':[eps[0]['source_key']]},headers=h)
-        assert r.status_code==200 and len(r.json()['comments'])==1
+        assert r.status_code==200 and len(r.json()['sources'][0]['comments'])==1
         assert calls[-1]==('comment',{'url':'https://ani.gamer.com.tw/animeVideo.php?sn=47221','format':'json'})
 
 
