@@ -42,10 +42,11 @@ jobs:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
       - name: Unit tests (debug variant)
         run: ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest
-      - name: Lint (debug variant)
-        run: ./gradlew --no-daemon --stacktrace :app:lintDebug
       - name: Non-production debug build
         run: ./gradlew --no-daemon --stacktrace :app:assembleDebug
+      # Lint runs last so a lint failure still leaves the test and build results on record.
+      - name: Lint (debug variant)
+        run: ./gradlew --no-daemon --stacktrace :app:lintDebug
       - name: Test and lint reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
