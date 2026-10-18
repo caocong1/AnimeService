@@ -17,6 +17,7 @@ function safeRead(path,fixture=false) {
   if(/^\/api\/(?:bootstrap|home|health|status|finished-viewing)(?:\/[^/]+)?$/.test(path))return true;
   if(/^\/api\/shows(?:\/\d+)?$/.test(path))return true;
   if(path==='/api/web/alignment-capabilities')return true;
+  if(fixture&&path==='/api/playback-sessions/state')return true;
   if(/^\/api\/web\/media\/[^/]+$/.test(path))return true;
   if(fixture&&(path==='/api/testing/fixture'||path==='/api/web/danmu/search'||/^\/api\/web\/media(?:\/|$)/.test(path)))return true;
   return false;
@@ -25,7 +26,8 @@ function fixtureWrite(path) {
   return /^\/api\/finished-viewing\/[^/]+\/(?:progress|watch|viewing-session)$/.test(path)
     ||/^\/api\/web\/media\/[^/]+\/(?:progress|viewing-session)$/.test(path)
     ||/^\/api\/shows\/\d+\/watch$/.test(path)
-    ||path==='/api/web/danmu/comments';
+    ||path==='/api/web/danmu/comments'
+    ||/^\/api\/playback-sessions\/(?:claim|progress|heartbeat|release)$/.test(path);
 }
 async function guardedContext(browser,{base,mode,token='',mock,viewport={width:1440,height:1000}}) {
   base=checkedBase(base,mode);

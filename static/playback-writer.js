@@ -64,9 +64,9 @@
                              conflict: conflict ? {...conflict} : null, writing: status === 'writing', unsaved, error: lastError});
     const notify = () => { for (const fn of listeners) fn(snapshot()); };
     const setStatus = (next, nextConflict = conflict) => { status = next; conflict = nextConflict; notify(); };
-    const live = ticket => ticket.epoch === epoch && status !== 'disposed';
+    const live = ticket => ticket.epoch === epoch && (ticket.lane === undefined || ticket.lane === lane) && status !== 'disposed';
     const call = async (fn, ...args) => { try { return await fn(...args); } catch (_) { return {status: 0, ok: false, body: null}; } };
-    const bound = body => body.requested_media_key === undefined || body.requested_media_key === mediaKey;   // the echo must be ours
+    const bound = body => body.requested_media_key === mediaKey;
     /* Failures: a short network fault keeps the fence (the next snapshot may be rebuilt); a protocol or
        authorization fault halts this media until an explicit new claim after the capability is re-read. */
     const fail = (ticket, kind, http) => {
@@ -79,13 +79,13 @@
     };
     async function state() {
       if (status === 'disposed') return {supported: false, reason: 'disposed'};
-      const ticket = {epoch};
+      const ticket = {epoch, lane};
       const r = await call(get, `${base}/state?media_key=${encodeURIComponent(mediaKey)}`);
       const {kind, body, http} = classify(r);
       if (!live(ticket)) return {supported: false, reason: 'stale_response'};
       if (kind === 'disabled' || kind === 'protocol' || kind === 'unauthorized') { fail(ticket, kind, http); if (!fence) setStatus('unsupported'); return {supported: false, reason: lastError}; }
       if (kind !== 'ok') return {supported: false, reason: kind};
-      if (body.media_key !== mediaKey || !bound(body) || safeInt(body.generation) === null || typeof body.active !== 'boolean') {
+      if (body.media_key !== mediaKey || !bound(body) || safeInt(body.generation) === null || typeof body.active !== 'boolean' || !finite(body.expires) || body.expires < 0) {
         fail(ticket, 'protocol', http); return {supported: false, reason: 'invalid_state'};
       }
       observed = {generation: body.generation, active: body.active, device: body.active ? sanitizeLabel(body.device_id) : null};
@@ -97,6 +97,7 @@
       if (mode !== 'open' && mode !== 'takeover') throw new TypeError('mode must be open or takeover');
       if (mode === 'takeover' && safeInt(expectedGeneration) === null) throw new TypeError('takeover needs the generation the user saw');
       if (status === 'disposed') return {ok: false, reason: 'disposed'};
+      if (status === 'halted' || status === 'unsupported') return {ok: false, reason: status};
       if (claiming) return {ok: false, reason: 'claim_in_progress'};
       claiming = true;
       try {
@@ -105,7 +106,7 @@
         if (ids.request_id.length < 16 || ids.writer_token.length < 32 || ids.writer_token.length > 128) throw new TypeError('random identifiers are too short');
         const request = {media_key: mediaKey, session, ...ids, device_id: device, expected_generation: expected, mode};
         const ticket = {epoch: ++epoch};           // every older claim, job and response is now inert
-        lane++; fence = null; sequence = 0; queue = Promise.resolve(); lastError = null;
+        lane++; ticket.lane = lane; fence = null; sequence = 0; queue = Promise.resolve(); lastError = null;
         let r, attempt = 0;
         do {                                       // a network failure retries the SAME packet, never a second unknown claim
           attempt++;
@@ -114,20 +115,20 @@
         if (!live(ticket)) return {ok: false, reason: 'superseded'};
         const {kind, body, http} = classify(r);
         if (kind === 'conflict' || (kind === 'ok' && body.ok === false)) {
-          if (!bound(body)) return fail(ticket, 'protocol', http);
+          if (!bound(body) || body.media_key !== mediaKey || safeInt(body.generation) === null || typeof body.active !== 'boolean' || !finite(body.expires)) return fail(ticket, 'protocol', http);
           conflict = {reason: body.reason || 'conflict', generation: safeInt(body.generation) ?? 0, device: body.active ? sanitizeLabel(body.device_id) : null};
           observed = {generation: conflict.generation, active: body.active === true, device: conflict.device};
           setStatus('conflict', conflict);
           return {ok: false, reason: conflict.reason, generation: conflict.generation, device: conflict.device};
         }
         if (kind !== 'ok') return fail(ticket, kind, http);
-        if (body.ok !== true || body.media_key !== mediaKey || !bound(body) || safeInt(body.generation, 1) === null || !finite(body.expires)) {
+        if (body.ok !== true || body.media_key !== mediaKey || !bound(body) || safeInt(body.generation, 1) === null || !finite(body.expires) || body.expires <= 0) {
           return fail(ticket, 'protocol', http);
         }
         if (attempt > 1 || body.replayed === true) {   // history is not live ownership: confirm through state in this epoch
           const current = await state();
           if (!live(ticket) || !current.supported || !current.active || current.generation !== body.generation) {
-            if (live(ticket)) { fence = null; setStatus('stale', {reason: 'stale', generation: current.generation ?? body.generation, device: current.device ?? null}); }
+            if (live(ticket) && status !== 'halted' && status !== 'unsupported') { fence = null; setStatus('stale', {reason: 'stale', generation: current.generation ?? body.generation, device: current.device ?? null}); }
             return {ok: false, reason: 'verify_failed'};
           }
         }
@@ -149,7 +150,7 @@
       }
       if (sequence >= MAX_SEQUENCE) return {ok: false, reason: 'sequence_exhausted'};
       const packet = Object.freeze({media_key: mediaKey, session, generation: c.generation, writer_token: c.token, sequence: ++sequence, ...c.extra});
-      const ticket = {epoch: c.epoch, generation: c.generation};
+      const ticket = {epoch: c.epoch, lane: c.lane, generation: c.generation};
       const r = await call(post, c.path, packet, {keepalive: c.keepalive});
       const {kind, body, http} = classify(r);
       if (!live(ticket) || !fence || fence.generation !== ticket.generation) return {ok: false, reason: 'stale_response'};
@@ -171,7 +172,6 @@
     function send(path, extra, options) {
       const j = job(path, extra, options);
       if (j.skip) return Promise.resolve(j.skip);
-      if (j.capture.keepalive) return execute(j.capture);          // the final snapshot bypasses the queue
       const next = queue.then(() => execute(j.capture), () => execute(j.capture));
       queue = next.catch(() => {});
       return next;
@@ -179,16 +179,22 @@
     const progress = ({position, duration, playing}, options) => send(`${base}/progress`, {position, duration, playing: playing === true}, options);
     const heartbeat = options => send(`${base}/heartbeat`, {}, options);
     async function release(options) {
+      const ticket = {epoch, lane, generation: fence?.generation};
       const r = await send(`${base}/release`, {}, options);
-      if (r.ok) { fence = null; setStatus('released', null); }
+      if (r.ok) {
+        if (!live(ticket) || fence?.generation !== ticket.generation) return {ok:false, reason:'stale_response'};
+        fence = null; setStatus('released', null);
+      }
       return r;
     }
     /* The last snapshot when the page hides: pending jobs are invalidated so no older position can
        overtake it, it goes out with keepalive, and nothing more is written until an explicit claim. */
     function final({position, duration, playing}) {
       lane++; queue = Promise.resolve();
-      const result = send(`${base}/progress`, {position, duration, playing: playing === true}, {keepalive: true});
-      if (fence) { fence = null; setStatus('suspended', null); }
+      const j = job(`${base}/progress`, {position, duration, playing: playing === true}, {keepalive: true});
+      if (j.skip) return Promise.resolve(j.skip);
+      const result = execute(j.capture);
+      if (fence) { fence = null; unsaved = true; setStatus('suspended', null); }
       return result;
     }
     function dispose() { epoch++; lane++; fence = null; queue = Promise.resolve(); listeners.clear(); setStatus('disposed', conflict); }

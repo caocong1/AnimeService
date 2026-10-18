@@ -186,6 +186,32 @@ The optional future bootstrap capability shape is unchanged and remains absent
 in production. Missing binding fields are a visible protocol failure after v2
 selection, never permission to fall back to legacy.
 
+## Web client staged integration (owner round 20)
+
+The Web client is present but production bootstrap still advertises no capability,
+and production constructs no writer core/registry/adapter or three v2 tables.
+Absent positive negotiation it sends zero v2 requests. Once chosen for the page,
+pending/failed version verification never switches back to legacy. Finished wire
+identity is pinned to the loaded release's server media_id and matching video SHA.
+
+Play/Resume intent is trusted, target-specific and consumed once. Queue jobs and
+responses retain their media/session/generation/epoch/lane; halted protocol/auth
+sessions require reopening, not another claim on the halted instance. State/claim
+echo fields are mandatory. Final progress is best effort, invalidates pending old
+jobs and suspends writes; the UI conservatively leaves the last save unconfirmed.
+It does not report a queued keepalive as durable success or send a parallel release.
+Legacy 409 fences also invalidate already queued legacy writes. Playback/viewing
+leases and explicit watched state remain independent.
+
+The nonce-verified synthetic QA firewall now permits the four writer POST paths
+and state GET only in its nonproduction fixture mode; readonly mode and production
+fixture addresses still reject writes. Current/legacy player regression and a real
+isolated Web/protocol-peer test cover canonical progress, explicit takeover, stale
+fences, pagehide, failed provenance and feature-off durable legacy fences. The peer
+is a protocol probe, not signed TV or Kotlin/TV UI acceptance. True bfcache, full
+paired remote authentication/fault matrices, Kotlin interoperability and real TV
+focus/signing remain rollout prerequisites. TV review20 changes are NOT integrated.
+
 Transaction references: [SQLite transactions](https://www.sqlite.org/lang_transaction.html),
 [Python sqlite3 transaction control](https://docs.python.org/3.14/library/sqlite3.html#transaction-control).
 Content evidence references: [Python hashlib](https://docs.python.org/3.14/library/hashlib.html),

@@ -5,7 +5,7 @@ const {create, negotiated, legacyFenced, sanitizeLabel, deviceLabel} = require('
 const KEY = 'finished:0123456789abcdef0123456789abcdef', SESSION = 'session-aaaaaaaaaaaaaaaa';
 const ok = (generation, expires = 999, extra = {}) => ({ok: true, status: 200, body: {ok: true, media_key: KEY, requested_media_key: KEY, generation, expires, ...extra}});
 const applied = (generation, sequence) => ({ok: true, status: 200, body: {ok: true, generation, sequence}});
-const conflict = (reason, extra = {}) => ({ok: false, status: 409, body: {error: 'conflict', ok: false, reason, media_key: KEY, requested_media_key: KEY, ...extra}});
+const conflict = (reason, extra = {}) => ({ok: false, status: 409, body: {error: 'conflict', ok: false, reason, generation:0, active:false, expires:0, media_key: KEY, requested_media_key: KEY, ...extra}});
 const stateBody = (generation, active = false, device = null) => ({ok: true, status: 200, body: {media_key: KEY, requested_media_key: KEY, generation, active, expires: 0, device_id: device}});
 function transport(handlers) {
   const calls = [];
@@ -61,8 +61,12 @@ test('a successful claim needs ok, canonical media_key, requested echo, generati
   const t = transport({post: () => answers.shift()});
   const w = create({...base(), ...t, retries: 0});
   assert.equal((await w.claim()).reason, 'server_500'); assert.equal(w.status, 'error');
-  for (const expected of ['protocol_200', 'protocol_200', 'protocol_200', 'protocol_200']) { assert.equal((await w.claim()).reason, expected); assert.equal(w.status, 'halted'); }
-  assert.equal((await w.claim()).ok, true); assert.equal(w.status, 'writing');
+  for (const expected of ['protocol_200', 'protocol_200', 'protocol_200', 'protocol_200']) {
+    const fresh = create({...base(), ...t});
+    assert.equal((await fresh.claim()).reason, expected); assert.equal(fresh.status, 'halted');
+    const count=t.calls.length;assert.equal((await fresh.claim()).reason,'halted');assert.equal(t.calls.length,count);
+  }
+  const fresh=create({...base(),...t});assert.equal((await fresh.claim()).ok, true); assert.equal(fresh.status, 'writing');
 });
 
 test('a save succeeds only with the packet\'s own generation and sequence; anything else stays unsaved', async () => {
