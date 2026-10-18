@@ -129,3 +129,6 @@
 !/scripts/codex_dispatch.json
 !/docs/DISPATCH-ABSENCE-EVIDENCE.md
 !/scripts/codex_absence_verifier.py
+!/scripts/https_renew.py
+!/scripts/https_upnp.ps1
+!/scripts/stop_https.py

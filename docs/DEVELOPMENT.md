@@ -135,6 +135,10 @@ B站 UGC标题搜索保留原查询，最多追加两次去版本/标点、去�
 
 `res/raw/isrg_root_x1.crt`、`isrg_root_x2.crt` 是网络配置原已引用的公开根证书，使用 Let's Encrypt [官方 DER 文件](https://letsencrypt.org/certificates/)，不含私钥；不应被私有 `.pem` 忽略规则漏掉。SHA-256 分别为 `96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6`、`69729B8E15A86EFC177A57AFB7171DFC64ADD28C2FCA8CF1507E34453CCB1470`。
 
+## HTTPS 维护脚本
+
+`scripts/https_renew.py`（lego DNS-01 续期）、`scripts/https_upnp.ps1`（UPnP 端口映射）与 `scripts/stop_https.py`（只结束本项目的 nginx 边缘进程）是脱敏后的通用版本：域名、邮箱、DNS 提供商、ddns-go 配置路径、解析器、内网地址与端口全部来自私有且不入库的 `data/https.json`（键见各脚本开头的说明），凭据只在内存中从 ddns-go 的配置读取，失败输出只打印固定状态类别并脱敏。原机若仍使用带本机值的旧脚本，先按说明写好 `data/https.json`，核对行为一致后再把计划任务指向新脚本；证书、私钥与配置始终留在本机。
+
 ## 设备配对与重启
 
 设备凭据以摘要和到期时间保存在SQLite的remote_sessions中，浏览器保存HttpOnly/Secure/SameSite=Strict Cookie；普通网页30天、电视盒子365天。Cookie同时带Max-Age和Expires。服务重启仅更新防跨站写入token，不能重置设备凭据；本轮未延长或改写既有设备会话。
