@@ -104,11 +104,18 @@ class PlayerActivity : ComponentActivity() {
     private var okDown = false
     private var danmuJob: Job? = null
     private var subtitleChosen = false
-    private var writer: PlaybackWriterClient? = null
-    private val playIntent = PlayIntent()   // one-shot, bound to a media, consumed by its first real playback
-    private var writerClaiming = false
-    private var legacyFenced = false
     private val writerSession = UUID.randomUUID().toString()
+    private val writers by lazy {
+        WriterCoordinator(lifecycleScope, object : WriterCoordinator.Ui {
+            override fun render() = renderWriter()
+            override fun status(text: String) { ui.progressStatus = text }
+            override fun saveNow() = saveProgress()
+        }, object : WriterCoordinator.Legacy {
+            override suspend fun post(media: String, position: Double, duration: Double, playing: Boolean) {
+                app.api.post("/api/web/media/$media/progress", JSONObject().put("position", position).put("duration", duration).put("playing", playing))
+            }
+        })
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -116,7 +123,7 @@ class PlayerActivity : ComponentActivity() {
         showId = intent.getIntExtra("show", 0)
         ui.episode = intent.getIntExtra("episode", 0)
         ui.settings = app.prefs.danmu
-        if (savedInstanceState == null && intent.getBooleanExtra("explicit_play", false)) playIntent.arm(PENDING_FIRST_MEDIA, false)
+        if (savedInstanceState == null && intent.getBooleanExtra("explicit_play", false)) writers.intent.arm(PENDING_FIRST_MEDIA, false)
 
         val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(true)
         val maxHeapBytes = Runtime.getRuntime().maxMemory()
@@ -204,7 +211,8 @@ class PlayerActivity : ComponentActivity() {
             val ep = show.eps.firstOrNull { it.n == ui.episode }
             val id = ep?.media ?: run { fail("第 ${ui.episode} 集没有可播放的文件"); return@launch }
             media = id
-            playIntent.retarget(PENDING_FIRST_MEDIA, id)
+            writers.media = id
+            writers.intent.retarget(PENDING_FIRST_MEDIA, id)
             openWriter(id)
             ui.globalOffset = app.prefs.globalOffset(id)
             danmaku.offsetMillis = (ui.globalOffset * 1000).toLong()
@@ -229,22 +237,14 @@ class PlayerActivity : ComponentActivity() {
 
     /* ---------- explicit playback writer (v2), only when the bootstrap advertised it ---------- */
 
-    private fun openWriter(id: String) {
-        if (!PlaybackWriterClient.negotiated(app.api.negotiatedCapabilities)) return   // legacy progress stays untouched
+    private fun openWriter(id: String) = writers.open(app.api.negotiatedCapabilities) {   // nothing without the capability
         val label = PlaybackWriterClient.sanitizeLabel(app.prefs.writerLabel)
             ?: PlaybackWriterClient.deviceLabel("电视播放器").also { app.prefs.writerLabel = it }
-        val client = PlaybackWriterClient(id, writerSession, label, WriterTransport(app.api))
-        client.onChange { renderWriter() }
-        writer = client
-        renderWriter()
-        lifecycleScope.launch {
-            try { client.state() } catch (e: Exception) { ui.progressStatus = "进度未保存：连接失败" }
-            renderWriter()
-        }
+        PlaybackWriterClient(id, writerSession, label, WriterTransport(app.api))
     }
 
     private fun renderWriter() {
-        val w = writer ?: run { if (!legacyFenced) { ui.progressStatus = ""; ui.progressTakeover = null }; return }
+        val w = writers.writer ?: run { if (!writers.legacyFenced) { ui.progressStatus = ""; ui.progressTakeover = null }; return }
         val owner = w.conflict?.device ?: "另一设备"
         ui.progressStatus = when (w.status) {
             PlaybackWriterClient.Status.WRITING -> if (w.unsaved) "进度未保存：连接失败，播放继续" else ""
@@ -263,38 +263,19 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    /** open on an explicit Play/Resume; takeover/reacquire only from the visible button with the generation shown. */
-    private fun claimWriter(mode: PlaybackWriterClient.Mode, expected: Long?) {
-        val w = writer ?: return
-        if (writerClaiming) return
-        writerClaiming = true
-        lifecycleScope.launch {
-            try {
-                val r = w.claim(mode, expected)
-                renderWriter()
-                if (r.ok) saveProgress()
-            } catch (e: Exception) {
-                ui.progressStatus = "进度未保存：连接失败"
-            } finally { writerClaiming = false }
-        }
-    }
-
     /** A definite user Play/Resume on the current media, registered BEFORE the player is told to play. */
-    private fun writerIntent() { playIntent.arm(media, player.isPlaying) }
+    private fun writerIntent() { writers.intent.arm(media, player.isPlaying) }
 
     /** The last snapshot captured on this thread and sent even if the activity is destroyed first; its answer updates nobody. */
     private fun finalProgress() {
-        val w = writer ?: run { saveProgress(); return }
-        if (!played) return
+        if (writers.writer == null) { saveProgress(); return }
         val d = player.duration
-        if (d == MediaC.TIME_UNSET || d <= 0) return
+        if (!played || d == MediaC.TIME_UNSET || d <= 0) { writers.stopWriting(); return }   // nothing to snapshot, but writing stops now
         val pos = player.currentPosition / 1000.0
         val delta = pos - lastSaved
         val playing = player.isPlaying && delta > 0 && delta < 35
         lastSaved = pos
-        val job = w.final(pos, d / 1000.0, playing)
-        app.scope.launch { try { job() } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { } }
-        renderWriter()
+        writers.final(pos, d / 1000.0, playing, app.scope)
     }
 
     private fun loadDanmu() {
@@ -354,10 +335,7 @@ class PlayerActivity : ComponentActivity() {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             ui.playing = isPlaying
             if (isPlaying) played = true
-            // Autoplay and buffering resumes never claim; one explicit Play/Resume for this media is consumed by its first real playback.
-            if (isPlaying && playIntent.consume(media)) writer?.let { w ->
-                if (w.status != PlaybackWriterClient.Status.WRITING) claimWriter(PlaybackWriterClient.Mode.OPEN, null)
-            }
+            writers.playingChanged(isPlaying)
             danmaku.wake()
         }
 
@@ -415,10 +393,7 @@ class PlayerActivity : ComponentActivity() {
             if (!starting) saveProgress()
         }
 
-        override fun takeoverProgress() {
-            val w = writer ?: return
-            claimWriter(PlaybackWriterClient.Mode.TAKEOVER, w.conflict?.generation ?: w.generation)
-        }
+        override fun takeoverProgress() = writers.takeover()
 
         override fun seekBy(millis: Long) {
             val d = player.duration.takeIf { it != MediaC.TIME_UNSET } ?: Long.MAX_VALUE
@@ -472,36 +447,14 @@ class PlayerActivity : ComponentActivity() {
 
     /** Only real playback moves the stored position, like the web player; opening or seeking never marks anything watched. */
     private fun saveProgress() {
-        val id = media ?: return
-        if (!played) return
+        if (writers.media == null || !played) return
         val d = player.duration
         if (d == MediaC.TIME_UNSET || d <= 0) return
         val pos = player.currentPosition / 1000.0
         val delta = pos - lastSaved
         val playing = player.isPlaying && delta > 0 && delta < 35
         lastSaved = pos
-        val duration = d / 1000.0
-        val w = writer
-        if (w != null) {   // v2 was negotiated: the legacy route is never used, even on failure
-            if (w.status != PlaybackWriterClient.Status.WRITING) { renderWriter(); return }
-            lifecycleScope.launch {   // the client serializes the sequence; the last packet goes through finalProgress()
-                w.progress(pos, duration, playing)   // transport faults are classified inside, never thrown
-                renderWriter()
-            }
-            return
-        }
-        if (legacyFenced) return   // a durable writer fence exists: this client must stop writing until a new session is negotiated
-        val body = JSONObject().put("position", pos).put("duration", duration).put("playing", playing)
-        lifecycleScope.launch {   // cancelled with the activity: no UI callback outlives it
-            if (legacyFenced || media != id) return@launch   // re-checked when the queued coroutine actually starts
-            try {
-                app.api.post("/api/web/media/$id/progress", body)
-                if (!legacyFenced) ui.progressStatus = ""     // an old success never clears a fence that arrived meanwhile
-            } catch (e: ApiError) {   // visible, never swallowed
-                if (PlaybackWriterClient.legacyFenced(e.code, e.details)) { legacyFenced = true; ui.progressStatus = "进度未保存：需要新的播放会话或版本支持" }
-                else if (!legacyFenced) ui.progressStatus = "进度未保存：连接失败"
-            }
-        }
+        writers.save(pos, d / 1000.0, playing)   // the last packet of a writer goes through finalProgress()
     }
 
     // Activity's public event hook is intentional: TV key-up/hold handling must run
@@ -556,7 +509,7 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        writer?.dispose()   // late answers become inert; the final progress already left through app.scope
+        writers.dispose()   // late answers become inert; the final progress already left through app.scope
         danmuJob?.cancel()
         playerView.player = null
         player.removeListener(listener)
