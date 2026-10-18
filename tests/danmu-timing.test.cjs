@@ -44,3 +44,25 @@ test('blocked users are deduplicated, bounded and stripped of junk', () => {
 test('mixed comments remember which site their sender id belongs to', () => {
   assert.deepEqual(mix([{site:'bilibili',comments:[comment(1)]},{comments:[comment(2,'other')]}]).map(c=>c.site),['bilibili',undefined]);
 });
+
+test('scheduler coalesces a burst into one remix and runs again for requests made during a run', async () => {
+  const {createScheduler} = require('../static/danmu-timing.js');
+  let runs = 0, release;
+  const schedule = createScheduler(() => new Promise(resolve => { runs++; release = () => resolve(runs); }), 5);
+  const burst = [schedule(), schedule(), schedule()];
+  assert.equal(runs, 0);                       // nothing runs synchronously
+  await new Promise(r => setTimeout(r, 15));
+  assert.equal(runs, 1);                       // the burst shares one run
+  const late = schedule();                     // requested while run 1 is in progress
+  release();
+  assert.deepEqual(await Promise.all(burst), [1, 1, 1]);
+  await new Promise(r => setTimeout(r, 15));
+  assert.equal(runs, 2);                       // the late request got its own run after the first
+  release();
+  assert.equal(await late, 2);
+});
+
+test('dedupe key treats equal time/text/mode as one comment and keeps distinct modes', () => {
+  const rows = mix([{offset:0,comments:[comment(10,'a'),comment(10.04,'a'),{...comment(10,'a'),mode:1}]}]);
+  assert.deepEqual(rows.map(c=>[c.time,c.mode]),[[10,0],[10,1]]);
+});

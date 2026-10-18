@@ -71,7 +71,7 @@
   const alignment = DanmuAlignment.create({
     request: (path, body, options) => web(`/media/${id}/alignment${path}`, body, options),
     present: source => selected.includes(source), save: saveTiming,
-    render: () => { if (!document.activeElement?.matches('#danmu-selected input')) renderSelected(); }, apply: applyDanmu,
+    render: () => { if (!document.activeElement?.matches('#danmu-selected input')) renderSelected(); }, apply: () => applyDanmu(),
   });
   function alignSource(source, options) {
     if (sourceOnly) return;
@@ -476,7 +476,7 @@
 
   /* ---------- danmu ---------- */
 
-  async function applyDanmu() {
+  async function remixDanmu() {
     if (!art) return;
     comments = DanmuTiming.mix(selected, 0, art.duration);
     replaceDanmu ||= DanmuTiming.createReplacer(art.plugins.artplayerPluginDanmuku);
@@ -484,6 +484,8 @@
     await replaceDanmu(comments);
     renderNote();
   }
+  // Every caller shares one remix per 50 ms window (source loads, auto-match, alignment, nudges).
+  const applyDanmu = DanmuTiming.createScheduler(remixDanmu);
   function renderNote() {
     const failures=selected.filter(s=>s.error).length, n=listRows.length;
     $('#danmu-note').textContent = failures ? (n ? `${n} 条 · 有失败` : '来源失败') : `${n} 条`;

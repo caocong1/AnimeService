@@ -21,6 +21,16 @@
     }
     return out.sort((a,b) => a.time - b.time);
   }
+  /* Coalesce a burst of apply requests (each source load, auto-match, alignment results, rapid nudges)
+     into one remix per window; every caller gets the promise of that shared run. A request made while a
+     run is in progress starts one more run after it, so the latest state is always applied. */
+  function createScheduler(run, delay = 50) {
+    let queued = null;
+    return () => {
+      queued ||= new Promise(resolve => setTimeout(resolve, delay)).then(() => { queued = null; return run(); });
+      return queued;
+    };
+  }
   function createReplacer(plugin) {
     let pending = Promise.resolve();
     return rows => {
@@ -73,7 +83,7 @@
       .map(u => ({id:u.id, text:typeof u.text === 'string' ? u.text.slice(0,60) : '',
         ...(['bilibili','bahamut'].includes(u.site) ? {site:u.site} : {})}));
   }
-  const api = {settings, mix, createReplacer, savedSources, playerSettings, blockedUsers, FONTS};
+  const api = {settings, mix, createScheduler, createReplacer, savedSources, playerSettings, blockedUsers, FONTS};
   if (typeof module !== 'undefined') module.exports = api;
   else root.DanmuTiming = api;
 })(globalThis);
