@@ -100,9 +100,10 @@ foreach($sid in @($current,$system)) {
   $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
 }
 [IO.Directory]::SetAccessControl($target,$acl)
-$actual=Get-Acl -LiteralPath $target
+$actual=[IO.Directory]::GetAccessControl($target)
 $rules=@($actual.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
-$expected=@($current.Value,$system.Value) | Sort-Object -Unique
+$expected=@($current.Value)
+if($system.Value -notin $expected) {$expected+=$system.Value}
 if(-not $actual.AreAccessRulesProtected -or $rules.Count -ne $expected.Count) {throw 'ticket ACL protection failed'}
 foreach($rule in $rules) {
   if($rule.IdentityReference.Value -notin $expected -or $rule.AccessControlType -ne 'Allow' -or $rule.FileSystemRights -ne 'FullControl') {throw 'unexpected ticket ACL'}
@@ -235,6 +236,13 @@ def main():
             from anime.subtitle_refinement import enqueue_refinement
             result = enqueue_refinement(delivery, args.job_id) or {'status': 'preserved_or_not_eligible'}
         elif args.command == 'begin':
+            # Fail before claiming a lease or committing intent when ticket ACL
+            # preparation is unavailable. save_ticket verifies it again at write.
+            ticket_dir = Path(args.db).resolve().parent / 'subtitle-delivery-tickets'
+            ticket_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if ticket_dir.resolve() != ticket_dir or ticket_dir.is_symlink():
+                raise ValueError('ticket directory must not be a redirected path')
+            protect_ticket_directory(ticket_dir)
             current=delivery.get(args.job_id)
             if current['dispatch_state']=='blocked-stopped':
                 lease=delivery.resume(args.job_id,current['thread_id'],args.owner,args.revision,

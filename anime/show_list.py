@@ -28,12 +28,13 @@ class ShowListSnapshot:
                     marks=','.join('?' for _ in batch)
                     yield from (dict(r) for r in c.execute(sql.format(marks=marks),batch))
             for e in related('''SELECT e.show_id,e.episode,e.status,e.progress,e.first_completed,e.path,e.size,
-                t.title source_task_title,t.selection source_task_selection FROM episodes e
+                t.title source_task_title,t.selection source_task_selection,t.status task_status,t.error task_error FROM episodes e
                 LEFT JOIN tasks t ON t.hash=e.hash WHERE e.show_id IN ({marks})''',ids):
                 self.episodes[e['show_id']].append(e)
-            kv_keys=['resolution','subtitle','groups',KEY,*(f'airing_sort_offset_{sid}' for sid in ids)]
+            kv_keys=['resolution','subtitle','groups',KEY,'download_gaps',*(f'airing_sort_offset_{sid}' for sid in ids)]
             kv={r['key']:json.loads(r['value']) for r in related('SELECT key,value FROM kv WHERE key IN ({marks})',kv_keys)}
             self.settings={key:kv.get(key) for key in ('resolution','subtitle','groups')}
+            self.download_gaps=kv.get('download_gaps',{})
             for sid,eps in list(self.episodes.items()):
                 visible=[]
                 for e in eps:

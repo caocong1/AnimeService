@@ -331,6 +331,7 @@ tr.is-error td { color: var(--danger); }
 .side-item .cover { width: 36px; }
 .side-item .name { font-size: var(--text-s); font-weight: var(--weight-strong); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .side-item .sub { font-size: var(--text-xs); color: var(--muted); display: flex; flex-wrap: wrap; gap: 0 8px; }
+.side-item .download-reason { flex-basis: 100%; margin-top: 4px; line-height: 1.5; overflow-wrap: anywhere; }
 .side-item .date { font-family: var(--num); font-size: var(--num-s); font-weight: 600; min-width: 56px; }
 .side-item .bar-p { height: 3px; background: var(--line); margin-top: 4px; }
 .side-item .bar-p i { display: block; height: 100%; width: var(--p); background: var(--signal); }

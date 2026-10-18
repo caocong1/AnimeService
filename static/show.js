@@ -13,9 +13,9 @@
   function epInfo(e, raw) {
     if (e.release) return '自制字幕 · ' + FinishedReleases.label(e.release) + (e.s === 'resume' ? ` · 看到 ${clock(e.position)}` : '');
     if (e.s === 'resume') return `<span class="track" style="--p:${Math.round(e.position / e.duration * 100)}%"><i></i></span><span class="num">${clock(e.position)} / ${clock(e.duration)}</span>`;
-    if (e.s === 'downloading') return `<span class="track" style="--p:${e.progress}%"><i></i></span><span class="num">${e.progress}%</span>`;
+    if (e.s === 'downloading') return `<span class="track" style="--p:${e.progress}%"><i></i></span><span class="num">${e.progress}%</span>${e.download ? '<span>' + esc(e.download.reason) + '</span>' : ''}`;
     if (e.s === 'future') return e.date ? `${airDate(e.date)} 播出` : '';
-    if (e.s === 'missing') return raw && TASKS[raw.status] ? TASKS[raw.status] : '已播出，未找到资源';
+    if (e.s === 'missing') return e.download ? esc(e.download.reason) + (e.download.source_error ? '；部分查源失败：' + esc(e.download.source_error) : '') + (e.download.retry_at ? ' · ' + new Date(e.download.retry_at * 1000).toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}) + ' 自动重试' : '') : raw && TASKS[raw.status] ? TASKS[raw.status] : '后台正在检查本集资源';
     if (e.s === 'aired') return '已播出';
     if (raw?.watch_method) return raw.watch_method === 'manual' ? '手动标记' : '播放器同步';
     return '';

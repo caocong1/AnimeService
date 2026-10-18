@@ -154,8 +154,9 @@ class Engine:
             require_submission_ready(self.db)
             blocked=fidelity_blocker(self.db,candidate['title'])
             if blocked:raise Rejected(blocked)
-            if not self.source_review.permits(candidate):
-                self.db.execute("UPDATE candidates SET status='source_wait',reason='等待首集选源评审或主源发布窗口' WHERE id=?",(candidate['id'],));return
+            decision=self.source_review.decision(candidate,ordinary=True)
+            if not decision['allowed']:
+                self.db.execute("UPDATE candidates SET status='source_wait',reason=? WHERE id=?",(decision['reason'],candidate['id']));return
             reviewed=self.source_review.policy(sid).get('mode')=='selected'
             title_eps=validate_title(candidate['title'],m,self.settings(),quality=not reviewed)
             wanted=[ep for ep in title_eps if self.db.allowed(sid,ep) and not self.db.one('SELECT 1 FROM episodes WHERE show_id=? AND episode=?',(sid,ep))]
@@ -173,8 +174,9 @@ class Engine:
             with self.db.gate:
                 # Network fetch happened outside the gate. Re-read current intent and reservations now.
                 if not self.db.eligible(sid):return
-                if not self.source_review.permits(candidate):
-                    self.db.execute("UPDATE candidates SET status='source_wait',reason='等待首集选源评审或主源发布窗口' WHERE id=?",(candidate['id'],));return
+                decision=self.source_review.decision(candidate,ordinary=True)
+                if not decision['allowed']:
+                    self.db.execute("UPDATE candidates SET status='source_wait',reason=? WHERE id=?",(decision['reason'],candidate['id']));return
                 blocked=fidelity_blocker(self.db,candidate['title'],{'files':files,'ids':ids})
                 if blocked:raise Rejected(blocked)
                 self.check_legacy_owner(sid)
@@ -470,6 +472,8 @@ class Engine:
                 except Exception:pass # Genuine mismatches remain stopped and preserved.
             try:self.reconcile()
             except Exception as e:self.db.set('qbit_health',{'ok':False,'time':time.time(),'error':safe_error(e)})
+            from .download_gaps import reconcile_missing
+            self.step('downloads.missing',lambda:reconcile_missing(self))
             self.step('source_review.publish_available',self.source_review.publish_available)
             self.step('source_review.tick',self.source_review.tick)
             self.step('subtitle_studio.tick',self.subtitle_studio.tick)

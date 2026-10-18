@@ -15,7 +15,7 @@
   const all = params.get('view') === 'all' || params.has('q') || Object.hasOwn(STATES, params.get('state'));
   shell(all ? 'following' : 'home');
   const ACTIVE = new Set(['watching', 'trial', 'wish']);
-  let shows = [], filter = '', query = '', page = 1, pageSize = 20, stopObserving;
+  let shows = [], filter = '', query = '', page = 1, pageSize = 20, stopObserving, loading = false, lastLoad = 0;
   function readUrl() {
     const p = new URLSearchParams(location.search);
     filter = Object.hasOwn(STATES, p.get('state')) ? p.get('state') : '';
@@ -78,8 +78,13 @@
       const dl = (s.eps || []).filter(e => e.s === 'downloading'), miss = (s.eps || []).filter(e => e.s === 'missing').map(e => e.n);
       if (dl.length || miss.length) {
         const parts = dl.map(e => `第 ${e.n} 集 ${e.progress}%`);
-        if (miss.length) parts.push(`<span class="warn-line">缺 ${ranges(miss)}</span>`);
-        coming.push(sideItem(s, cover(s.image, s.title), parts.join(' · '), dl.length ? `<span class="bar-p" style="--p:${dl[0].progress}%"><i></i></span>` : ''));
+        if (miss.length) parts.push(`<span class="warn-line">缺第 ${ranges(miss)}</span>`);
+        const notes = (s.eps || []).filter(e => ['missing', 'downloading'].includes(e.s) && e.download).map(e => {
+          const x = e.download, checked = x.checked_at ? new Date(x.checked_at * 1000).toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'}) : '';
+          const retry = x.retry_at ? new Date(x.retry_at * 1000).toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}) : '';
+          return `<span class="download-reason">第 ${e.n} 集：${esc(x.reason)}${x.source_error ? '；部分查源失败：' + esc(x.source_error) : ''}${retry ? ' · ' + retry + ' 自动重试' : ''}${checked ? ' · ' + checked + ' 检查' : ''}</span>`;
+        }).join('');
+        coming.push(sideItem(s, cover(s.image, s.title), parts.join(' · ') + notes, dl.length ? `<span class="bar-p" style="--p:${dl[0].progress}%"><i></i></span>` : ''));
       }
       const aired = (s.eps || []).some(e => e.s !== 'future');
       if (!aired && s.air_date > today()) upcoming.push(s);
@@ -155,7 +160,9 @@
     if (e.target.closest('#retry')) load();
   });
 
-  async function load() {
+  async function load(background = false) {
+    if (loading) return;
+    loading = true;
     try {
       await boot();
       const forced = params.get('state');
@@ -165,6 +172,7 @@
       if (forced === 'empty-first') { list.length = 0; home.resume = []; }
       const scheduled = await applyListAiringSchedules(list);
       shows = FinishedReleases.applyList(scheduled, releases);
+      lastLoad = Date.now();
       const lastPlayed = {};
       for (const r of home.resume) lastPlayed[r.show_id] = Math.max(lastPlayed[r.show_id] || 0, r.progress.last_played);
       stopObserving?.();
@@ -177,13 +185,18 @@
       if (all) { renderShelf(); return; }
       render(lastPlayed);
     } catch (e) {
+      if (background) return;
       $('#shelf-section').hidden = true;
       $('#watch-board').hidden = false;
       $('#side').innerHTML = '';
       $('#screens').innerHTML = `<div class="empty"><h2>连不上后台</h2><p>${esc(e.message)}</p><button class="btn" type="button" id="retry">重试</button></div>`;
-    }
+    } finally { loading = false; }
   }
   load();
+  const refresh = () => { if (!document.hidden && Date.now() - lastLoad > 10000) load(true); };
+  setInterval(refresh, 60000);
+  addEventListener('focus', refresh);
+  document.addEventListener('visibilitychange', refresh);
   addEventListener('pageshow', e => { if (e.persisted) { readUrl(); load(); } });
   addEventListener('popstate', () => { readUrl(); if (all) renderShelf(); });
 })();

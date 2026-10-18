@@ -1,5 +1,5 @@
 """Operator exits for the delivery queue: a lease that never dispatched can be handed back; verified absence is recorded with its evidence."""
-import importlib.util,json,sys
+import importlib.util,json,sys,os,base64
 from pathlib import Path
 import pytest
 from test_subtitle_delivery import delivery,begin
@@ -39,6 +39,47 @@ def test_begin_cli_hands_the_lease_back_when_dispatch_cannot_start(delivery,monk
     payload=json.loads(str(stop.value))
     assert payload['lease_released'] is True and payload['state']=='ready' and 'Exact ready inputs changed' in payload['error']
     assert scheduler.get(identity)['lease_owner']=='' and events(db,identity,'lease-released')[0]['reason'].startswith('begin failed')
+
+
+def test_begin_acl_failure_does_not_claim_or_commit(delivery,monkeypatch):
+    db,scheduler,ready,now=delivery
+    identity=scheduler.episode_id(42,1);before=scheduler.get(identity)
+    monkeypatch.setattr(queue_cli,'ControlStore',lambda path:db)
+    monkeypatch.setattr(queue_cli,'SubtitleDelivery',lambda store,initialize=True:scheduler)
+    def unavailable(path):
+        raise ValueError('cannot secure the ticket directory')
+    monkeypatch.setattr(queue_cli,'protect_ticket_directory',unavailable)
+    monkeypatch.setattr(sys,'argv',['queue','--db',str(db.path),'begin',identity,'--owner','cli-owner','--revision',str(before['revision'])])
+    with pytest.raises(ValueError,match='cannot secure'):
+        queue_cli.main()
+    assert scheduler.get(identity)==before
+    assert events(db,identity,'reserved')==[]
+    assert events(db,identity,'dispatch-started')==[]
+
+
+@pytest.mark.skipif(os.name!='nt',reason='Windows ticket ACL integration')
+def test_windows_ticket_acl_ignores_parent_powershell_modules(tmp_path,monkeypatch):
+    # Windows PowerShell 5 can inherit PowerShell 7's incompatible module path.
+    # Ticket protection/readback must work without loading Security/Utility.
+    monkeypatch.setenv('PSModulePath',str(tmp_path/'no-modules'))
+    ticket_dir=tmp_path/'tickets';ticket_dir.mkdir()
+    queue_cli.protect_ticket_directory(ticket_dir)
+    encoded_path=base64.b64encode(str(ticket_dir).encode()).decode()
+    script=(
+        "$ErrorActionPreference='Stop'; "
+        f"$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_path}')); "
+        "$a=[IO.Directory]::GetAccessControl($p); if(-not $a.AreAccessRulesProtected) {exit 1}; "
+        "$r=@($a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])); "
+        "$u=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+        "if($r.Count -lt 1) {exit 3}; "
+        "foreach($x in $r) {if($x.IdentityReference.Value -notin @($u,'S-1-5-18') -or "
+        "$x.AccessControlType -ne 'Allow' -or $x.FileSystemRights -ne 'FullControl') {exit 2}}"
+    )
+    result=queue_cli.subprocess.run([
+        str(Path(os.environ['SystemRoot'])/'System32/WindowsPowerShell/v1.0/powershell.exe'),
+        '-NoProfile','-NonInteractive','-EncodedCommand',
+        base64.b64encode(script.encode('utf-16le')).decode()],capture_output=True)
+    assert result.returncode==0,result.stderr
 
 
 def test_not_created_requires_evidence_and_keeps_it_with_the_receipt(delivery,tmp_path,monkeypatch,capsys):

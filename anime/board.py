@@ -6,7 +6,8 @@ from .source_blacklist import media_filter
 # watched > resume > ready > downloading > missing > aired > future
 def episode_board(db,engine,s,*,snapshot=None,gaps=None):
     sid=s['id'];today=datetime.date.today().isoformat()
-    eps={e['episode']:e for e in (getattr(snapshot,'board_episodes',snapshot.episodes)[sid] if snapshot is not None else db.rows('SELECT episode,status,progress,path,size,hash FROM episodes WHERE show_id=?',(sid,)))}
+    eps={e['episode']:e for e in (getattr(snapshot,'board_episodes',snapshot.episodes)[sid] if snapshot is not None else db.rows('''SELECT e.episode,e.status,e.progress,e.path,e.size,e.hash,t.status task_status,t.error task_error
+        FROM episodes e LEFT JOIN tasks t ON t.hash=e.hash WHERE e.show_id=?''',(sid,)))}
     if snapshot is not None:blocked=snapshot.blocked_episodes.get(sid,set())
     else:
         is_blocked=media_filter(db)
@@ -26,6 +27,7 @@ def episode_board(db,engine,s,*,snapshot=None,gaps=None):
     except Exception:missing=set()
     last=max([s['total'] or 0,*eps,*watched,*airings,*missing,0])
     out=[];next_ep=None
+    diagnostics=(getattr(snapshot,'download_gaps',{}) if snapshot is not None else db.get('download_gaps',{})).get('shows',{}).get(str(sid),{})
     for n in range(1,last+1):
         e=eps.get(n);item={'n':n}
         if n in blocked:e=None
@@ -46,6 +48,16 @@ def episode_board(db,engine,s,*,snapshot=None,gaps=None):
         else:
             item['s']='future'
             if airings.get(n):item['date']=airings[n]
+        if item['s']=='missing' and str(n) in diagnostics:item['download']=diagnostics[str(n)]
+        if item['s'] in ('missing','downloading') and e:
+            status=e.get('task_status');error=e.get('task_error')
+            reason=error or {'intent':'下载提交回执待确认；后台先按 hash 对账，避免重复提交',
+                'review':'下载任务需要核验，保留原任务及回执','held':'下载任务已保留，等待授权条件恢复'}.get(status)
+            if reason:item['download']={'code':'task_'+str(status),'reason':reason}
+            elif e['status'] in ('file_missing','error'):
+                item['download']={'code':e['status'],'reason':'下载文件缺失或下载器报错；后台正在核验原任务'}
+        if item['s']=='missing' and e and e['status']=='complete':
+            item['download']={'code':'file_missing','reason':'已登记的文件缺失或大小改变；保留原记录，等待核验'}
         out.append(item)
     for item in out:
         if item['s'] in ('resume','ready'):next_ep=item;break

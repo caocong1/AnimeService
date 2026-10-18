@@ -32,6 +32,12 @@ def family(title):
             'processing':processing_flags(title)}
 
 
+def transported_title(title):
+    # Only neutral transport wrappers, followed by an explicit publisher.
+    # Never treat an arbitrary first group as a wrapper or rewrite stored keys.
+    return re.sub(r'^\s*(?:\[(?:搬运|搬運|转载|轉載)\]\s*)+(?=\[[^\]]+\])','',title)
+
+
 def cues(text):
     result=[]
     for block in re.split(r'\r?\n\s*\r?\n',text):
@@ -651,43 +657,91 @@ class SourceReview:
             else:
                 self.store_premiere(con,(sid,t['hash'],f['index'],str(dest/f['name']),f['size'],time.time()),excluded_previous)
         self.db.event('source:'+str(sid),'完成首集已自动加入追番播放；评分继续，尚未确认最佳主源' if provisional else '已按明确操作切换首集至完成样本，原文件和观看历史保留' if old else '已确认主源；首集复用完成样本归库，未重复下载')
-    def permits(self,c):
+    def matches_family(self,c,key):
+        if not key:return False
+        title=c['title']
+        canonical=family(transported_title(title))['key']
+        if key==canonical:return True
+        known={family(transported_title(r['title']))['key'] for r in self.db.rows(
+            'SELECT c.title FROM source_samples s JOIN candidates c ON c.id=s.candidate_id WHERE s.show_id=? AND s.family=?',
+            (c['show_id'],key))}
+        # Old neutral-wrapper keys may have merged multiple publishers. Such
+        # ambiguous history cannot qualify a new publisher automatically.
+        return len(known)==1 and canonical in known
+    def use_backup_now(self,sid,episode):
+        """Explicit single-episode request; keep the permanent source policy."""
+        with self.db.gate:
+            if type(episode) is not int or not self.db.review_wanted(sid) or not self.db.eligible(sid) or not self.db.allowed(sid,episode):raise ValueError('本集不在有效下载授权范围')
+            if self.db.one('SELECT 1 FROM watches WHERE show_id=? AND episode=? AND finished=1',(sid,episode)):raise ValueError('已看集不自动补下')
+            if self.db.one('SELECT 1 FROM episodes WHERE show_id=? AND episode=?',(sid,episode)):raise ValueError('本集已有任务，先核验原回执')
+            cfg=self.policy(sid)
+            if cfg.get('mode')!='selected' or not cfg.get('backups'):raise ValueError('没有已评审备源')
+            available=[]
+            for c in self.db.rows('''SELECT c.* FROM candidates c JOIN sources s ON s.id=c.source_id
+                WHERE c.show_id=? AND s.enabled=1 AND c.status IN ('discovered','retry','source_wait')''',(sid,)):
+                try:eps=validate_title(c['title'],candidate_mapping(self.db.mapping(sid),c),{},False)
+                except Rejected:continue
+                if eps==[episode] and not fidelity_blocker(self.db,c['title']) and any(self.matches_family(c,k) for k in cfg['backups']):available.append(c['id'])
+            if not available:raise ValueError('尚未发现本集已评审备源的有效候选')
+            receipt={'episode':episode,'primary':cfg['primary'],'backups':cfg['backups'],'requested_at':time.time(),'candidates':available}
+            self.db.set(f'download_backup_now_{sid}_{episode}',receipt)
+            self.db.event('source:'+str(sid),f'用户要求立即补缺：仅第 {episode} 集提前启用已评审备源；长期选源政策保留')
+            self.engine.wake.set()
+            return receipt
+    def decision(self,c,*,ordinary=False):
+        def result(code,reason='',allowed=False):return {'code':code,'reason':reason,'allowed':allowed}
         cfg=self.policy(c['show_id'])
+        blocked=blacklist_blocker(self.db.get(BLACKLIST_KEY,[]),c['title']) or fidelity_blocker(self.db,c['title'])
+        if blocked:return result('source_excluded',blocked)
         if cfg.get('mode')=='subtitle_only':
-            return not fidelity_blocker(self.db,c['title'])
-        if clean_blocker(self.db,c):return False
-        if fidelity_blocker(self.db,c['title']):return False
-        if not cfg:return True
+            return result('ordinary_ready',allowed=True)
+        from .viewing_workflow import enabled,lane
+        ordinary_watching=ordinary and enabled(self.db) and lane(self.db,c['show_id'])=='watching'
+        blocked=clean_blocker(self.db,c)
+        if blocked and not ordinary_watching:return result('clean_base_required',blocked)
+        if not cfg:return result('ordinary_ready',allowed=True)
         if cfg.get('mode')=='sampling':
-            return bool(self.db.get('play_completed_premiere_enabled',False) and self.db.review_wanted(c['show_id'])
-                        and cfg.get('playback_family')==family(c['title'])['key']
-                        and self.db.one("SELECT 1 FROM episodes WHERE show_id=? AND episode=1 AND status='complete'",(c['show_id'],)))
-        if cfg.get('mode')!='selected':return True
-        key=family(c['title'])['key'];primary=cfg['primary'];backups=cfg.get('backups',[])
-        if key==primary:return True
-        if key not in backups:return False
+            if (self.db.get('play_completed_premiere_enabled',False) and self.db.review_wanted(c['show_id'])
+                    and self.matches_family(c,cfg.get('playback_family'))
+                    and self.db.one("SELECT 1 FROM episodes WHERE show_id=? AND episode=1 AND status='complete'",(c['show_id'],))):
+                return result('provisional_ready','沿用现有临时播放源；首集评审继续',True)
+            return result('source_review_pending','首集主备选源尚未完成；当前候选不属于临时播放源')
+        if cfg.get('mode') not in ('selected','sampling','subtitle_only'):
+            return result('policy_hold','选源政策暂停或需人工核查')
+        primary=cfg['primary'];backups=cfg.get('backups',[])
+        if self.matches_family(c,primary):return result('primary_ready',allowed=True)
+        key=next((k for k in backups if self.matches_family(c,k)),None)
+        if key is None:
+            return result('no_qualified_backup','等待已选主源；当前候选未列入已评审备源'+('，尚未设置备源' if not backups else ''))
         sid=c['show_id'];ep=validate_title(c['title'],self.db.mapping(sid),{},False)
-        if len(ep)!=1:return False
+        if len(ep)!=1:return result('episode_ambiguous','备源需明确单集，合集须另核选集')
         # A primary release that is already known gets the slot before a backup.
         rows=self.db.rows('SELECT title,published,discovered FROM candidates WHERE show_id=?',(sid,))
         valid=[]
         for r in rows:
-            if fidelity_blocker(self.db,r['title']):continue
+            if fidelity_blocker(self.db,r['title']) or blacklist_blocker(self.db.get(BLACKLIST_KEY,[]),r['title']):continue
             try:
                 if validate_title(r['title'],self.db.mapping(sid),{},False)==ep:valid.append(r)
             except Rejected:continue
-        if any(family(r['title'])['key']==primary for r in valid):return False
+        if any(self.matches_family({'show_id':sid,**r},primary) for r in valid):
+            return result('primary_available','已发现主源，本集优先由主源入队')
         earliest=min((r['discovered'] for r in valid),default=time.time())
         air=cfg.get('airing_epoch')
         expected=air+(ep[0]-1)*cfg.get('interval_hours',168)*3600 if air else earliest
-        if time.time()<expected+cfg.get('wait_hours',24)*3600:return False
+        immediate=self.db.get(f'download_backup_now_{sid}_{ep[0]}',{}) if ordinary else {}
+        expedited=immediate.get('episode')==ep[0] and immediate.get('primary')==primary and immediate.get('backups')==backups
+        if not expedited and time.time()<expected+cfg.get('wait_hours',24)*3600:
+            return {**result('primary_window','等待主源发布窗口；到期后自动尝试已评审备源'),
+                    'retry_at':expected+cfg.get('wait_hours',24)*3600}
         for higher in backups[:backups.index(key)]:
-            if any(family(r['title'])['key']==higher for r in valid):return False
-        self.db.event('source:'+str(sid),f'主源本集逾期，使用已评审替补：{family(c["title"])["label"]}')
-        return True
+            if any(self.matches_family({'show_id':sid,**r},higher) for r in valid):
+                return result('higher_backup','等待优先级更高的已评审备源入队')
+        return result('backup_ready','按用户本集补缺要求提前使用已评审备源' if expedited else '主源逾期，使用已评审备源',True)
+    def permits(self,c,*,ordinary=False):
+        return self.decision(c,ordinary=ordinary)['allowed']
     def priority(self,c):
-        cfg=self.policy(c['show_id']);order=[cfg.get('primary')]+cfg.get('backups',[]);key=family(c['title'])['key']
-        return order.index(key) if key in order else 99
+        cfg=self.policy(c['show_id']);order=[cfg.get('primary') or cfg.get('playback_family')]+cfg.get('backups',[])
+        return next((i for i,key in enumerate(order) if self.matches_family(c,key)),99)
 
 
 def register_source_review(app,engine):
@@ -713,6 +767,8 @@ def register_source_review(app,engine):
         review.record_review(sid,int(p['candidate_id']),p['review']);return {'ok':True}
     @app.post('/api/shows/{sid}/source-review/choose')
     def choose(sid:int,p:dict):return review.choose(sid,p['primary'],p.get('backups',[]),p.get('wait_hours',24),p.get('replace_first_hash'))
+    @app.post('/api/shows/{sid}/source-review/backup-now')
+    def backup_now(sid:int,p:dict):return review.use_backup_now(sid,p.get('episode'))
     @app.get('/api/shows/{sid}/source-review/{cid}/file/{name}')
     def artifact(sid:int,cid:int,name:str):
         sample=review.db.one('SELECT * FROM source_samples WHERE candidate_id=? AND show_id=?',(cid,sid))

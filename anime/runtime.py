@@ -38,7 +38,7 @@ def health(db,now=None):
     worker=any(t.name=='anime-worker' and t.is_alive() for t in threading.enumerate())
     return {'service':'AnimeService','ok':age is not None and age<=max(600,3*db.get('poll_seconds',180)),'time':now,
             'pid':os.getpid(),'started_at':STARTED_AT,'uptime':round(now-STARTED_AT),'code_version':VERSION,
-            'python':sys.version.split()[0],'worker_thread':worker,
+            'python':sys.version.split()[0],'worker_thread':worker,'download_gap_reconciliation':3,
             'heartbeat':{'phase':heartbeat.get('phase'),'age':age},
             'maintenance_age':round(now-maintenance) if maintenance else None,
             'qbit':(db.get('qbit_health') or {}).get('ok'),'subtitle_studio':(db.get('subtitle_studio_health') or {}).get('ok'),

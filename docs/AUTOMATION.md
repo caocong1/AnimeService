@@ -35,6 +35,8 @@
 
 ## 卡住识别与恢复
 
+2026-10-18字幕制作停滞修复见 [中断恢复](SUBTITLE-STALL-RECOVERY.md)：区分应用轮次中断与宿主owner保护，用户明确恢复后沿原owner受控resume；不要长期以“acknowledged”代替实际进展。Pillow已补入依赖，票据ACL读回不再依赖PowerShell模块，begin在领取前先校验。单集制作期间继续准备下一未看集，但不抢制作槽。
+
 2026-10-15 两个调度曾在工具完成后停留模型 HTTP 等待；真实恢复经过应用精确 expectedTurnId 中断和 completed 手动压缩。不能以“思考中”标签推断一直有工作，也不能以 rollout 总大小等同当轮请求大小。
 
 `.codex/config.toml` 入库的两个设置为自动压缩阈值200,000 token、工具输出上限6,000 token；不设置模型、账号或网络。驻留旧线程未必立即载入新项目配置。不要为此自行重启应用。

@@ -1,5 +1,7 @@
 你是本集唯一字幕负责人。用户2026-10-15最新要求：先连续交付v0观看版，紧接着完成v1精校细调；画面字翻译、主动查找并制作OP/ED歌词、字幕位置避让和必要动效不能为了快省掉。先读docs/SUBTITLE-TWO-PASS.md、AGENTS.md最新顶部和docs/SUBTITLE-DELIVERY.md。此要求覆盖旧首版完成即结束安排；旧skill的全面accepted不作为v0门槛，未做的亲听不能冒充通过。
 
+2026-10-18停滞修复：使用项目.venv，开始制作前检查实际输出依赖，Pillow加载现用字体并测宽，ffmpeg/字体/浏览器通道不能仅凭旧报告假定仍可用。Pillow已纳入requirements和lock；缺依赖或工具错误保存实际stderr并明确报告具体阻塞，不无声结束。若是沿用户新恢复请求继续，先读docs/SUBTITLE-STALL-RECOVERY.md并核新turn及原owner确认，沿最后成功步骤续做；原v0存在但宿主未finished时先用真实回执补登记，然后继续v1，不重翻或覆盖旧版。
+
 2026-10-16日文来源更正：执行docs/SUBTITLE-JAPANESE-SOURCES.md及video-subtitle-studio的references/japanese-sources.md。准备、v0→v1与缺稿归档前逐集核本地轨/档案、Jimaku和用户指定页，下载实际原文核对白/身份/来源声明并保存SHA；检索失败不写成无字幕，已发现候选写待目标匹配。Netflix/ABEMA标签不是来源验真，明确ASR稿只作候选，ASS/SRT同文不算独立来源。跨平台按实际声画分段匹配，不能猜整集平移。交付明确对白日文覆盖/缺口，歌词或edition=v1不证明全双语；新材料复用中文稿沿原owner增量另存，不改活动播放/已看/默认/accepted。554779/E2已归档4份候选，先读data/subtitle-studio/jimaku-12682-verification-20261016/verification.json，不能再说未发现日文。
 
 2026-10-18时轴工具已接入：读docs/SUBTITLE-ALIGNMENT-HANDOFF.md，可用python -m anime.subtitle_alignment对本集已归档候选生成私有proposed提案。先核当前母片fingerprint、中文基稿和候选原文SHA、真实draft id以及本会话owner/未看状态，不能直接套用研究包旧映射。逐段实际声画核验，剪辑处检查完整candidate_range_ms和target_review_range_ms；时间覆盖、段偏移高置信及代表点都不算声音验收。只有实际审核通过才另存带真实reviewer/evidence/target_fingerprint的映射，并按说明交给原机独立核心；未核段保留待办，不自动accepted、不覆盖旧成品/工作稿或搬动观看进度，不因提案研究延迟v0→v1。

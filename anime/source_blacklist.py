@@ -6,7 +6,8 @@ KEY='source_publisher_blacklist'
 
 
 def publisher(text):
-    match=re.match(r'^\s*[\[【]([^\]】]+)',str(text))
+    text=re.sub(r'^\s*(?:\[(?:搬运|搬運|转载|轉載)\]\s*)+(?=\[[^\]]+\])','',str(text))
+    match=re.match(r'^\s*[\[【]([^\]】]+)',text)
     return unicodedata.normalize('NFKC',match[1]).strip().casefold() if match else ''
 
 

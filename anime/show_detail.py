@@ -22,7 +22,7 @@ class ShowDetailSnapshot:
             if not data:return
             self.shows[sid]=data[0]
             self.episodes[sid]=rows('''SELECT e.*,coalesce(w.finished,0) finished,w.method watch_method,
-                t.title source_task_title,t.selection source_task_selection
+                t.title source_task_title,t.selection source_task_selection,t.status task_status,t.error task_error
                 FROM episodes e LEFT JOIN watches w ON e.show_id=w.show_id AND e.episode=w.episode
                 LEFT JOIN tasks t ON t.hash=e.hash
                 WHERE e.show_id=? ORDER BY e.episode''')
@@ -30,10 +30,11 @@ class ShowDetailSnapshot:
             self.watched[sid]={w['episode'] for w in self.watches if w['finished']==1}
             self.sources=rows('SELECT * FROM sources WHERE show_id=?')
             self.candidates[sid]=rows('SELECT * FROM candidates WHERE show_id=? ORDER BY id DESC')
-            keys=['resolution','subtitle','groups',f'airing_sort_offset_{sid}',KEY]
+            keys=['resolution','subtitle','groups',f'airing_sort_offset_{sid}',KEY,'download_gaps']
             kv={r['key']:json.loads(r['value']) for r in rows(
-                'SELECT key,value FROM kv WHERE key IN (?,?,?,?,?)',keys)}
+                'SELECT key,value FROM kv WHERE key IN (?,?,?,?,?,?)',keys)}
             self.settings={key:kv.get(key) for key in keys[:3]}
+            self.download_gaps=kv.get('download_gaps',{})
             self.airings[sid]=Store.adjust_airings(json.loads(data[0]['mapping']),
                 rows('SELECT * FROM airings WHERE show_id=? ORDER BY episode'),kv.get(keys[3],0))
             self.candidates[sid]=[r for r in self.candidates[sid] if not blacklist_blocker(kv.get(KEY,[]),r['title'])]
@@ -52,5 +53,6 @@ class ShowDetailSnapshot:
                     self.progress[p['media_id']]=p
             self.board_episodes={sid:[dict(e) for e in self.episodes[sid]]}
             for e in self.episodes[sid]:
+                e.pop('task_status',None);e.pop('task_error',None)
                 p=self.progress.get(e['media_id'])
                 e['progress']={'position':p['position'],'duration':p['duration']} if p else None
