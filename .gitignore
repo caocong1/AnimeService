@@ -128,3 +128,4 @@
 !/scripts/verify_danmu_alignment_controls.cjs
 !/scripts/codex_dispatch.json
 !/docs/DISPATCH-ABSENCE-EVIDENCE.md
+!/scripts/codex_absence_verifier.py
