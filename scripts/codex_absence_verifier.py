@@ -421,17 +421,17 @@ def validate_output_directory(path):
     script = r"""$ErrorActionPreference='Stop'
 $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('PATH_BASE64'))
 $user=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$acl=Get-Acl -LiteralPath $p
-foreach($r in $acl.Access){
+$acl=[IO.Directory]::GetAccessControl($p)
+foreach($r in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
   if($r.AccessControlType -eq 'Allow'){
-    $sid=$r.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-    if($sid -ne $user -and $sid -ne 'S-1-5-18'){Write-Output "unexpected principal $($r.IdentityReference) ($sid) for user $user"; exit 3}
+    $sid=$r.IdentityReference.Value
+    if($sid -ne $user -and $sid -ne 'S-1-5-18'){Write-Output "unexpected principal $sid for user $user"; exit 3}
   }
 }
 """.replace('PATH_BASE64', encoded)
     argument = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
-    # The 64-bit Windows PowerShell by its full path, like the ticket-directory protection: the PATH-resolved
-    # powershell.exe on some hosts (GitHub's runner) cannot load Microsoft.PowerShell.Security for Get-Acl.
+    # The 64-bit Windows PowerShell by its full path, like the ticket-directory protection, and .NET access-control
+    # APIs only: on some hosts (GitHub's runner) cmdlet discovery cannot load Microsoft.PowerShell.Security for Get-Acl.
     powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
     result = subprocess.run([str(powershell),'-NoProfile','-NonInteractive','-EncodedCommand',argument],
                             capture_output=True, timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
