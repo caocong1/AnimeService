@@ -1,84 +1,92 @@
-# 派发"终态未创建"证据：宿主能力分析（研究侧提案，待 owner 审）
+# 派发“终态未创建”证据：宿主能力与只读采集边界
 
-`dispatch-receipt/v1` 的 `not_created` 需要"该次派发不可能再完成，且确实没有创建负责聊天"的终态证据；在可信核验器出现之前，服务层默认记 `receipt_accepted=0, reason=evidence_invalid` 并保持 committing（见 [DISPATCH-RECEIPT-CONTRACT.md](DISPATCH-RECEIPT-CONTRACT.md)）。本文只分析宿主（本机 Codex 桌面应用）能提供什么、哪些事实可证明、证据应长什么样；不实现、不改生产。表结构核对于 2026-10-18 的本机投影库，只读了结构与计数，没有读消息正文。
+Owner 第13轮审定（2026-10-18）。保留研究侧结构、状态集合与键名分析；以下区分观察事实、诊断推断与尚未获得的宿主保证。本轮仅落地文档，不实现采集器、不改生产或提示词。
+
+`dispatch-receipt/v1` 的 `not_created` 要求该次派发不可能再完成且没有创建负责聊天。当前生产未配置可信终态核验器，默认 `receipt_accepted=0, reason=evidence_invalid`，保持 committing。五项筛查全通过、人工签核或本机 SHA-256 均不改变此边界；见 [DISPATCH-RECEIPT-CONTRACT.md](DISPATCH-RECEIPT-CONTRACT.md)。
 
 ## 宿主可观察面
 
-Codex 把线程状态投影到 `~/.codex/` 下的 SQLite 文件；文件名带 schema 版本号（`state_5`、`thread_history_1`、`logs_2`），升级可能改表。
+研究侧于2026-10-18只读核对本机 `~/.codex/` 投影结构、计数、状态集合与键名，未读消息正文。文件名与字段属于内部实现，不构成跨版本 API。
 
 | 文件 | 表 | 与本题相关的列 |
 |---|---|---|
 | state_5.sqlite | `threads` | `id`、`created_at_ms`、`cwd`、`source`、`first_user_message`、`title`、`originator`、`archived` |
-| state_5.sqlite | `thread_spawn_edges` | `parent_thread_id`、`child_thread_id`、`status`（见到 `open`/`closed`） |
-| state_5.sqlite | `project_idempotency_keys` | 项目级幂等键；没有线程创建级别的幂等键 |
-| thread_history_1.sqlite | `thread_turns` | `thread_id`、`turn_id`、`status`（见到 `completed`/`failed`/`inProgress`/`interrupted`）、`error_json`、`started_at`、`completed_at`、`rollout_end_ordinal` |
+| state_5.sqlite | `thread_spawn_edges` | `parent_thread_id`、`child_thread_id`、`status`（见到 open/closed） |
+| state_5.sqlite | `project_idempotency_keys` | 观察到项目级幂等键；未在已检查投影中发现线程创建级幂等保证 |
+| thread_history_1.sqlite | `thread_turns` | `thread_id`、`turn_id`、`status`（见到 completed/failed/inProgress/interrupted）、`error_json`、`started_at`、`completed_at`、`rollout_end_ordinal` |
 | thread_history_1.sqlite | `thread_items` | `thread_id`、`turn_id`、`item_id`、`item_type`、`item_json`、`started_at_ms`、`completed_at_ms` |
-| thread_history_1.sqlite | `thread_history_projection_state` | `thread_id`、`next_rollout_ordinal`：投影消费到的位置 |
-| logs_2.sqlite | `logs` | `ts`、`thread_id`：最近活动 |
+| thread_history_1.sqlite | `thread_history_projection_state` | `thread_id`、`next_rollout_ordinal`：投影消费位置 |
+| logs_2.sqlite | `logs` | `ts`、`thread_id`：活动线索；静默不证明副作用结束 |
 
-调度线程创建/复用负责聊天时，宿主以 `mcpToolCall` 项记录调用：`tool ∈ {create_thread, send_message_to_thread, read_thread, list_threads, wait_threads}`，项内有 `id`、`status`、`error`、`durationMs`、`result.content`、`result.structuredContent`。没有看到"操作 id → 结果"的独立持久表；调用项的 `item_id` 是最接近宿主 operation id 的关联。
+研究侧识别出 mcpToolCall 项内 tool/status/error/result 等键及 create_thread、send_message_to_thread 等调用名。已检查投影未见“持久 operation id → 最终副作用结果”独立表；不能据此断言整个宿主不存在该能力。item_id 仅定位调用项。私有 IPC requestId 只关联请求响应，超时、断连、中断均不是副作用已取消的证明。
 
-## 可证明与不可证明
+## host_ref 的取得与退化边界
 
-**可证明"已创建"**（应记 `created`，不是 `not_created`）：
+[公开 app-server 文档](https://learn.chatgpt.com/docs/app-server)描述宿主可观察的 turn/item 生命周期与标识。宿主控制器能观察，不等于当前 automation 模型在发起工具前已获知自己的精确标识；目前未验证有此透传能力。公开协议也没有给出本文所需的外部创建操作终态保证。
 
-- 调度线程某 turn 内的 `create_thread`/`send_message_to_thread` 调用项 `status` 为完成、`error` 为空且 `result.structuredContent` 含新线程 id；或
-- `threads` 中存在 `cwd` 为本项目、`created_at_ms` 不早于票据 `issued_at`、`first_user_message` 或 `title` 含本 job 标记（`begin` 生成的 session_prompt 内嵌 JOB_ID，建议再嵌入 dispatch 摘要前 12 位）的线程。
+1. 若未来可信宿主桥接实际提供当前 thread_id/turn_id，可在调用前把 `thread:<dispatcher>/turn:<turn>` 连同原票据摘要归档为派发意图。调用开始后观察到真实 item，再追加 `/item:<item>` 关联，不能预造未来 item id。
+2. 补充关联须保留来源、采集时刻，不改原始 begin 票据，不更换已存回执引用绕过幂等。CLI 的 --host-ref 已可传递真实引用；现在不改提示词或强制开关。
+3. 不把守卫“最新 turn”、clientThreadId、连接 requestId 或自造 UUID 冒充原调用身份。并发、steering、投影延迟都可能使“最新”与原调用不同。
+4. 缺精确 turn 时，thread + 时间区间只用于诊断候选，显式报告 host_ref_unbound。仅查 started_at >= issued_at 会漏掉 begin 之前已启动的当前 turn；须纳入区间重叠、未结束与缺失数据。有限候选全部结束也不能证明没有其他仍可完成的调用。
 
-**可证明"终态未创建"**（以下全部成立）：
+因此接受退化方案用于排查，不接受它作为 not_created 核验依据。缺精确关联也不能把候选线程直接认领为该次派发的创建结果。
 
-1. `host_ref` 指向的调度 turn `status ∈ {completed, failed, interrupted}`——turn 已结束，宿主不会再替它创建线程；
-2. 投影已消费完该 turn：`thread_history_projection_state.next_rollout_ordinal > thread_turns.rollout_end_ordinal`；
-3. 该 turn 内所有 `create_thread`/`send_message_to_thread` 项要么不存在，要么 `status` 失败或 `error` 非空，且 `result` 不含线程 id；
-4. `threads` 中没有带本 job 标记、`created_at_ms ≥ issued_at` 的线程；
-5. 没有 `parent_thread_id` 为调度线程、子线程创建时间不早于 `issued_at` 且子线程带标记的 `thread_spawn_edges`。
+## 创建事实与缺席筛查
 
-**不可证明（保持 unknown，走显式人工对账）**：turn 仍 `inProgress`（包括应用崩溃后永远停在 inProgress 的孤儿 turn）；投影落后于 rollout（条件 2 不成立，常见于应用未运行）；单次 `list_threads` 为空；任何"等了多久"的时间推断；证据 JSON 里自报的 `terminal: true`。
+**创建/复用事实**需要原始 job/input/dispatch 票据摘要、真实调用项与可信宿主结果中的负责 thread id 形成可核对关联。完整结果可作为 created 事实候选，仍须经过服务层票据、revision、owner、范围及线程冲突门禁。send_message_to_thread 可以复用已有线程，不能一概称为“新线程已创建”。
 
-**投影终态不等于副作用终态。** `thread_turns.status` 与调用项 `status` 只说明 turn/item 在宿主记录里结束了；公开 app-server 文档的 turn/interrupt、turn/completed 也只定义 turn 与 item 的状态，没有承诺"某个外部创建请求以后绝不会完成"。因此上面五项同时成立得到的仍是 owner 的保守推断，不是宿主保证：在宿主提供 operation 级终态（可查询、持久、幂等的操作 id 与其最终状态）之前，`not_created` 只能作为"高置信缺席"由 owner 签核后使用，默认继续拒绝。调度 helper 里的 IPC `requestId` 只证明一次连接内的请求/响应关联，`timeoutMs` 或断连也不是终态取消证明；工具包装返回成功、turn 结束、列表未命中、日志静默都不是已验证的创建/缺席事实。
+JOB_ID、cwd、标题、创建时间和 spawn edge 仅辅助定位。标记可复制/改写，多次派发可共用 JOB_ID；仅标记命中不自动确认 created 或转移 owner。本文不授权修改 session_prompt。未实施正文/标题检索必须报告 marker_check_not_performed，不能报0命中。
 
-**create 与 reuse 必须分开。** 复用票据（resume）的失败永远不能证明原负责聊天消失，不得清空 owner；只有 `dispatch_action = create` 的派发才谈"未创建"。
+以下五项称为**投影缺席筛查**，即使全部成立也没有宿主 operation 级不可再完成保证：
 
-## 证据契约建议
+1. 精确关联的 turn 在投影中为 completed/failed/interrupted；这只描述投影状态结束。
+2. 已知 schema 下可核对该 turn 的消费水位；空值、未知 ordinal 语义或 schema 漂移均为缺口。水位不承诺宿主不会追加事实。
+3. 相关创建/复用调用项未见成功线程结果；无调用项、失败、空结果与完整负面事实必须分别报告。
+4. 已授权且完成的标记核对未见候选线程；未执行、截断或失败不能视为空集合。
+5. 已检查相关 spawn edge 未见候选子线程；open/closed 不保证外部请求已取消，表中也没有本分析确认可直接使用的 edge 创建时间列。
 
-证据是调用方的声明，核验器是权威。分两步：先由只读快照步骤（独立进程，mode=ro、query_only、短事务、按索引范围查询，只取 type/status/调用名/关联字段，不 SELECT 消息或参数正文）生成**不可变快照文件**并记录其 SHA-256；`absence_verifier(ticket, evidence, host_ref)` 在回执事务内只做快速核验——快照文件存在、hash 与证据一致、快照由可信本机身份生成、快照内各字段满足全部条件、`issued_at`/`checked_at` 绑定成立——不在写事务里查活库、等待网络或聊天。任一条件不满足或异常即返回非 True。
+inProgress、孤儿 turn、投影滞后、列表为空、超时、日志静默、调用方自报 terminal:true 均不能证明终态未创建。reuse 失败不能证明原负责聊天消失，不清 owner。人工对照只归档观察与缺口，不绕过默认拒绝、释放租约或重投。
+
+## 诊断采集器范围（批准研究侧独立分支实现）
+
+可用 scripts/codex_absence_verifier.py 文件名，但职责仅为**只读诊断快照采集器**。不提供可注入服务层并返回 True 的 absence_verifier，不调用 IPC/业务写接口或修改任务配置。
+
+- 读取 scripts/codex_dispatch.json 的 codex_home/db_files/cwd/targets，支持既有环境覆盖；不导入有配置写入/调度执行副作用的入口。路径、线程范围、原票据与 schema allowlist 显式校验。未知 schema、缺表列、坏类型、权限/读取失败均输出 unsupported/incomplete 与非零退出。
+- 生产仅允许显式 --dry-run，指定原票据、可用真实 host_ref、受限输出路径。缺绑定可出诊断但标明不完整。无默认生产全库扫描、无 rollout 扫描或后台循环。限制查询范围、行数、文件大小、总时限；截断显式 incomplete。退出0只表示明确声明的诊断范围执行完整，绝不表示允许 not_created。
+- 活库 mode=ro/query_only、短只读事务、有界 busy_timeout。不用 immutable=1 绕过 WAL，不 checkpoint、不迁移、不复制不一致的 sqlite 主文件冒充备份。WAL 可能依赖已有侧文件和权限；只读连接不等于零文件系统触碰，不自动补权限或修复环境。
+- 每库是独立快照，多库没有共同原子时点。记录各库采集起止、schema 版本/迁移集合、水位、覆盖范围；矛盾/变化/缺口保留。size/mtime 仅元数据，不能证明一致性、新鲜度或可信来源；未查询的库标明 unused，不伪造已检查。
+- 持久化规范化、脱敏、不可变报告并记录实际文件 SHA-256。hash 绑定报告完整性，不绑定持续变化的活库，也不证明来源可信或“不可能再创建”。报告始终 diagnostic_only=true、absence_authorized=false，不输出 terminal=true。
+- 不 SELECT/输出消息正文、标题、first_user_message、工具参数、result.content 或完整 item_json。必要时只在限定调用项上于 SQL 内投影已知 JSON 键的类型、tool/status、线程关联等最小白名单字段，不把正文容器送入进程/日志。供审报告关联 id 脱敏；票据只输出摘要，不输出 token 或带凭据 URL。未经单独审查不做正文标记检索。
+- 票据 issued_at 当前为 Unix 秒，created_at_ms/started_at_ms 为毫秒。按已验证 schema 显式标注/转换，缺失、非有限、异常范围值 fail closed，不按数值大小猜单位。checked_at 带时区且满足票据时间边界；turn 可早于 begin 启动，不能混淆 turn 启动与调用发生时间。
+
+最小报告形状如下，字段值仅为结构示意，不能提交为终态证据：
 
 ```json
 {
+  "schema": "codex-projection-diagnostic/v1",
   "method": "codex-projection-readonly/v1",
-  "checked_at": "2026-10-18T15:20:00+08:00",
-  "checked_by": "codex_absence_verifier --dry-run",
-  "job_id": "episode:…", "dispatch_digest": "…",
-  "dispatcher_thread_id": "…", "turn_id": "…",
-  "turn_status": "completed", "turn_completed_at": 0,
-  "projection": {"next_rollout_ordinal": 0, "turn_rollout_end_ordinal": 0},
-  "call_items": [{"item_id": "…", "tool": "send_message_to_thread", "status": "failed", "has_thread_result": false}],
-  "marker_threads": 0, "spawn_edges_after_issued": 0,
-  "projection_files": {"state_5.sqlite": {"size": 0, "mtime_ms": 0}, "thread_history_1.sqlite": {"size": 0, "mtime_ms": 0}},
-  "schema_versions": {"state": 0, "thread_history": 0}
+  "diagnostic_only": true,
+  "absence_authorized": false,
+  "job_id": "redacted",
+  "ticket_digest": "sha256",
+  "dispatch_digest": "sha256",
+  "host_ref_binding": "unverified",
+  "observations": [],
+  "coverage": {"truncated": false, "cross_database_atomic": false},
+  "gaps": ["host_operation_terminal_api_unavailable", "marker_check_not_performed"],
+  "projection_files": [],
+  "schema_versions": {},
+  "collected_from": "timezone-aware timestamp",
+  "collected_until": "timezone-aware timestamp"
 }
 ```
 
-- `host_ref` 建议格式 `thread:<dispatcher>/turn:<turn>[/item:<item>]`，由调度 automation 在 `begin` 之后、调用宿主之前记录；没有 `host_ref` 就无法定位 turn，核验器直接返回非 True。
-- 绑定：`job_id`、`dispatch_digest` 与票据一致；`issued_at` 作为所有时间比较的下界；`checked_at` 带时区、不早于 `issued_at`、不晚于现在 5 分钟。
-- 投影库持续变化，不能用内容哈希绑定；记录三个库的 size/mtime 与 `_sqlx_migrations` 最高 version，核验器发现 schema 版本不在已知集合时 fail closed。
-- 读活库用 `mode=ro` 加 busy_timeout（WAL 下读安全），不要 `immutable=1`。
-- 报告与快照只保留字段名、状态类别、脱敏关联 id 与证据缺口；不放消息正文、完整 token 或带凭据的 URL。
-- 关联链必须原始且完整：job/input/dispatch 摘要 → 原始 tool call 项 → 宿主 operation/request（若存在）→ 实际 thread id 或终态证据；任一环缺失即报告"能力不足"，不用 clientThreadId 或包装返回补链。
+缺席、关联未知、未实施的检查、unsupported 必须区分；发现绑定充分的 created 候选也仅报告，不自动写业务状态。
 
-## 边界与风险
+## 隔离验收与接入条件
 
-- 投影是 Codex 内部实现，不是公开 API；本文的表名/列名是 2026-10-18 的事实，升级后必须重新核对。
-- 条件 1 依赖调度线程知道自己的 turn id。若 automation 无法得到，退化为 `thread:<dispatcher>` 加 `issued_at` 之后的 turn 集合：集合内任一 turn 仍 inProgress 即不终态。
-- 标记检索依赖 session_prompt 内嵌的 JOB_ID；手工创建、改了提示词或标题的线程检索不到，只能靠条件 3 的调用项结果。
-- 核验器本身是守卫同类的本机只读脚本，应沿用 `scripts/codex_dispatch.json` 的 `codex_home`/`db_files` 配置与 fail-closed 约定，不新增写权限。
+研究侧以本文落地后的 main 为基线独立提交。合成投影测试至少覆盖：精确/缺失/伪造 host_ref；begin 前已启动 turn；秒/毫秒；成功线程结果与 reuse；空结果、孤儿 turn、投影滞后、跨库矛盾；未知 schema、缺表、坏 JSON、权限失败；截断与总时限；WAL 已提交数据可见；原库内容不写、正文/参数/token 不泄露。五项全通过仍断言 absence_authorized=false。测试不得连接真实宿主或生产。
 
-## 结论
+Owner 审查后才在生产取短 --dry-run 快照供人工对照。当前不注入 SubtitleDelivery、不新增人工签核绕过路径；dispatch_receipts_required 继续关闭。未来只有取得可绑定原派发、持久可查询的宿主 operation 级“已终结且无副作用”契约后，才另审授权核验器与调用方迁移。
 
-现有投影能可靠证明"已创建"，不能证明"不可能再创建"。`not_created` 的自动接受应等待宿主提供 operation 级终态查询；在此之前可实现的只是只读快照 + 人工签核的保守流程，默认仍拒绝。
-
-## 建议落地顺序
-
-1. owner 确认调度 automation 能否在调用宿主前记录 turn/item 级 `host_ref`；不能则采用退化方案。
-2. 研究侧写 `scripts/codex_absence_verifier.py`（只读、读 codex_dispatch.json、fail closed）与合成投影库的隔离测试；生产先只跑 `--dry-run` 产出证据供人工对照。
-3. owner 审查后把核验器作为 `SubtitleDelivery(absence_verifier=…)` 注入 CLI；`dispatch_receipts_required` 仍保持关闭，直到调用方迁移完成。
+未来核验器即使获批，回执写事务内也只能快速核对事先取得的不可变可信证明及 hash/身份/绑定/有效期，不查活投影、不等 IPC。普通调用方 JSON 的 hash 与 checked_by 不是可信证明；可信来源、抗替换、重放边界须另审。revision 变化后的 created 恢复沿现有只读 reconcile-plan 与未来显式 CAS 契约，不借缺席采集放松门禁。
