@@ -430,8 +430,11 @@ foreach($r in $acl.Access){
 }
 """.replace('PATH_BASE64', encoded)
     argument = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
-    result = subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-EncodedCommand',argument],
-                            capture_output=True, timeout=5, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    # The 64-bit Windows PowerShell by its full path, like the ticket-directory protection: the PATH-resolved
+    # powershell.exe on some hosts (GitHub's runner) cannot load Microsoft.PowerShell.Security for Get-Acl.
+    powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    result = subprocess.run([str(powershell),'-NoProfile','-NonInteractive','-EncodedCommand',argument],
+                            capture_output=True, timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     if result.returncode:
         detail = ' '.join((result.stdout + result.stderr).decode('utf-8', 'replace').split())[:300]
         raise ValueError(f'output parent must permit only current user and SYSTEM (check exit {result.returncode}: {detail or "no output"})')
