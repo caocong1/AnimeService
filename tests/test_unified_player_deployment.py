@@ -1,38 +1,37 @@
+"""The legacy deployment entry point must run only the bounded metadata checker."""
 import json
-import sqlite3
-import time
 from types import SimpleNamespace
+import pytest
 from scripts import deploy_unified_player as deployment
 
 
-def connection():
-    c = sqlite3.connect(':memory:')
-    c.executescript('''CREATE TABLE subtitle_viewing_leases(expires REAL);
-        CREATE TABLE web_progress(last_played REAL);
-        CREATE TABLE thunder_queue(lease TEXT,expires REAL);
-        CREATE TABLE kv(key TEXT,value TEXT);''')
-    c.execute('INSERT INTO kv VALUES(?,?)', ('heartbeat',json.dumps({'phase':'idle'})))
-    return c
+@pytest.mark.parametrize('exit_code',[0,7])
+def test_metadata_wrapper_is_bounded_and_preserves_checker_failure(tmp_path,monkeypatch,exit_code):
+    output=tmp_path/'receipt';calls=[]
+    monkeypatch.setattr('sys.argv',['deploy_unified_player.py','--output',str(output)])
+    monkeypatch.setenv('PLAYER_QA_BASE','http://untrusted.invalid')
+    monkeypatch.setattr(deployment.shutil,'which',lambda name:'node-test' if name=='node' else None)
+    def run(command,**kwargs):
+        calls.append(command)
+        assert command==['node-test','scripts/verify_unified_player_live.cjs']
+        assert kwargs['timeout']==60
+        assert kwargs['env']['PLAYER_QA_BASE']=='http://127.0.0.1:4871'
+        assert kwargs['env']['PLAYER_QA_OUT']==str(output.resolve())
+        return SimpleNamespace(returncode=exit_code)
+    monkeypatch.setattr(deployment.subprocess,'run',run)
+    assert deployment.main()==exit_code
+    assert len(calls)==1
+    proof=json.loads((output/'deployment.json').read_text())
+    assert proof['state']==('metadata_verified' if exit_code==0 else 'metadata_check_failed')
+    assert proof['metadata_exit_code']==exit_code
+    assert proof['restart_attempted'] is False
+    assert proof['browser_started'] is False
 
 
-def test_idle_reload_requires_no_playback_or_background_work(monkeypatch):
-    monkeypatch.setattr(deployment.psutil, 'process_iter', lambda fields: [])
-    c = connection()
-    assert deployment.idle(c)
-    c.execute('INSERT INTO subtitle_viewing_leases VALUES(?)', (time.time()+60,))
-    assert not deployment.idle(c)
-    c.execute('DELETE FROM subtitle_viewing_leases')
-    c.execute('INSERT INTO web_progress VALUES(?)', (time.time(),))
-    assert not deployment.idle(c)
-    c.execute('DELETE FROM web_progress')
-    c.execute('INSERT INTO thunder_queue VALUES(?,?)', ('active',time.time()+60))
-    assert not deployment.idle(c)
-    c.execute('DELETE FROM thunder_queue')
-    c.execute('UPDATE kv SET value=?', (json.dumps({'phase':'source'}),))
-    assert not deployment.idle(c)
-
-
-def test_desktop_playback_also_prevents_reload(monkeypatch):
-    monkeypatch.setattr(deployment.psutil, 'process_iter',
-                        lambda fields: [SimpleNamespace(info={'name':'vlc.exe'})])
-    assert not deployment.idle(connection())
+def test_missing_checker_runtime_fails_without_deployment(tmp_path,monkeypatch):
+    monkeypatch.setattr('sys.argv',['deploy_unified_player.py','--output',str(tmp_path)])
+    monkeypatch.setattr(deployment.shutil,'which',lambda name:None)
+    def forbidden(*args,**kwargs):raise AssertionError('Must not run a fallback command')
+    monkeypatch.setattr(deployment.subprocess,'run',forbidden)
+    with pytest.raises(RuntimeError,match='Node.js is required'):deployment.main()
+    assert not (tmp_path/'deployment.json').exists()

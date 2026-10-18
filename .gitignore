@@ -81,6 +81,8 @@
 !/docs/THUNDER-WORKER.md
 !/docs/WEB-PICTURE-QUALITY.md
 !/docs/WEB-PLAYBACK-RESEARCH.md
+!/docs/PLAYER-QA.md
+!/docs/PLAYBACK-SESSION-CONTRACT.md
 !/docs/automation-prompts/
 !/docs/deployment.example.json
 /static/vendor/
@@ -112,6 +114,8 @@
 !/scripts/unified_player_fixture.py
 !/scripts/verify_unified_player.cjs
 !/scripts/verify_unified_player_live.cjs
+!/scripts/player_qa_guard.cjs
+!/scripts/run_player_qa.py
 !/scripts/repair_subtitle_enrollment.py
 !/scripts/deploy_subtitle_enrollment.py
 !/docs/SUBTITLE-ENROLLMENT.md

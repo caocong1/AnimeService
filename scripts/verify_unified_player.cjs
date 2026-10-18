@@ -1,35 +1,39 @@
 'use strict';
-// Browser writes are restricted to the dedicated fixture DB on 4879.
+// All playback writes require the nonce-bound synthetic fixture.
 const {chromium}=require('playwright'),fs=require('node:fs'),assert=require('node:assert/strict');
-const base=process.env.PLAYER_QA_BASE || 'http://127.0.0.1:4879',out='data/unified-player-20261016';
+const {guardedContext,checkedBase}=require('./player_qa_guard.cjs');
+const base=checkedBase(process.env.PLAYER_QA_BASE || 'http://127.0.0.1:4879','fixture'),out=process.env.PLAYER_QA_OUT;
+assert.ok(out&&process.env.PLAYER_QA_TOKEN?.length>=24,'Run through run_player_qa.py');
 const legacy=process.env.PLAYER_QA_LEGACY==='1';
 (async()=>{
  fs.mkdirSync(out,{recursive:true});
  const browser=await chromium.launch({channel:'msedge',headless:true,args:['--autoplay-policy=user-gesture-required']});
- const context=await browser.newContext({viewport:{width:1440,height:1000}});
+ const errors=[],writes=[],checks=[];let passed=false;
+ const guard=await guardedContext(browser,{base,mode:'fixture',token:process.env.PLAYER_QA_TOKEN,mock:async route=>{
+   const request=route.request(),path=new URL(request.url()).pathname;
+   if(legacy && path.startsWith('/api/web/media/finished:')){await route.fulfill({status:404,json:{detail:'未找到已盘点的媒体'}});return true;}
+   if(legacy && path==='/api/web/danmu/search'){await route.fulfill({json:{animes:[]}});return true;}
+   if(!['GET','HEAD'].includes(request.method()))writes.push({path,body:request.postDataJSON()});
+   if(/\/media\/[^/]+\/danmu$/.test(path)){
+     await route.fulfill({json:{status:'matched',selected:[{id:'fixture',source_identity:'fixture',title:'测试弹幕',site:'bahamut'}],sources:[{id:'fixture',count:1,comments:[{time:1,text:'同一放映室弹幕验证',mode:0,color:'#ffffff'}]}],candidates:[]}});return true;
+   }
+   if(path==='/api/web/danmu/comments'){
+     await route.fulfill({json:{sources:[{id:'fixture',count:1,comments:[{time:1,text:'同一放映室弹幕验证',mode:0,color:'#ffffff'}]}]}});return true;
+   }
+   return false;
+ }});
+ const context=guard.context;
  await context.addInitScript(legacy=>{
    const nativePlay=HTMLMediaElement.prototype.play;
    HTMLMediaElement.prototype.play=function(){return window.qaAllowPlayback ? nativePlay.call(this) : Promise.reject(new DOMException('QA waits for explicit playback','NotAllowedError'));};
    if(legacy){const release=new URLSearchParams(location.search).get('release');if(release)localStorage.setItem('fanyu-danmu-sources:finished:'+release,JSON.stringify([{id:'fixture',source_identity:'fixture',title:'测试弹幕'}]));}
  },legacy);
- const page=await context.newPage(),errors=[],writes=[],checks=[];
+ const page=await context.newPage();
  page.on('pageerror',e=>errors.push(e.stack));
- await context.route('**/api/**',async route=>{
-   const request=route.request(),path=new URL(request.url()).pathname;
-   if(legacy && path.startsWith('/api/web/media/finished:'))return route.fulfill({status:404,json:{detail:'未找到已盘点的媒体'}});
-   if(legacy && path==='/api/web/danmu/search')return route.fulfill({json:{animes:[]}});
-   if(!['GET','HEAD'].includes(request.method())) {
-     assert.equal(new URL(request.url()).port,'4879','no production writes');
-     writes.push({path,body:request.postDataJSON()});
-   }
-   if(/\/media\/[^/]+\/danmu$/.test(path))return route.fulfill({json:{status:'matched',selected:[{id:'fixture',source_identity:'fixture',title:'测试弹幕',site:'bahamut'}],sources:[{id:'fixture',count:1,comments:[{time:1,text:'同一放映室弹幕验证',mode:0,color:'#ffffff'}]}],candidates:[]}});
-   if(path==='/api/web/danmu/comments')return route.fulfill({json:{sources:[{id:'fixture',count:1,comments:[{time:1,text:'同一放映室弹幕验证',mode:0,color:'#ffffff'}]}]}});
-   return route.continue();
- });
- const get=async path=>(await context.request.get(base+path)).json();
- const fixture=await get('/api/testing/fixture');assert.ok(fixture.isolated);assert.match(fixture.database,/tracking-test-/);
- const index=JSON.parse(fs.readFileSync('static/finished-media/index.json','utf8')).releases;
- const v0=index.find(r=>r.show_id===639938&&r.episode===2&&r.edition==='v0'),v1=index.find(r=>r.show_id===639938&&r.episode===2&&r.edition==='v1');
+ const get=guard.get,fixture=await guard.fixture().catch(async error=>{
+   await context.close();await browser.close();await guard.closeNetwork();throw error;
+ }),index=fixture.releases;
+ const v0=index.find(r=>r.show_id===fixture.show_id&&r.episode===2&&r.edition==='v0'),v1=index.find(r=>r.show_id===fixture.show_id&&r.episode===2&&r.edition==='v1');
  const record=id=>get('/api/finished-viewing/'+id);
  const ready=async()=>{await page.waitForFunction(()=>document.querySelector('#screen video')?.readyState>=2);};
  const open=async id=>{await page.goto(base+'/watch?release='+id);await ready();};
@@ -79,7 +83,17 @@ const legacy=process.env.PLAYER_QA_LEGACY==='1';
    await page.screenshot({path:out+'/desktop.png',fullPage:true});await page.setViewportSize({width:390,height:900});
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.screenshot({path:out+'/mobile.png',fullPage:true});checks.push('mobile has no horizontal overflow');
    assert.deepEqual(errors,[]);
-   fs.writeFileSync(out+(legacy?'/fixture-compat-proof.json':'/fixture-proof.json'),JSON.stringify({fixture,legacy,checks,writes,errors},null,2));console.log(JSON.stringify({legacy,checks,errors,writes:writes.length}));
- }catch(e){await page.screenshot({path:out+'/failure.png',fullPage:true});console.error(JSON.stringify({url:page.url(),errors,writes,screen:await page.locator('#screen-state').textContent().catch(()=>''),sources:await page.locator('#playback-source').innerHTML().catch(()=>'' )}));throw e;}
- finally{await context.close();await browser.close();}
+   assert.equal(guard.ledger.blocked.filter(r=>/\/(?:progress|watch|viewing-session)$/.test(r.path)).length,0,'critical fixture writes must reach the real isolated API');
+   passed=true;
+ }catch(e){await page.screenshot({path:out+'/failure.png',fullPage:true});console.error(JSON.stringify({url:page.url(),errors,writes,network:guard.ledger,screen:await page.locator('#screen-state').textContent({timeout:1000}).catch(()=>''),sources:await page.locator('#playback-source').innerHTML({timeout:1000}).catch(()=>'' )}));throw e;}
+ finally{
+   await page.goto('about:blank').catch(()=>{});await context.close();await browser.close();await guard.closeNetwork();
+   if(!passed)fs.writeFileSync(out+'/failure-proof.json',JSON.stringify({passed:false,checks,writes,errors,network:guard.ledger},null,2));
+   if(passed){
+     assert.deepEqual(errors,[]);
+     assert.equal([...guard.ledger.blocked,...guard.ledger.transport_blocked].filter(r=>/\/(?:progress|watch|viewing-session)$/.test(r.path)).length,0,'late critical fixture writes must reach the isolated API');
+     fs.writeFileSync(out+(legacy?'/fixture-compat-proof.json':'/fixture-proof.json'),JSON.stringify({isolated:true,synthetic_media:true,legacy,checks,writes,errors,network:guard.ledger},null,2));
+     console.log(JSON.stringify({legacy,checks,errors,writes:writes.length,network:guard.ledger}));
+   }
+ }
 })().catch(e=>{console.error(e);process.exitCode=1;});
