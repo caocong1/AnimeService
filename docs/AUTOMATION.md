@@ -41,7 +41,9 @@
 
 守卫源码为 `scripts/codex_dispatch_guard.py` 和 `scripts/codex_dispatch_control.cjs`。只有指定调度会话、项目路径、匹配 heartbeat（或精确登记的恢复轮次）、inProgress、至少20分钟无日志进展、无运行工具同时成立才经应用 IPC 按 expectedTurnId 中断。它只读 Codex 状态，不改 Anime DB、不释放业务租约、不创建 AI 轮次、不杀应用、不处理中途工作的单集 owner。
 
-不带 `--apply` 只判断并写私有诊断快照，带 `--apply` 才可能中断。调度会话白名单、恢复轮次、项目路径、`node` 路径、Codex 数据库文件名与状态目录都在 `scripts/codex_dispatch.json`，两个脚本共用；`ANIMESERVICE_DISPATCH_CONFIG` 可指向另一份。`wait_seconds` 单位为秒，范围 60–86400，非整数或越界回退旧默认 1200；`targets` 为空、`cwd` 为空或 `db_files` 缺项则拒绝启动。`node` 先取 PATH 再取配置路径。每次运行都会写 `status.json`，读取 Codex 状态失败时 `error` 字段说明原因，控制步骤的结果与错误按线程记在 `actions.jsonl`。克隆不会注册 Windows 任务，新环境不能直接认为可运行；迁移应先改配置文件中的目标和依赖，再隔离测试和人工核对。详见 [调度健康](CODEX-DISPATCH-HEALTH.md)。
+不带 `--apply` 只判断并写私有诊断快照，带 `--apply` 才可能中断。调度会话白名单、恢复轮次、项目路径、`node` 路径、Codex 数据库文件名与状态目录都在 `scripts/codex_dispatch.json`，两个脚本共用；`ANIMESERVICE_DISPATCH_CONFIG` 可指向另一份。`wait_seconds` 单位为秒，范围 60–86400，非整数或越界回退旧默认 1200；`targets` 为空、`cwd` 为空或 `db_files` 缺项则拒绝启动。`node` 先取 PATH 再取配置路径。每次运行都会写 `status.json`，读取 Codex 状态失败时 `error` 字段说明原因，控制步骤的结果与错误按线程记在 `actions.jsonl`。克隆不会注册 Windows 任务，新环境不能直接认为可运行；迁移应先改配置文件中的目标和依赖，再隔离测试和人工核对。
+
+`scripts/codex_absence_verifier.py --dry-run --ticket TICKET.json --host-ref thread:<id>/turn:<id> --out REPORT.json` 只读采集同一组投影库里与一次派发相关的 turn 状态、投影水位、create/reuse 调用项（SQL 内投影白名单字段，不取正文）与 spawn edge，写出不可变、脱敏的诊断报告并附 sha256；它不是核验器，报告始终 `absence_authorized=false`，退出 0 只表示声明的诊断范围跑完，非 0 表示不支持的 schema、库不可读、截断或超时。边界见 [DISPATCH-ABSENCE-EVIDENCE.md](DISPATCH-ABSENCE-EVIDENCE.md)。详见 [调度健康](CODEX-DISPATCH-HEALTH.md)。
 
 ## 模板与迁移
 
