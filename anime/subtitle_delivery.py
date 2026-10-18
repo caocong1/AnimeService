@@ -52,7 +52,9 @@ def _canonical(value):
     null), only finite numbers; identical retries hash identically, changed evidence does not."""
     def clean(v):
         if isinstance(v, dict):
-            return {str(k): clean(x) for k, x in v.items() if x is not None}
+            if not all(isinstance(k, str) for k in v):
+                raise ValueError('receipt object keys must be strings')
+            return {k: clean(x) for k, x in v.items() if x is not None}
         if isinstance(v, (list, tuple)):
             return [clean(x) for x in v]
         if isinstance(v, float):
@@ -92,7 +94,9 @@ def validate_absence_evidence(evidence, job_id, dispatch_token, issued_at, now):
         raise ValueError('absence evidence must be a JSON object')
     if not all(isinstance(evidence.get(k), str) and evidence[k].strip() for k in ('checked_at', 'method', 'checked_by')):
         raise ValueError('absence evidence needs checked_at, method and checked_by')
-    if not (isinstance(evidence.get('sha256'), str) and len(evidence['sha256']) == 64 and isinstance(evidence.get('file'), str)):
+    if not (isinstance(evidence.get('sha256'), str) and len(evidence['sha256']) == 64
+            and all(ch in '0123456789abcdef' for ch in evidence['sha256'])
+            and isinstance(evidence.get('file'), str) and evidence['file'].strip()):
         raise ValueError('absence evidence needs the tool-computed file name and sha256')
     if evidence.get('job_id') != job_id:
         raise ValueError('absence evidence must identify this job_id')
@@ -202,10 +206,13 @@ def default_readiness(db, sid, ep, payload):
 
 
 class SubtitleDelivery:
-    def __init__(self, db, readiness=None, clock=None, initialize=True):
+    def __init__(self, db, readiness=None, clock=None, initialize=True, absence_verifier=None):
         self.db = db
         self.readiness = readiness or default_readiness
         self.clock = clock or time.time
+        # Trusted, local, read-only host adapter; never supplied by receipt JSON.
+        # No production adapter is enabled until terminal host evidence is available.
+        self.absence_verifier = absence_verifier
         if initialize:
             self.initialize()
 
@@ -559,6 +566,7 @@ class SubtitleDelivery:
                       'lease_token': row['lease_token'], 'owner': owner, 'input_key': row['input_key'],
                       'dispatch_action': 'reuse' if row['thread_id'] else 'create', 'thread_id': row['thread_id'] or '',
                       'issued_at': self.clock()}
+            self._event(c, identity, 'dispatch-ticket-issued', {'ticket_digest': _digest(_canonical(ticket))})
             return {**record, 'job_id': identity, 'payload': json.loads(record['payload']),
                     'assessment': json.loads(row['payload'])['assessment'],
                     'action': 'reuse-thread' if row['thread_id'] else 'create-thread', 'ticket': ticket}
@@ -566,14 +574,15 @@ class SubtitleDelivery:
     def reconcile_dispatch(self, identity, dispatch_token, thread_id=None, definitely_not_created=False,
                            absence_evidence=None):
         """Legacy receipt path (no begin ticket); lost responses remain non-retryable."""
-        if self.db.get(RECEIPT_REQUIRED_KEY, False):
-            raise ValueError('dispatch-receipt/v1 ticket required; the legacy reconcile path is disabled')
         if thread_id and definitely_not_created:
             raise ValueError('Contradictory dispatch receipt')
         if definitely_not_created and not absence_evidence:
             raise ValueError('Verified absence evidence required before releasing unknown dispatch')
         with self.db.connect() as c:
             c.execute('BEGIN IMMEDIATE')
+            required = c.execute('SELECT value FROM kv WHERE key=?', (RECEIPT_REQUIRED_KEY,)).fetchone()
+            if required and json.loads(required['value']):
+                raise ValueError('dispatch-receipt/v1 ticket required; the legacy reconcile path is disabled')
             row = c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone()
             if not row or not dispatch_token or row['dispatch_token'] != dispatch_token:
                 raise ValueError('Dispatch token mismatch')
@@ -636,10 +645,14 @@ class SubtitleDelivery:
             evidence = validate_absence_evidence(evidence, ticket['job_id'], ticket['dispatch_token'], ticket['issued_at'], self.clock())
         elif evidence is not None and not isinstance(evidence, dict):
             raise ValueError('receipt evidence must be a JSON object')
+        evidence_json = _canonical(evidence or {})
+        if any(token and token in evidence_json for token in (ticket['dispatch_token'], ticket['lease_token'])):
+            raise ValueError('receipt evidence must not contain raw authority tokens')
         for name, value in (('host_ref', host_ref), ('recorded_by', recorded_by)):
             if value is not None and (not isinstance(value, str) or len(value) > 200):
                 raise ValueError(f'{name} must be a short string')
         envelope = {'schema': RECEIPT_SCHEMA, 'job_id': ticket['job_id'], 'expected_revision': ticket['revision'],
+                    'ticket_digest': _digest(_canonical(ticket)),
                     'dispatch_digest': _digest(ticket['dispatch_token']), 'lease_digest': _digest(ticket['lease_token']),
                     'owner': ticket['owner'], 'input_key': ticket['input_key'], 'dispatch_action': ticket['dispatch_action'],
                     'ticket_thread_id': ticket['thread_id'], 'thread_id': thread_id or '', 'outcome': outcome,
@@ -662,6 +675,8 @@ class SubtitleDelivery:
             existing = c.execute('SELECT request_digest,result FROM dispatch_receipts WHERE receipt_id=?', (receipt_id,)).fetchone()
             if existing:  # idempotent replay comes before any comparison with the job's current revision
                 if existing['request_digest'] != request_digest:
+                    self._event(c, ticket['job_id'], 'dispatch-receipt-rejected', {'receipt_id': receipt_id, 'reason': 'id_reused'})
+                    c.commit()  # preserve the rejection even when another writer won after the precheck
                     raise ValueError('receipt id reused with different content')
                 return {**json.loads(existing['result']), 'replayed': True}
             row = c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (ticket['job_id'],)).fetchone()
@@ -705,13 +720,18 @@ class SubtitleDelivery:
             return 'input_moved', 0
         if row['lease_owner'] != ticket['owner'] or (row['lease_token'] and _digest(row['lease_token']) != envelope['lease_digest']):
             return 'owner_mismatch', 0
+        issued = c.execute("SELECT payload FROM subtitle_delivery_events WHERE job_id=? AND kind='dispatch-ticket-issued' ORDER BY id DESC LIMIT 1",
+                           (ticket['job_id'],)).fetchone()
+        if not issued or json.loads(issued['payload']).get('ticket_digest') != envelope['ticket_digest']:
+            return 'evidence_invalid', 0
         if outcome in ('failed', 'interrupted'):
             return '', 1
         if _scope_transaction(c, row['show_id'], row['episode']):
             return 'scope_changed', 1
         watched = c.execute('SELECT finished FROM watches WHERE show_id=? AND episode=?', (row['show_id'], row['episode'])).fetchone()
-        from .subtitle_refinement import two_pass
-        if watched and watched['finished'] and (not json.loads(row['payload']).get('experience_only') or two_pass(self.db)):
+        policy = c.execute("SELECT value FROM kv WHERE key='subtitle_delivery_policy'").fetchone()
+        two_pass_enabled = bool(policy and json.loads(policy['value']).get('editions') == ['v0', 'v1'])
+        if watched and watched['finished'] and (not json.loads(row['payload']).get('experience_only') or two_pass_enabled):
             return 'scope_changed', 1
         if row['state'] in ('accepted', 'finished') or row['dispatch_state'] == 'blocked-stopped':
             return 'state_conflict', 1
@@ -724,6 +744,15 @@ class SubtitleDelivery:
         # not_created: only a creation attempt can be proven absent; an existing responsible thread is never cleared by it
         if ticket['dispatch_action'] != 'create' or row['thread_id'] or row['dispatch_state'] not in ('committing', 'unknown'):
             return 'state_conflict', 1
+        # A list snapshot and caller assertions cannot rule out a delayed create.
+        # The adapter must verify terminal absence against a bound host operation,
+        # perform no IPC side effects, and fail closed. JSON booleans are not authority.
+        try:
+            verified = self.absence_verifier and self.absence_verifier(dict(ticket), envelope['evidence'], envelope['host_ref']) is True
+        except Exception:
+            verified = False
+        if not verified:
+            return 'evidence_invalid', 0
         return '', 1
 
     def receipts(self, identity):

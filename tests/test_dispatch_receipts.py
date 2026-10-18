@@ -5,7 +5,15 @@ import sys
 import pytest
 
 from anime.subtitle_delivery import SubtitleDelivery, RECEIPT_REQUIRED_KEY, validate_ticket
-from test_subtitle_delivery import delivery, begin  # noqa: F401  (fixture and helper)
+from test_subtitle_delivery import delivery as base_delivery, begin  # noqa: F401  (fixture and helper)
+
+
+@pytest.fixture
+def delivery(base_delivery):
+    db, scheduler, ready, now = base_delivery
+    # A synthetic local host adapter, not a JSON assertion accepted by production.
+    scheduler.absence_verifier = lambda ticket, evidence, host_ref: evidence.get('terminal_operation') == 'synthetic-terminal-absent'
+    return base_delivery
 
 
 def events(db, identity, kind):
@@ -19,7 +27,7 @@ def stamp(seconds):
 
 def absence(ticket, checked_at=None, **extra):
     return {'checked_at': checked_at or stamp(ticket['issued_at'] + 5), 'method': 'chat list read-only', 'checked_by': 'operator fixture',
-            'job_id': ticket['job_id'], 'dispatch_token': ticket['dispatch_token'], 'file': 'absence.json', 'sha256': 'a' * 64, **extra}
+            'job_id': ticket['job_id'], 'dispatch_token': ticket['dispatch_token'], 'file': 'absence.json', 'sha256': 'a' * 64, 'terminal_operation': 'synthetic-terminal-absent', **extra}
 
 
 def test_created_receipt_applies_once_and_replays_the_first_result_after_the_job_moved(delivery):
@@ -265,7 +273,7 @@ def test_cli_not_created_with_ticket_binds_the_evidence_file(delivery, tmp_path,
     tpath = tmp_path / 'ticket.json'; tpath.write_text(json.dumps(ticket), encoding='utf-8')
     evidence = tmp_path / 'absence.json'
     evidence.write_text(json.dumps({'checked_at': stamp(ticket['issued_at'] + 5), 'method': 'chat list read-only', 'checked_by': 'operator',
-                                    'job_id': identity, 'dispatch_token': ticket['dispatch_token'], 'sha256': 'spoofed'}), encoding='utf-8')
+                                    'job_id': identity, 'dispatch_token': ticket['dispatch_token'], 'sha256': 'spoofed', 'terminal_operation': 'synthetic-terminal-absent'}), encoding='utf-8')
     monkeypatch.setattr(queue_cli, 'ControlStore', lambda path: db)
     monkeypatch.setattr(queue_cli, 'SubtitleDelivery', lambda store, initialize=True: scheduler)
     monkeypatch.setattr(sys, 'argv', ['queue', '--db', str(tmp_path / 'anime.db'), 'not-created', identity, '--ticket', str(tpath), '--evidence', str(evidence)])
@@ -276,3 +284,124 @@ def test_cli_not_created_with_ticket_binds_the_evidence_file(delivery, tmp_path,
     import hashlib
     assert stored['sha256'] == hashlib.sha256(evidence.read_bytes()).hexdigest() and stored['file'] == 'absence.json'  # tool-computed, not spoofed
     assert 'dispatch_token' not in stored
+
+
+def test_production_default_rejects_absence_assertions_without_a_trusted_host_verifier(delivery):
+    db, scheduler, ready, now = delivery
+    identity, intent = begin(scheduler)
+    default = SubtitleDelivery(db, ready, lambda: now[0])
+    before = default.get(identity)
+    r = default.record_dispatch_receipt(intent['ticket'], 'not_created', evidence=absence(intent['ticket']))
+    assert (r['receipt_accepted'], r['state_changed'], r['reason']) == (0, 0, 'evidence_invalid')
+    assert default.get(identity) == before and default.get(identity)['dispatch_state'] == 'committing'
+    scheduler.absence_verifier = lambda *args: (_ for _ in ()).throw(RuntimeError('host unavailable'))
+    r = scheduler.record_dispatch_receipt(intent['ticket'], 'not_created', evidence=absence(intent['ticket'], note='host down'))
+    assert r['reason'] == 'evidence_invalid' and scheduler.get(identity) == before
+
+
+def test_server_digest_binds_ticket_issue_time_action_and_extra_fields(delivery):
+    db, scheduler, ready, now = delivery
+    identity, intent = begin(scheduler)
+    ticket = intent['ticket']
+    before = scheduler.get(identity)
+    for bad in ({**ticket, 'issued_at': ticket['issued_at'] - 100},
+                {**ticket, 'dispatch_action': 'reuse', 'thread_id': 'chat-1'},
+                {**ticket, 'extension': 'changed'}):
+        r = scheduler.record_dispatch_receipt(bad, 'created', thread_id='chat-1')
+        assert (r['receipt_accepted'], r['state_changed'], r['reason']) == (0, 0, 'evidence_invalid')
+    assert scheduler.get(identity) == before
+    first = scheduler.record_dispatch_receipt(ticket, 'created', thread_id='chat-1')
+    assert first['state_changed'] == 1
+    assert scheduler.record_dispatch_receipt(ticket, 'created', thread_id='chat-1')['replayed']
+
+
+def test_real_concurrent_completion_serializes_to_one_state_change(delivery):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    db, scheduler, ready, now = delivery
+    identity, intent = begin(scheduler)
+    barrier = Barrier(2)
+    def submit(outcome):
+        barrier.wait(timeout=5)
+        return scheduler.record_dispatch_receipt(intent['ticket'], outcome,
+            **({'thread_id': 'chat-1'} if outcome == 'created' else {'evidence': absence(intent['ticket'])}))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(submit, ['created', 'not_created']))
+    assert sum(r['state_changed'] for r in results) == 1
+    assert sorted(r['reason'] for r in results) == ['', 'revision_moved']
+    assert len(scheduler.receipts(identity)) == 2
+    assert len(events(db, identity, 'dispatch-reconciled')) == 1
+
+
+def test_concurrent_id_reuse_records_its_rejection_even_after_precheck_race(delivery, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    db, scheduler, ready, now = delivery
+    identity, intent = begin(scheduler)
+    original = db.one
+    barrier = Barrier(2)
+    def synchronized(sql, args=()):
+        result = original(sql, args)
+        if sql.startswith('SELECT request_digest FROM dispatch_receipts'):
+            barrier.wait(timeout=5)
+        return result
+    monkeypatch.setattr(db, 'one', synchronized)
+    def submit(note):
+        try:
+            return scheduler.record_dispatch_receipt(intent['ticket'], 'failed', evidence={'note': note}, receipt_id='f' * 64)
+        except ValueError:
+            return None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(submit, ['first', 'second']))
+    assert sum(r is not None for r in results) == 1
+    assert len(scheduler.receipts(identity)) == 1
+    assert events(db, identity, 'dispatch-receipt-rejected') == [{'receipt_id': 'f' * 64, 'reason': 'id_reused'}]
+
+
+def test_nested_authority_tokens_are_not_persisted_in_diagnostic_evidence(delivery):
+    db, scheduler, ready, now = delivery
+    identity, intent = begin(scheduler)
+    for secret in (intent['ticket']['dispatch_token'], intent['ticket']['lease_token']):
+        with pytest.raises(ValueError, match='raw authority tokens'):
+            scheduler.record_dispatch_receipt(intent['ticket'], 'interrupted', evidence={'nested': {'note': secret}})
+    assert scheduler.receipts(identity) == []
+
+
+def test_cli_unknown_ticket_is_diagnostic_and_no_ticket_remains_legacy(delivery, tmp_path, monkeypatch, capsys):
+    import importlib.util
+    from pathlib import Path
+    db, scheduler, ready, now = delivery
+    identity, intent = begin(scheduler)
+    path = tmp_path / 'ticket.json'; path.write_text(json.dumps(intent['ticket']), encoding='utf-8')
+    spec = importlib.util.spec_from_file_location('queue_unknown_cli', Path(__file__).resolve().parents[1] / 'scripts/subtitle_delivery_queue.py')
+    cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+    monkeypatch.setattr(cli, 'ControlStore', lambda path: db)
+    monkeypatch.setattr(cli, 'SubtitleDelivery', lambda store, initialize=True: scheduler)
+    before = scheduler.get(identity)
+    monkeypatch.setattr(sys, 'argv', ['queue', '--db', str(db.path), 'unknown', identity, '--ticket', str(path)])
+    cli.main(); result = json.loads(capsys.readouterr().out)
+    assert result['outcome'] == 'interrupted' and result['state_changed'] == 0
+    assert scheduler.get(identity) == before
+    db.set(RECEIPT_REQUIRED_KEY, True)
+    monkeypatch.setattr(sys, 'argv', ['queue', '--db', str(db.path), 'unknown', identity])
+    with pytest.raises(ValueError, match='ticket required'):
+        cli.main()
+    db.set(RECEIPT_REQUIRED_KEY, False)
+    cli.main(); result = json.loads(capsys.readouterr().out)
+    assert result['receipt'] == 'legacy' and result['dispatch_state'] == 'unknown'
+
+
+def test_ticket_archive_is_exclusive_and_does_not_accept_job_paths(delivery, tmp_path):
+    import importlib.util
+    from pathlib import Path
+    db, scheduler, ready, now = delivery
+    identity, intent = begin(scheduler)
+    spec = importlib.util.spec_from_file_location('queue_save_cli', Path(__file__).resolve().parents[1] / 'scripts/subtitle_delivery_queue.py')
+    cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+    result = {**intent, 'id': '../../escape'}
+    path = Path(cli.save_ticket(tmp_path / 'anime.db', result))
+    assert path.resolve().parent == (tmp_path / 'subtitle-delivery-tickets').resolve()
+    content = path.read_bytes()
+    with pytest.raises(FileExistsError):
+        cli.save_ticket(tmp_path / 'anime.db', result)
+    assert path.read_bytes() == content

@@ -62,12 +62,14 @@ def save_ticket(db_path, result):
     """Archive the ticket with its tokens next to the database (private); only the path is printed."""
     tickets = Path(db_path).resolve().parent / 'subtitle-delivery-tickets'
     tickets.mkdir(parents=True, exist_ok=True)
-    path = tickets / f"{result['id'].replace(':', '-')}-r{result['revision']}-{hashlib.sha256(result['ticket']['dispatch_token'].encode()).hexdigest()[:8]}.json"
-    path.write_text(json.dumps(result['ticket'], ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    # Hash the job identifier: even a malformed identifier cannot escape this directory.
+    job = hashlib.sha256(result['id'].encode()).hexdigest()[:16]
+    path = tickets / f"{job}-r{result['revision']}-{hashlib.sha256(result['ticket']['dispatch_token'].encode()).hexdigest()[:8]}.json"
+    # Exclusive creation prevents overwriting another archived ticket. On Windows
+    # this inherits the private DB directory's ACL; 0600 only enforces POSIX mode.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        stream.write(json.dumps(result['ticket'], ensure_ascii=False, indent=2) + '\n')
     return str(path)
 
 
@@ -146,7 +148,7 @@ def main():
         p.add_argument('job_id')
         if name != 'unknown':
             p.add_argument('--thread-id', required=True)
-        if name == 'confirm':
+        if name in ('confirm', 'unknown'):
             p.add_argument('--ticket', help='begin ticket file: records a dispatch-receipt/v1 instead of the legacy path')
         if name == 'blocked':
             p.add_argument('--reason', action='append', required=True)
@@ -215,6 +217,12 @@ def main():
             result = delivery.reconcile_dispatch(args.job_id, record['dispatch_token'],
                                                  definitely_not_created=True, absence_evidence=absence_evidence(args.evidence,record))
             result['receipt'] = 'legacy'
+        elif args.command == 'unknown' and args.ticket:
+            ticket = load_ticket(args.ticket)
+            if ticket['job_id'] != args.job_id:
+                raise ValueError('ticket belongs to another job')
+            result = delivery.record_dispatch_receipt(ticket, 'interrupted', evidence={'note': 'dispatch response unknown'},
+                                                      recorded_by='subtitle_delivery_queue unknown --ticket')
         elif args.command == 'confirm' and args.ticket:
             ticket = load_ticket(args.ticket)
             if ticket['job_id'] != args.job_id:

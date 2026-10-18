@@ -124,3 +124,13 @@ jobs/events保存派发/回执/阻塞/完成时间；单集run另记各阶段实
 # 操作回执的证据绑定
 
 `not-created --evidence` 的 JSON 除 `checked_at`、`method`、`checked_by` 外，还必须含当前 `job_id` 与 `dispatch_token`。检查时间须带时区且晚于当前派发状态；旧派发证据不能释放新的未知派发。证据文件名和实际内容 SHA-256 由工具计算，证据内同名字段不能覆盖它们。回执只供本机留存，不公开 token。
+
+## v1 owner 安全边界与迁移
+
+begin 在同一事务的 dispatch-ticket-issued 事件保存完整票据摘要；回执的原票据（包括签发时间、动作及负责线程）必须匹配。不能修改签发时间重用旧证据，也不从当前 job 补造旧票据。旧 begin 没有摘要时仍属 legacy，不能宣称为 v1。
+
+响应丢失使用 interrupted JOB_ID --ticket PATH，或等价的 unknown JOB_ID --ticket PATH；只记诊断，job 保持 committing，不释放、不重投。v1 不新增 unknown 结果。无票据的旧 unknown 暂保留原 blocked/unknown 语义且标 legacy；强制开关启用后拒绝。迁移任务与提示词必须另行 owner 审查，本次保持开关关闭。
+
+证据结构有效不等于宿主操作确定未创建。生产当前没有获准的终态核验适配器，因此 v1 not-created 返回 receipt_accepted=0, state_changed=0, reason=evidence_invalid 并保留 committing；单次空列表、method/checked_by、文件 hash 或 JSON 中自报 terminal=true 均不能解除保护。以后可信只读 absence_verifier(ticket, evidence, host_ref) 必须在服务事务内核验绑定的宿主 operation/request 的不可再完成终态、证据原文/hash及检查身份；适配器不得产生外部副作用或阻塞等待。未配置、异常或返回非 True 均拒绝。合成测试适配器只存在于隔离测试。
+
+票据归档文件含原始凭据，文件名使用 job 摘要且独占创建，避免路径穿越与覆盖。POSIX 使用 0600；Windows 继承数据库私有目录的 ACL，0600 本身不提供 Windows ACL 隔离。不要把票据放入共享目录或输出其内容。回执台账只存摘要；证据中夹带原始派发/租约 token 会被拒绝。

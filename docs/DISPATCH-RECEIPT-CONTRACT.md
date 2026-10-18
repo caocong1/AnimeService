@@ -1,8 +1,10 @@
-# Owner review: dispatch receipt v1 (not implemented)
+# Owner review: dispatch receipt v1 (staged implementation)
 
-The proposal is approved for implementation **with the changes below**. No new
-receipt table, CLI contract, or production state transition is implemented by
-this document. Existing deployment and ownership protections remain in force.
+The ledger, immutable begin-ticket binding, created acknowledgement and diagnostic
+paths are implemented. Enforcement remains off. Production v1 not-created
+application is disabled until an owner-reviewed trusted host adapter can verify
+terminal absence; a list snapshot or caller assertion cannot authorize release.
+Existing deployment and ownership protections remain in force.
 
 ## Distinguish the facts
 
