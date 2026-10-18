@@ -425,7 +425,7 @@ $acl=Get-Acl -LiteralPath $p
 foreach($r in $acl.Access){
   if($r.AccessControlType -eq 'Allow'){
     $sid=$r.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-    if($sid -ne $user -and $sid -ne 'S-1-5-18'){exit 3}
+    if($sid -ne $user -and $sid -ne 'S-1-5-18'){Write-Output "unexpected principal $($r.IdentityReference) ($sid) for user $user"; exit 3}
   }
 }
 """.replace('PATH_BASE64', encoded)
@@ -433,7 +433,8 @@ foreach($r in $acl.Access){
     result = subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-EncodedCommand',argument],
                             capture_output=True, timeout=5, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     if result.returncode:
-        raise ValueError('output parent must permit only current user and SYSTEM')
+        detail = ' '.join((result.stdout + result.stderr).decode('utf-8', 'replace').split())[:300]
+        raise ValueError(f'output parent must permit only current user and SYSTEM (check exit {result.returncode}: {detail or "no output"})')
 
 
 def write_report(report, out):
