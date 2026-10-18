@@ -20,8 +20,10 @@ class WriterCoordinatorTest {
         val sent = mutableListOf<String>()
         val bodies = mutableListOf<Map<String, Any?>>()
         val gates = mutableListOf<CompletableDeferred<Response>>()
+        var immediateClaim: Response? = null   // a claim answered without suspending, so a test can re-claim ahead of a queued job
         override suspend fun post(path: String, body: Map<String, Any?>, keepalive: Boolean): Response {
             sent += path; bodies += body
+            if (path == PlaybackWriterClient.CLAIM) immediateClaim?.let { return it }
             return CompletableDeferred<Response>().also { gates += it }.await()
         }
         override suspend fun get(path: String): Response { sent += path; return PlaybackWriterClientTest.state(0) }
@@ -119,6 +121,31 @@ class WriterCoordinatorTest {
             assertNotEquals(Status.WRITING, c2.status); assertFalse(ui2.events.contains("save")); assertEquals(1, t2.gates.size)
         }
         app.cancel()
+    }
+
+    @Test fun queuedOperationsCarryTheIdentityOfTheirCall() = runBlocking<Unit> {   // owner round-22 group 2: launches in this scope run only when the test yields
+        val t = Gate(); val ui = Ui(); val co = coordinator(ui)
+        val c = client(t); co.open(V2) { c }; yield()
+        co.claim(Mode.OPEN, null)                                                        // queued, not started
+        co.stopWriting()                                                                 // onStop before the queue ran
+        yield()
+        assertEquals(1, t.sent.size); assertFalse(ui.events.contains("save"))            // the claim never left
+        co.claim(Mode.OPEN, null); t.until(1); t.gates[0].complete(ok(1)); yield()       // and the flag is free for a real one
+        assertEquals(Status.WRITING, c.status)
+        co.save(10.0, 100.0, true)                                                       // queued under generation 1
+        t.immediateClaim = ok(2); assertTrue(c.claim().ok); assertEquals(2L, c.generation)   // an explicit re-claim before the queue ran
+        yield()
+        assertEquals(3, t.sent.size); assertEquals(PlaybackWriterClient.CLAIM, t.sent.last())   // position 10 never left, under no generation
+        co.save(11.0, 100.0, true); t.until(2)
+        assertEquals(2L, t.bodies.last()["generation"]); assertEquals(1L, t.bodies.last()["sequence"]); assertEquals(11.0, t.bodies.last()["position"])
+        t.gates[1].complete(applied(2, 1)); yield()
+        for (close in listOf<(WriterCoordinator) -> Unit>({ it.final(1.0, 2.0, false, this) }, { it.dispose() }, { it.open(V2) { client(Gate()) } })) {
+            val t2 = Gate(); val ui2 = Ui(); val co2 = coordinator(ui2)
+            val c2 = client(t2); co2.open(V2) { c2 }; yield()
+            co2.claim(Mode.OPEN, null)                                                   // queued
+            close(co2); yield()
+            assertEquals(1, t2.sent.size); assertFalse(ui2.events.contains("save"))      // closed before it could start
+        }
     }
 
     @Test fun withoutTheCapabilityNoV2RequestLeavesAndTheLegacyRouteStopsAtADurableFence() = runBlocking<Unit> {

@@ -38,6 +38,7 @@ class WriterCoordinator(private val scope: CoroutineScope, private val ui: Ui, p
         private set
     val intent = PlayIntent()   // one-shot, bound to a media, consumed by its first real playback
     private var claiming = false
+    private var ops = 0L        // bumped by every action that closes queued operations: open, final, stop, dispose
 
     /** Opens a writer only when the bootstrap advertised the capability; any previous writer is disposed. */
     fun open(capabilities: Map<String, Any?>?, make: () -> PlaybackWriterClient) {
@@ -46,6 +47,7 @@ class WriterCoordinator(private val scope: CoroutineScope, private val ui: Ui, p
         writer?.dispose()
         writer = client
         claiming = false
+        ops++
         client.onChange { if (writer === client) ui.render() }
         ui.render()
         scope.launch {
@@ -73,8 +75,10 @@ class WriterCoordinator(private val scope: CoroutineScope, private val ui: Ui, p
         val w = writer ?: return
         if (claiming) return
         claiming = true
+        val op = ops                                   // the identity of this call: closed by a stop/final/dispose/open before it runs
         scope.launch {
             try {
+                if (writer !== w || ops != op) return@launch
                 val r = w.claim(mode, expected)
                 if (writer === w) {   // a late result of a replaced writer touches nothing
                     ui.render()
@@ -93,9 +97,9 @@ class WriterCoordinator(private val scope: CoroutineScope, private val ui: Ui, p
         val id = media ?: return
         val w = writer
         if (w != null) {
-            if (w.status != PlaybackWriterClient.Status.WRITING) { ui.render(); return }
-            scope.launch {   // the client serializes the sequence; transport faults are classified inside, never thrown
-                w.progress(position, duration, playing)
+            val job = w.progressJob(position, duration, playing) ?: run { ui.render(); return }   // bound NOW to the live fence
+            scope.launch {   // the client serializes the sequence and re-checks the identity; transport faults are classified inside, never thrown
+                job()
                 if (writer === w) ui.render()
             }
             return
@@ -116,6 +120,7 @@ class WriterCoordinator(private val scope: CoroutineScope, private val ui: Ui, p
     /** The last snapshot, captured now on this thread and sent by [sender] even after the activity is gone; its answer updates nobody. */
     fun final(position: Double, duration: Double, playing: Boolean, sender: CoroutineScope) {
         val w = writer ?: return
+        ops++
         val job = w.final(position, duration, playing)
         sender.launch { job() }
         ui.render()
@@ -124,12 +129,13 @@ class WriterCoordinator(private val scope: CoroutineScope, private val ui: Ui, p
     /** Nothing to snapshot: writing still stops now and an in-flight claim is closed. */
     fun stopWriting() {
         val w = writer ?: return
+        ops++
         w.suspendWriting()
         ui.render()
     }
 
     /** The activity is destroyed: late answers become inert; a final snapshot already captured still goes out. */
-    fun dispose() { writer?.dispose() }
+    fun dispose() { ops++; writer?.dispose() }
 
     companion object {
         const val FAILED = "进度未保存：连接失败"

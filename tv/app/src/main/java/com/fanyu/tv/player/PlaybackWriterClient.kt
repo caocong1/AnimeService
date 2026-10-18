@@ -114,6 +114,7 @@ class PlaybackWriterClient(
         return when {
             r.status == 0 -> Classified("network", body, 0)
             r.status == SERVER_CHANGED -> Classified("protocol", body, 0)
+            r.status == CAPABILITY_WITHDRAWN -> Classified("disabled", body, 0)
             r.status == 503 || body?.get("reason") == "disabled" -> Classified("disabled", body, r.status)
             r.status == 409 && body?.get("reason") is String -> Classified("conflict", body, 409)
             r.status == 401 || r.status == 403 -> Classified("unauthorized", body, r.status)
@@ -171,19 +172,19 @@ class PlaybackWriterClient(
         val requestId = random(16)
         val token = random(32)
         require(requestId.length >= 16 && token.length in 32..128) { "random identifiers are too short" }
-        val started = update {
+        val started: Any = update {
             if (status == Status.DISPOSED || status == Status.HALTED || status == Status.UNSUPPORTED) return@update ClaimResult(false, status.name.lowercase(), generation, null)
             if (claiming) return@update ClaimResult(false, "claim_in_progress", generation, null)
             claiming = true
             claimTicket = ++claimSerial
             epoch++; lane++; fence = null; sequence = 0; lastError = null; finalPermit = null; finalUsed = false   // every older claim, job, permit and answer is inert
-            null
+            claimTicket                                    // this attempt's immutable identity, handed out in the same transaction that allocated it
         }
-        if (started != null) return started
-        val myClaim = synchronized(lock) { claimTicket }
-        // The claim identity is immutable: a final, a suspend, a halt, a dispose or a newer claim closes it, and every later
-        // step of this attempt (retry, answer, verification, install) is inert. Monitor held by the caller.
-        fun mine() = claimTicket == myClaim && status != Status.DISPOSED && status != Status.HALTED && status != Status.UNSUPPORTED
+        if (started is ClaimResult) return started
+        val myClaim = started as Long
+        // The identity is positive and immutable: a final, a suspend, a halt, a dispose or a newer claim closes it, and every later
+        // step of this attempt (send, retry, answer, verification, install) is inert. Monitor held by the caller.
+        fun mine() = myClaim > 0 && claimTicket == myClaim && status != Status.DISPOSED && status != Status.HALTED && status != Status.UNSUPPORTED
         fun closed() = ClaimResult(false, if (claimTicket == myClaim) status.name.lowercase() else "superseded", generation, null)
         try {
             val expected = expectedGeneration ?: generation
@@ -274,14 +275,27 @@ class PlaybackWriterClient(
         }
     }
 
+    /** A regular packet bound NOW to the live fence, lane and epoch (null unless WRITING); whoever runs it later re-checks that identity. */
+    private fun capture(path: String, extra: Map<String, Any?>): Captured? =
+        update { val f = fence; if (status != Status.WRITING || f == null) null else Captured(Ticket(epoch, lane, f.generation, f.token), path, extra.toMap(), false) }
+
     private suspend fun send(path: String, extra: Map<String, Any?>): SendResult {
-        val c = update { val f = fence; if (status != Status.WRITING || f == null) null else Captured(Ticket(epoch, lane, f.generation, f.token), path, extra.toMap(), false) }
-            ?: return SendResult(false, skipReason())
+        val c = capture(path, extra) ?: return SendResult(false, skipReason())
         return order.withLock { execute(c) }
     }
 
     suspend fun progress(position: Double, duration: Double, playing: Boolean): SendResult =
         send(PROGRESS, mapOf("position" to position, "duration" to duration, "playing" to playing))
+
+    /**
+     * Captures a progress snapshot NOW (null unless WRITING) as a job an outer queue may run later: it keeps
+     * the fence it was captured under, so a snapshot queued before a newer claim, a final or a stop never
+     * leaves, let alone under another generation.
+     */
+    fun progressJob(position: Double, duration: Double, playing: Boolean): (suspend () -> SendResult)? {
+        val c = capture(PROGRESS, mapOf("position" to position, "duration" to duration, "playing" to playing)) ?: return null
+        return { order.withLock { execute(c) } }
+    }
 
     suspend fun heartbeat(): SendResult = send(HEARTBEAT, emptyMap())
 
@@ -343,6 +357,8 @@ class PlaybackWriterClient(
         const val LABEL_MAX = 32
         /** Transport status meaning the bound server changed underneath: a protocol failure, never a retry target. */
         const val SERVER_CHANGED = -2
+        /** Transport status meaning a token refresh came back without the negotiated capability: disabled, writing stops. */
+        const val CAPABILITY_WITHDRAWN = -3
         private const val MAX_SEQUENCE = 2147483647L
         private const val MAX_SAFE = 9007199254740991L
         private val HALT = setOf("disabled", "protocol", "unauthorized")

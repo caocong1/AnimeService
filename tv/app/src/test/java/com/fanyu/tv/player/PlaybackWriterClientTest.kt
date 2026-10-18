@@ -194,7 +194,8 @@ class PlaybackWriterClientTest {
 
     @Test fun disabledNotFoundAuthorizationOrServerChangeHaltAndRefuseNewClaims() = runBlocking<Unit> {   // owner findings 3, 4
         for ((status, body, expected) in listOf(Triple(503, mapOf("reason" to "disabled"), "disabled_503"), Triple(404, mapOf("detail" to "x"), "protocol_404"),
-                                                Triple(401, mapOf("error" to "login"), "unauthorized_401"), Triple(PlaybackWriterClient.SERVER_CHANGED, null, "protocol"))) {
+                                                Triple(401, mapOf("error" to "login"), "unauthorized_401"), Triple(PlaybackWriterClient.SERVER_CHANGED, null, "protocol"),
+                                                Triple(PlaybackWriterClient.CAPABILITY_WITHDRAWN, null, "disabled"))) {
             val fake = Fake { path, _, _ -> if (path.endsWith("/claim")) ok(1) else Response(status, body) }
             val c = client(fake)
             c.claim()
@@ -389,6 +390,33 @@ class PlaybackWriterClientTest {
         assertEquals("suspended", c.progress(4.0, 9.0, true).reason); assertEquals("suspended", c.final(4.0, 9.0, false)().reason)
         val again = async { c.claim() }; g.until(3); g.list[2].complete(ok(2)); assertTrue(again.await().ok)
         assertEquals(3, g.list.size)
+    }
+
+    @Test fun theClaimTicketIsHandedOutInItsOwnTransactionAndZeroIsNeverValid() = runBlocking<Unit> {   // owner round-22 group 1
+        var c: PlaybackWriterClient? = null                                                // the first send is the earliest point after allocation:
+        val fake = Fake { _, _, n -> if (n == 1) { c!!.suspendWriting(); ok(1) } else ok(2) }   // a stop there, before any answer, closes the attempt
+        c = client(fake)
+        val r = c.claim()
+        assertFalse(r.ok); assertEquals("superseded", r.reason); assertEquals(Status.IDLE, c.status); assertEquals(1, fake.calls.size)
+        assertEquals("no_claim", c.progress(1.0, 2.0, true).reason)
+        assertTrue(c.claim().ok); assertEquals(Status.WRITING, c.status)                  // a fresh attempt allocates its own positive ticket
+    }
+
+    @Test fun aProgressJobKeepsTheFenceItWasCapturedUnderAndAWithdrawnCapabilityHalts() = runBlocking<Unit> {   // owner round-22 groups 2 and 4
+        val g = Gates()
+        var gen = 0L
+        val fake = Fake { path, _, _ -> if (path.endsWith("/claim")) ok(++gen) else g.next() }
+        val c = client(fake)
+        assertNull(c.progressJob(1.0, 2.0, true))                                         // nothing to capture before a claim
+        c.claim()
+        val queued = c.progressJob(10.0, 100.0, true)!!                                   // captured under generation 1, run later
+        assertTrue(c.claim().ok); assertEquals(2L, c.generation)                          // an explicit re-claim meanwhile
+        assertEquals("stale_response", queued().reason); assertEquals(2, fake.calls.size) // never sent, never rebound
+        val live = c.progressJob(11.0, 100.0, true)!!
+        val sent = async { live() }; g.until(1)
+        assertEquals(2L, fake.calls[2].body["generation"]); assertEquals(1L, fake.calls[2].body["sequence"])
+        g.list[0].complete(Response(PlaybackWriterClient.CAPABILITY_WITHDRAWN, null))
+        assertEquals("disabled", sent.await().reason); assertEquals(Status.HALTED, c.status); assertEquals("halted", c.claim().reason)
     }
 
     @Test fun anOlderServerLeavesTheClientUnsupportedBeforeAnyClaim() = runBlocking<Unit> {
