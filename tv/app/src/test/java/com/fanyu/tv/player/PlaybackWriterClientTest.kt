@@ -60,7 +60,7 @@ class PlaybackWriterClientTest {
         assertEquals("电视播放器 ABAB", PlaybackWriterClient.deviceLabel("电视播放器") { n -> "ab".repeat(n) })
     }
 
-    @Test fun weakIdentitiesAreRefused() = runBlocking {
+    @Test fun weakIdentitiesAreRefused() = runBlocking<Unit> {
         val fake = Fake { _, _, _ -> ok(1) }
         assertThrows(IllegalArgumentException::class.java) { PlaybackWriterClient(key, "short", "电视播放器", fake) }
         assertThrows(IllegalArgumentException::class.java) { PlaybackWriterClient(key, session, "\u0000", fake) }
@@ -70,7 +70,7 @@ class PlaybackWriterClientTest {
         assertEquals(0, fake.calls.size)
     }
 
-    @Test fun stateNeverClaimsRemembersTheGenerationAndRequiresTheEcho() = runBlocking {
+    @Test fun stateNeverClaimsRemembersTheGenerationAndRequiresTheEcho() = runBlocking<Unit> {
         val fake = Fake { _, _, _ -> ok(8) }
         fake.stateAnswer = state(7, true, "网页播放器 1A2B")
         val c = client(fake)
@@ -84,7 +84,7 @@ class PlaybackWriterClientTest {
         assertEquals("invalid_state", c2.state().reason); assertEquals(Status.HALTED, c2.status)
     }
 
-    @Test fun aClaimNeedsOkCanonicalKeyEchoGenerationAndFiniteExpires() = runBlocking {
+    @Test fun aClaimNeedsOkCanonicalKeyEchoGenerationAndFiniteExpires() = runBlocking<Unit> {
         val answers = ArrayDeque(listOf(Response(500, null), Response(200, mapOf("ok" to true)),
             Response(200, mapOf("ok" to true, "media_key" to "other", "requested_media_key" to key, "generation" to 1L, "expires" to 1.0)),
             Response(200, mapOf("ok" to true, "media_key" to key, "requested_media_key" to "other", "generation" to 1L, "expires" to 1.0)),
@@ -96,7 +96,7 @@ class PlaybackWriterClientTest {
         assertTrue(c.claim().ok); assertEquals(Status.WRITING, c.status)
     }
 
-    @Test fun aSaveSucceedsOnlyWithItsOwnGenerationAndSequence() = runBlocking {
+    @Test fun aSaveSucceedsOnlyWithItsOwnGenerationAndSequence() = runBlocking<Unit> {
         suspend fun after(reply: Response): Pair<PlaybackWriterClient, PlaybackWriterClient.SendResult> {
             val fake = Fake { path, _, _ -> if (path.endsWith("/claim")) ok(3) else reply }
             val c = client(fake); c.claim(); return c to c.progress(1.0, 9.0, true)
@@ -109,7 +109,7 @@ class PlaybackWriterClientTest {
         after(Response(500, null)).let { (c, r) -> assertEquals("server_500", r.reason); assertEquals(Status.WRITING, c.status); assertTrue(c.unsaved) }   // a server fault keeps the fence
     }
 
-    @Test fun conflictTakeoverAndNoDoubleClaim() = runBlocking {
+    @Test fun conflictTakeoverAndNoDoubleClaim() = runBlocking<Unit> {
         val fake = Fake { _, _, n -> if (n == 1) conflict("takeover_required", "generation" to 4L, "active" to true, "device_id" to "网页播放器 1A2B") else ok(5, 50.0) }
         val c = client(fake)
         val first = c.claim()
@@ -121,7 +121,7 @@ class PlaybackWriterClientTest {
         assertNotEquals(fake.calls[0].body["request_id"], fake.calls[1].body["request_id"]); assertNotEquals(fake.calls[0].body["writer_token"], fake.calls[1].body["writer_token"])
     }
 
-    @Test fun queuedPacketsFromAnOlderFenceAreDroppedNeverReboundToANewClaim() = runBlocking {   // owner repro 1
+    @Test fun queuedPacketsFromAnOlderFenceAreDroppedNeverReboundToANewClaim() = runBlocking<Unit> {   // owner repro 1
         val g = Gates()
         val fake = Fake { _, _, _ -> g.next() }
         val c = client(fake)
@@ -138,7 +138,7 @@ class PlaybackWriterClientTest {
         g.list[3].complete(applied(2, 1)); assertTrue(fresh.await().ok)
     }
 
-    @Test fun lateAnswersOfOlderHeartbeatReleaseOrClaimNeverTouchTheCurrentFence() = runBlocking {
+    @Test fun lateAnswersOfOlderHeartbeatReleaseOrClaimNeverTouchTheCurrentFence() = runBlocking<Unit> {
         val g = Gates()
         val fake = Fake { _, _, _ -> g.next() }
         val c = client(fake)
@@ -157,7 +157,7 @@ class PlaybackWriterClientTest {
         g.list[5].complete(ok(4)); assertEquals(4L, slow.await().generation)
     }
 
-    @Test fun disabledNotFoundOrAuthorizationFailuresHaltWriting() = runBlocking {   // owner repro 3
+    @Test fun disabledNotFoundOrAuthorizationFailuresHaltWriting() = runBlocking<Unit> {   // owner repro 3
         for ((status, body, expected) in listOf(Triple(503, mapOf("reason" to "disabled"), "disabled_503"), Triple(404, mapOf("detail" to "x"), "protocol_404"), Triple(401, mapOf("error" to "login"), "unauthorized_401"))) {
             val fake = Fake { path, _, _ -> if (path.endsWith("/claim")) ok(1) else Response(status, body) }
             val c = client(fake)
@@ -168,7 +168,7 @@ class PlaybackWriterClientTest {
         }
     }
 
-    @Test fun disposedIsTerminalExceptForAFinalSnapshotCapturedBefore() = runBlocking {   // owner repro 4 + TV repro
+    @Test fun disposedIsTerminalExceptForAFinalSnapshotCapturedBefore() = runBlocking<Unit> {   // owner repro 4 + TV repro
         val g = Gates()
         val fake = Fake { _, _, _ -> g.next() }
         val c = client(fake)
@@ -189,7 +189,7 @@ class PlaybackWriterClientTest {
         assertFalse(seen.contains(Status.DISPOSED))                                       // the answer updated no listener
     }
 
-    @Test fun transportExceptionsAreNetworkFailuresAndCancellationIsRethrown() = runBlocking {   // owner repro 5
+    @Test fun transportExceptionsAreNetworkFailuresAndCancellationIsRethrown() = runBlocking<Unit> {   // owner repro 5
         var n = 0
         val fake = Fake { _, _, _ -> n++; if (n == 1) throw IllegalStateException("boom") else if (n == 2) ok(1) else throw IllegalStateException("boom") }
         fake.stateAnswer = state(1, true, "电视播放器 7F3A")
@@ -202,7 +202,7 @@ class PlaybackWriterClientTest {
         assertThrows(CancellationException::class.java) { runBlocking { c2.claim() } }
     }
 
-    @Test fun serverChangeHaltsInsteadOfReplayingElsewhere() = runBlocking {
+    @Test fun serverChangeHaltsInsteadOfReplayingElsewhere() = runBlocking<Unit> {
         val fake = Fake { path, _, _ -> if (path.endsWith("/claim")) ok(1) else Response(PlaybackWriterClient.SERVER_CHANGED, null) }
         val c = client(fake)
         c.claim()
@@ -210,7 +210,7 @@ class PlaybackWriterClientTest {
         assertEquals(2, fake.calls.size)
     }
 
-    @Test fun progressHeartbeatAndReleaseShareOneSerializedSequenceAndOutOfOrderIsNotASave() = runBlocking {
+    @Test fun progressHeartbeatAndReleaseShareOneSerializedSequenceAndOutOfOrderIsNotASave() = runBlocking<Unit> {
         val g = Gates()
         val fake = Fake { path, _, _ -> if (path.endsWith("/claim")) ok(3) else g.next() }
         val c = client(fake)
@@ -227,7 +227,7 @@ class PlaybackWriterClientTest {
         assertTrue(packets.all { it.body["generation"] == 3L && it.body["writer_token"] == fake.calls[0].body["writer_token"] })
     }
 
-    @Test fun fencedExpiredAndSessionRequiredStopWritingUntilAnExplicitReclaim() = runBlocking {
+    @Test fun fencedExpiredAndSessionRequiredStopWritingUntilAnExplicitReclaim() = runBlocking<Unit> {
         for (reason in listOf("fenced", "expired", "session_required")) {
             var n = 0L
             val fake = Fake { path, _, _ -> if (path.endsWith("/claim")) ok(++n) else conflict(reason, "generation" to 7L, "active" to true, "device_id" to "<script>TV</script>") }
@@ -241,7 +241,7 @@ class PlaybackWriterClientTest {
         }
     }
 
-    @Test fun retriedOrReplayedClaimsAreVerifiedThroughState() = runBlocking {
+    @Test fun retriedOrReplayedClaimsAreVerifiedThroughState() = runBlocking<Unit> {
         val good = Fake { _, _, n -> if (n == 1) Response(0, null) else ok(2) }
         good.stateAnswer = state(2, true, "电视播放器 7F3A")
         assertTrue(client(good).claim().ok)
@@ -252,7 +252,7 @@ class PlaybackWriterClientTest {
         assertFalse(r.ok); assertEquals("verify_failed", r.reason); assertEquals(Status.STALE, c.status); assertEquals("网页播放器 1A2B", c.conflict?.device)
     }
 
-    @Test fun anOlderServerLeavesTheClientUnsupportedBeforeAnyClaim() = runBlocking {
+    @Test fun anOlderServerLeavesTheClientUnsupportedBeforeAnyClaim() = runBlocking<Unit> {
         val fake = Fake { _, _, _ -> throw AssertionError("must not be called") }
         fake.stateAnswer = Response(503, mapOf("reason" to "disabled"))
         val c = client(fake)
