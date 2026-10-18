@@ -45,13 +45,13 @@ class WriterConflict(ValueError):
 class PlaybackMediaResolver:
     """Resolve server inventory/release aliases to the EXISTING progress row.
 
-    Ordinary identity retains the inventory's path-derived key and size check;
-    this does not claim to hash or detect same-size replacement bytes. Finished
+    Ordinary identity retains the progress row but requires registered full-byte
+    version evidence. Missing evidence or unverifiable replacement is refused. Finished
     identity uses the trusted release manifest's video signature. No caller may
     supply its own path, signature or alias map.
     """
-    def __init__(self, player):
-        self.player = player
+    def __init__(self, player, ordinary_versions=None):
+        self.player,self.ordinary_versions = player,ordinary_versions
 
     def __call__(self, requested):
         if not isinstance(requested, str) or not 1 <= len(requested) <= 200:
@@ -77,6 +77,9 @@ class PlaybackMediaResolver:
         key = hashlib.sha256(str(Path(row['path'])).lower().encode()).hexdigest()[:32]
         if row.get('id') != requested or key != requested:
             raise ValueError('media inventory identity changed')
+        if self.ordinary_versions is None:
+            raise ValueError('ordinary media version verifier is unavailable')
+        self.ordinary_versions.verify(row)
         return key
 
 

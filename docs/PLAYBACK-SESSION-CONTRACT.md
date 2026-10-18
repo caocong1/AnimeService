@@ -1,6 +1,6 @@
 # Explicit playback writer takeover — owner proposal v2
 
-Status: **core/resolver and passive legacy fences implemented; no production v2
+Status: **core/resolver/passive fences and isolated HTTP adapter implemented; no production v2
 constructor, routes, advertisement or activation**. Production accepts v1 progress while the
 capability is off and no durable fence exists. Finished releases require session+sequence; ordinary
 media permits older clients, including TV, without these fields. V1 orders
@@ -88,7 +88,7 @@ for passive legacy guards and structured 409 handling; imports create no tables/
 The capability callback defaults to false; its internal capabilities() result is
 not a production capability response. No Web/TV client has been upgraded here.
 
-The trusted future adapter resolves canonical media identity (including finished
+The explicitly injected adapter resolves canonical media identity (including finished
 release signature), applies existing origin/auth guards, and maps claim conflicts
 and WriterConflict to structured HTTP 409. The core returns historical claim
 results on identical retries; replay is not evidence that a writer is still live.
@@ -108,7 +108,7 @@ after expiry, release or feature-off. Direct progress returns structured 409
 session_required; the importer skips/counts only fenced progress, preserving
 independently verified watched facts and manual priority.
 
-The future trusted adapter must install its enabled callback on the shared Store
+The explicitly injected adapter installs its enabled callback on the shared Store
 as playback_writer_enabled, including all three legacy paths, and atomically wire
 v2 saves to the same canonical row. No production callback or new KV is installed.
 A feature-off core rollback is tested;
@@ -126,11 +126,48 @@ release signatures stay independent. Missing/ambiguous entries, changed mapping,
 missing/changed-size files and a manifest version moving during lookup fail.
 Resolution does not acquire a writer, create tables, or change progress/watches.
 
-Ordinary inventory identity currently hashes the path, not all video bytes. A
-same-path/same-size byte replacement is not detected by that existing check.
-Before activation, define and test trusted ordinary-version evidence or explicitly
-reject unverifiable replacements; do not market the current resolver as a content
-hash verifier. No Web/TV behavior or negotiation was upgraded in this round.
+Owner round 16 requires OrdinaryMediaVersions for ordinary v2 resolution. No
+verifier/registration means rejection, not an automatic first-request pin. A
+trusted control-plane verifier supplies its independently known full SHA-256 to
+register(); the local registry binds the existing media key/path/size and
+show/episode/season association immutably. Rebinding that key to changed content
+or association is forbidden, including after restart. This has no HTTP enrolment
+endpoint, no production constructor and no progress/history backfill. Unknown
+historical progress is not retroactively certified by initial registration.
+
+Every resolution rereads all bytes, compares the digest, checks handle stability
+and path identity, and rechecks association. Default limits are 1 GiB and two
+seconds; limits are trusted constructor values, not packet fields. Missing,
+changed, oversize, timed-out or unverifiable media fail closed. Same-size content
+replacement with restored mtime is rejected; identical content at the same alias
+continues to use the same progress row. Windows stat/fstat ctime semantics differ,
+so ctime is compared only within one API, not across path/handle calls.
+
+This verifies observed bytes; it does not freeze future writes or make filesystem
+and database updates atomic. Full hashing on every resolution can be expensive,
+and cannot interrupt arbitrary blocked OS I/O. Production registration provenance,
+immutable-publication/handle lifetime and realistic performance acceptance remain
+rollout prerequisites. There is no silent stat-cache shortcut and no mechanism
+to migrate/rebind a replaced ordinary alias in this round.
+
+## Isolated HTTP adapter (owner round 16)
+
+create_app(..., playback_writers=None) is the production default. Only an explicit
+trusted injected instance registers state/claim/progress/heartbeat/release under
+/api/playback-sessions and installs a dynamic playback_writer_enabled callback on
+the SAME Store. It constructs no core or registry itself. Normal production has
+no v2 tables, routes, callback or capability advertisement. No Web/TV negotiation
+or behavior is upgraded.
+
+The routes run through the existing Host/session/Origin/x-anime-token middleware.
+Disabled returns structured 503; takeover/generation/fence/expiry/sequence conflicts
+return structured 409 with ok=false. State does not claim or renew. Invalid input
+does not echo tokens or paths. Claim keeps core idempotence; progress/heartbeat/
+release share sequence and target the existing canonical progress row. Registering
+evidence, changing enablement and client-provided aliases/digests are not public
+operations. No production injection/activation or new key is introduced here.
 
 Transaction references: [SQLite transactions](https://www.sqlite.org/lang_transaction.html),
 [Python sqlite3 transaction control](https://docs.python.org/3.14/library/sqlite3.html#transaction-control).
+Content evidence references: [Python hashlib](https://docs.python.org/3.14/library/hashlib.html),
+[Python stat fields](https://docs.python.org/3.14/library/os.html#os.stat_result).

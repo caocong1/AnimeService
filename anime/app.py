@@ -47,7 +47,7 @@ def status_events(db):
             event['level']='warning' if task_status=='review' else 'info'
     return events
 
-def create_app(db=None,engine=None,start_worker=True):
+def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
     db=db or Store();engine=engine or Engine(db);token=secrets.token_urlsafe(32);jobs=threading.Lock()
     deployment=load_deployment()
     @contextlib.asynccontextmanager
@@ -125,6 +125,9 @@ def create_app(db=None,engine=None,start_worker=True):
             response.headers['Content-Security-Policy']=response.headers['Content-Security-Policy'].replace("script-src 'self'", "script-src 'self' 'wasm-unsafe-eval'")
         return response
     from .playback_writers import WriterConflict
+    if playback_writers is not None:
+        from .playback_writer_api import register_playback_writer_api
+        register_playback_writer_api(app,db,playback_writers)
     @app.exception_handler(WriterConflict)
     async def writer_conflict(request,e):
         return JSONResponse({'error':'播放进度需要新的写入会话','reason':e.reason},status_code=409)
