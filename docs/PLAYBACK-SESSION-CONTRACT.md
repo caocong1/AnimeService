@@ -1,7 +1,7 @@
 # Explicit playback writer takeover — owner proposal v2
 
-Status: reviewed design, **not implemented, advertised, or enabled**. Production
-61c4a15 accepts v1 progress. Finished releases require session+sequence; ordinary
+Status: **isolated backend core implemented; no production imports, routes,
+advertisement or activation**. Production accepts v1 progress. Finished releases require session+sequence; ordinary
 media permits older clients, including TV, without these fields. V1 orders
 packets within a session, but a different session can still write. The existing
 `viewing-session` route protects subtitle work from active viewing; it is not a
@@ -79,3 +79,31 @@ repair or seed production ownership by hand. Rollout needs a signed APK,
 verified signing identity/version and a staged capability switch after both
 clients pass. A rollback must reject stale v2 traffic safely; it cannot silently
 resume legacy writes while a v2 client believes its fence is enforced.
+
+## Implemented core boundary (owner round 12)
+
+`anime/playback_writers.py` is a standalone core, only constructed in isolated
+tests. It is not imported by the app, and creates no production tables or routes.
+The capability callback defaults to false; its internal capabilities() result is
+not a production capability response. No Web/TV client has been upgraded here.
+
+The trusted future adapter resolves canonical media identity (including finished
+release signature), applies existing origin/auth guards, and maps claim conflicts
+and WriterConflict to structured HTTP 409. The core returns historical claim
+results on identical retries; replay is not evidence that a writer is still live.
+A conflict, reclaim or explicit takeover uses a NEW request_id and observed
+expected_generation; clients must never auto-change mode or reuse stale packets.
+
+Progress, heartbeat and release share one strictly increasing sequence. Writer
+generation rows are never pruned, including after release, expiry or feature-off.
+Claim receipts retain both accepted and rejected requests for seven days. Removal
+of a successful claim receipt cannot regrant its old expected_generation.
+
+Before activation, integrate guard_legacy into the SAME transaction of ALL old
+progress writes (ordinary, finished, external history import, and any fallback),
+and wire v2 saves atomically to the same canonical progress row. Do not activate
+only claim routes: current v1 writes would bypass the fence. This round deliberately
+leaves those production paths unchanged. A feature-off core rollback is tested;
+rolling the whole server back to an old binary without these guards is NOT safe
+and has not been accepted. Web/TV visible conflict and explicit takeover, source
+switch/pagehide, mixed-version and real-device QA remain required.
