@@ -99,7 +99,7 @@ fun ConnectScreen(api: Api, prefs: Prefs, startPairing: Boolean, onConnected: ()
                 api.bootstrap(); done()
             } catch (e: ApiError) {
                 if (e.code == 401) { pairing = true; error = null; runCatching { codeFocus.requestFocus() } }
-                else { error = explain(e, url); hideKeyboard(); if (previous.isNotEmpty()) prefs.server = previous }
+                else { error = explain(e, url); hideKeyboard(); if (previous.isNotEmpty()) prefs.server = previous; api.forgetServer() }
             } finally { busy = false }
         }
     }

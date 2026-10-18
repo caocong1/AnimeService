@@ -105,8 +105,7 @@ class PlayerActivity : ComponentActivity() {
     private var danmuJob: Job? = null
     private var subtitleChosen = false
     private var writer: PlaybackWriterClient? = null
-    /** The media a one-shot user Play intent targets; consumed by the first real playback of that media. */
-    private var playIntentFor: String? = null
+    private val playIntent = PlayIntent()   // one-shot, bound to a media, consumed by its first real playback
     private var writerClaiming = false
     private var legacyFenced = false
     private val writerSession = UUID.randomUUID().toString()
@@ -117,7 +116,7 @@ class PlayerActivity : ComponentActivity() {
         showId = intent.getIntExtra("show", 0)
         ui.episode = intent.getIntExtra("episode", 0)
         ui.settings = app.prefs.danmu
-        if (savedInstanceState == null && intent.getBooleanExtra("explicit_play", false)) playIntentFor = PENDING_FIRST_MEDIA
+        if (savedInstanceState == null && intent.getBooleanExtra("explicit_play", false)) playIntent.arm(PENDING_FIRST_MEDIA, false)
 
         val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(true)
         val maxHeapBytes = Runtime.getRuntime().maxMemory()
@@ -205,7 +204,7 @@ class PlayerActivity : ComponentActivity() {
             val ep = show.eps.firstOrNull { it.n == ui.episode }
             val id = ep?.media ?: run { fail("第 ${ui.episode} 集没有可播放的文件"); return@launch }
             media = id
-            if (playIntentFor == PENDING_FIRST_MEDIA) playIntentFor = id
+            playIntent.retarget(PENDING_FIRST_MEDIA, id)
             openWriter(id)
             ui.globalOffset = app.prefs.globalOffset(id)
             danmaku.offsetMillis = (ui.globalOffset * 1000).toLong()
@@ -280,8 +279,8 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    /** A definite user Play/Resume on the current media; consumed once by the first real playback. */
-    private fun writerIntent() { playIntentFor = media }
+    /** A definite user Play/Resume on the current media, registered BEFORE the player is told to play. */
+    private fun writerIntent() { playIntent.arm(media, player.isPlaying) }
 
     /** The last snapshot captured on this thread and sent even if the activity is destroyed first; its answer updates nobody. */
     private fun finalProgress() {
@@ -355,12 +354,9 @@ class PlayerActivity : ComponentActivity() {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             ui.playing = isPlaying
             if (isPlaying) played = true
-            // Autoplay and buffering resumes never claim; one explicit Play/Resume for this media does, once.
-            if (isPlaying) writer?.let { w ->
-                if (w.status != PlaybackWriterClient.Status.WRITING && playIntentFor != null && playIntentFor == media) {
-                    playIntentFor = null
-                    claimWriter(PlaybackWriterClient.Mode.OPEN, null)
-                }
+            // Autoplay and buffering resumes never claim; one explicit Play/Resume for this media is consumed by its first real playback.
+            if (isPlaying && playIntent.consume(media)) writer?.let { w ->
+                if (w.status != PlaybackWriterClient.Status.WRITING) claimWriter(PlaybackWriterClient.Mode.OPEN, null)
             }
             danmaku.wake()
         }
@@ -413,8 +409,10 @@ class PlayerActivity : ComponentActivity() {
     val actions = object : PlayerActions {
         override fun togglePlay() {
             if (player.playbackState == Player.STATE_ENDED) player.seekTo(0)
-            player.playWhenReady = !player.playWhenReady
-            if (player.playWhenReady) writerIntent() else saveProgress()   // a user Play on the controls; a pause saves
+            val starting = !player.playWhenReady
+            if (starting) writerIntent()                      // registered before the player changes: a synchronous callback still sees it
+            player.playWhenReady = starting
+            if (!starting) saveProgress()
         }
 
         override fun takeoverProgress() {
@@ -494,11 +492,14 @@ class PlayerActivity : ComponentActivity() {
         }
         if (legacyFenced) return   // a durable writer fence exists: this client must stop writing until a new session is negotiated
         val body = JSONObject().put("position", pos).put("duration", duration).put("playing", playing)
-        app.scope.launch {
-            try { app.api.post("/api/web/media/$id/progress", body); ui.progressStatus = "" }
-            catch (e: ApiError) {   // visible, never swallowed
+        lifecycleScope.launch {   // cancelled with the activity: no UI callback outlives it
+            if (legacyFenced || media != id) return@launch   // re-checked when the queued coroutine actually starts
+            try {
+                app.api.post("/api/web/media/$id/progress", body)
+                if (!legacyFenced) ui.progressStatus = ""     // an old success never clears a fence that arrived meanwhile
+            } catch (e: ApiError) {   // visible, never swallowed
                 if (PlaybackWriterClient.legacyFenced(e.code, e.details)) { legacyFenced = true; ui.progressStatus = "进度未保存：需要新的播放会话或版本支持" }
-                else ui.progressStatus = "进度未保存：连接失败"
+                else if (!legacyFenced) ui.progressStatus = "进度未保存：连接失败"
             }
         }
     }
@@ -522,7 +523,7 @@ class PlayerActivity : ComponentActivity() {
                 }
                 return true
             }
-            KeyEvent.KEYCODE_MEDIA_PLAY -> { if (down) { writerIntent(); player.play() }; return true }
+            KeyEvent.KEYCODE_MEDIA_PLAY -> { if (down) { if (!player.isPlaying) writerIntent(); player.play() }; return true }
             KeyEvent.KEYCODE_MEDIA_PAUSE -> { if (down) { player.pause(); saveProgress() }; return true }
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_REWIND, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
                 val sign = if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_MEDIA_REWIND) -1 else 1

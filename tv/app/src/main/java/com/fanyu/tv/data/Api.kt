@@ -39,27 +39,32 @@ class Api(private val prefs: Prefs) {
 
     @Volatile private var token: String? = null
     @Volatile private var capabilities: Map<String, Any?> = emptyMap()
-    @Volatile private var capabilityServer: String? = null
+    @Volatile private var capabilitySnapshot: ServerBinding.Snapshot? = null
+    private val binding = ServerBinding()
 
     val base: String get() = prefs.server.trimEnd('/')
 
     fun url(path: String) = base + path
 
-    /** Optional capabilities the bootstrap advertised for the CURRENT server; another server starts from none. */
-    val negotiatedCapabilities: Map<String, Any?> get() = if (capabilityServer == base) capabilities else emptyMap()
+    /** The current server and connection generation; requests bind to it before they start. */
+    fun snapshot(): ServerBinding.Snapshot = binding.bind(base)
+    fun accepts(snapshot: ServerBinding.Snapshot): Boolean = binding.accepts(snapshot, base)
+
+    /** Optional capabilities the bootstrap advertised for the CURRENT server and generation; anything else is none. */
+    val negotiatedCapabilities: Map<String, Any?> get() = capabilitySnapshot?.let { if (accepts(it)) capabilities else null } ?: emptyMap()
 
     suspend fun bootstrap(): JSONObject {
-        val server = base                                   // bound before the request: a switch mid-flight never credits the new server
-        val d = JSONObject(call(Request.Builder().url(server + "/api/bootstrap").build()))
-        if (base != server) throw ApiError(0, "服务器已切换")
+        val snap = snapshot()                                 // bound before the request: a switch mid-flight never credits the new server
+        val d = JSONObject(call(Request.Builder().url(snap.server + "/api/bootstrap").build()))
+        if (!accepts(snap)) throw ApiError(0, "服务器已切换")
         token = d.optString("token")
         capabilities = capabilityWhitelist(d.optJSONObject("capabilities"))
-        capabilityServer = server
+        capabilitySnapshot = snap
         return d
     }
 
-    /** The server changed or pairing ended: nothing negotiated or issued for the old server may be reused. */
-    fun forgetServer() { token = null; capabilities = emptyMap(); capabilityServer = null }
+    /** The server changed, a switch was rolled back or pairing ended: a new generation; nothing old may be reused. */
+    fun forgetServer() { binding.invalidate(); token = null; capabilities = emptyMap(); capabilitySnapshot = null }
 
     /** A structured reply: HTTP status (0 when unreachable) and the JSON object body when there is one. */
     class StructuredReply(val status: Int, val body: Map<String, Any?>?)
@@ -68,27 +73,29 @@ class Api(private val prefs: Prefs) {
      * Writer traffic keeps the structured 409/503 bodies instead of throwing; a 403 refreshes the token
      * once and retries the SAME request, like post(). A GET is sent when [body] is null.
      */
-    suspend fun structured(path: String, body: Map<String, Any?>?, server: String = base): StructuredReply {
-        if (base != server) return StructuredReply(SERVER_CHANGED, null)
+    suspend fun structured(path: String, body: Map<String, Any?>?, snap: ServerBinding.Snapshot = snapshot()): StructuredReply {
+        if (!accepts(snap)) return StructuredReply(SERVER_CHANGED, null)
         if (token == null && body != null) bootstrap()
-        val first = exchange(path, body, server)
+        val first = exchange(path, body, snap)
         if (first.status != 403 || body == null) return first
         if ((first.body?.get("error") as? String)?.contains("不受信任") == true) return first
         bootstrap()
-        if (base != server) return StructuredReply(SERVER_CHANGED, null)   // never replay the packet against another server
-        return exchange(path, body, server)
+        if (!accepts(snap)) return StructuredReply(SERVER_CHANGED, null)   // never replay the packet against another server/generation
+        return exchange(path, body, snap)
     }
 
-    private suspend fun exchange(path: String, body: Map<String, Any?>?, server: String): StructuredReply = withContext(Dispatchers.IO) {
-        if (base != server) return@withContext StructuredReply(SERVER_CHANGED, null)
-        val request = if (body == null) Request.Builder().url(server + path).header("X-Anime-Token", token.orEmpty()).build()
-                      else Request.Builder().url(server + path).header("Origin", origin()).header("X-Anime-Token", token.orEmpty())
+    /** One request against the snapshot's server with the token captured now; URL, Origin and token never read the mutable base. */
+    private suspend fun exchange(path: String, body: Map<String, Any?>?, snap: ServerBinding.Snapshot): StructuredReply = withContext(Dispatchers.IO) {
+        if (!accepts(snap)) return@withContext StructuredReply(SERVER_CHANGED, null)
+        val bearer = token.orEmpty()
+        val request = if (body == null) Request.Builder().url(snap.server + path).header("X-Anime-Token", bearer).build()
+                      else Request.Builder().url(snap.server + path).header("Origin", originOf(snap.server)).header("X-Anime-Token", bearer)
                           .post(JSONObject(body).toString().toRequestBody(JSON)).build()
         try {
             client.newCall(request).execute().use { r ->
                 val text = r.body?.string().orEmpty()
                 val parsed = try { toMap(JSONObject(text)) } catch (e: org.json.JSONException) { null }
-                StructuredReply(r.code, parsed)
+                if (!accepts(snap)) StructuredReply(SERVER_CHANGED, null) else StructuredReply(r.code, parsed)   // a late answer for another generation is dropped
             }
         } catch (e: IOException) {   // SSL failures are IOExceptions too: unreachable, never a success
             StructuredReply(0, null)
@@ -123,8 +130,10 @@ class Api(private val prefs: Prefs) {
         .post(body.toString().toRequestBody(JSON))
         .build()
 
-    private fun origin(): String {
-        val u = base.toHttpUrlOrNull() ?: return base
+    private fun origin(): String = originOf(base)
+
+    private fun originOf(server: String): String {
+        val u = server.toHttpUrlOrNull() ?: return server
         val defaultPort = HttpUrl.defaultPort(u.scheme)
         return u.scheme + "://" + u.host + if (u.port == defaultPort) "" else ":" + u.port
     }
