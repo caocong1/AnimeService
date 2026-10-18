@@ -1,6 +1,6 @@
 # 普通媒体版本证据：发行与迁移前置契约
 
-状态：owner审查设计，**未实现生产发行、bootstrap、迁移或启用**。隔离实现见playback_versions.py及PLAYBACK-SESSION-CONTRACT.md。没有新增入口、生产表或后台扫描；本文件不授权手工灌入进度/版本表。
+状态：owner审查设计，**未实现生产发行、bootstrap、迁移或启用**。隔离发布接口已在ordinary_issuance.py实现，版本库见playback_versions.py及PLAYBACK-SESSION-CONTRACT.md。没有生产构造点、新增入口、生产表或后台扫描；本文件不授权手工灌入进度/版本表。
 
 ## 已核实的输入边界
 
@@ -20,7 +20,42 @@ WebPlayer普通媒体key是现有路径的小写SHA-256前32位；episodes/inven
 
 - 同一已证版本的各种请求别名必须解析到同一canonical progress row；原始位置/观看记录保留，不复制成别名行。
 - 同路径换成不同内容时旧key永不重绑。新版本必须由可信发布过程获得独立不可变身份/受控新路径，并经过实际解析/来源选择契约；旧alias继续拒绝或仅指向保留的旧版本，绝不静默指向新内容。
-- 目前隔离实现仍使用路径key、没有完整的新版本发行/旧alias恢复流程；这是一项阻塞，不能只补一张hash表就开启。
+- 新隔离发行器以完整内容SHA、大小、association_digest生成版本身份，发布到专用objects/<version>/video.bin；其路径key是未来canonical身份。相同内容和映射的多个原始alias只能得到同一发布key；原始alias的签名清单只允许首次创建、之后同值重试，不提供更新/删除接口。不同内容或映射必须另有受信输入身份，不能复用原始alias。
+- 这还不是WebPlayer/resolver/版本库的生产接线：现有inventory不会自动识别发布路径，不能把发布key当作已经可播放或已有progress row。接线前须在同一Store隔离验证“多alias→同一canonical row”；不同版本独立row，不迁移未知legacy位置。
+
+## 隔离发行接口与证据
+
+OrdinaryIssuer只允许显式注入受信source验证密钥、独立publication密钥、已存在的受限目录与server resolver。它不签发source证据，不从当前路径自动学习可信SHA，不读取HTTP参数、生产配置或qB状态，不导入Engine/创建DB。尚未实现独立证据生产者、密钥部署/轮换或人工导入命令。
+
+源证据ordinary-source/v1使用HMAC-SHA256认证（密钥至少32字节；这是受限对称验证边界，不是公开签名）。规范化UTF-8 JSON，排序键、紧凑分隔、拒绝非有限数；MAC绑定schema、key_id和payload，域分隔ordinary-source/v1+NUL。payload固定为issuance_id（32hex）、issued_at/expires_at（Unix秒整数，最长24小时）、source_key、完整sha256、size、association_digest、input_signature、publisher。源SHA必须来自独立受信发行过程，不能由发行器对任意当前路径自签。resolver必须重新执行真实授权/映射/原任务选择清单门禁，input_signature是这些输入的权威签名；合成fixture不等于生产实现。
+
+返回PublicationLease仅在with窗口有效；退出/超时拒绝读取或check_binding。Windows本地固定盘使用CreateFileW只分享FILE_SHARE_READ，打开源、副本、清单和alias，拒绝已有/后续写或删除冲突；全局发布锁share=0、冲突立即失败，不抢占现有写入者。源与副本都完整验SHA，重试也不跳过原片；拒绝reparse/ADS/非普通文件。官方共享契约见[CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)。
+
+这保证的是持有句柄的验收窗口，**不是退出窗口后的永久不可变承诺**。专用目录及祖先必须由owner独占写入、禁止其它发布者和回滚/删除alias；本轮不设置生产ACL，也没有抗恶意存储回滚锚点。签名能发现修改，不能发现整个alias历史被删除；不可信或可回滚目录不能用于生产。后续播放/版本注册必须继续持有受控句柄或重新完整验证，不能依赖一次hash缓存。Key轮换须保留历史验证能力，缺旧key即拒绝。
+
+默认单发布者、8GiB字节上限、120秒合作式时限、64MiB空间预留；构造参数最多64GiB/600秒。源复制与副本复核共用预算，1MiB分块检查；超预算/磁盘不足可见失败。时限不承诺能中断内核单次阻塞IO，也不在HTTP热路径运行。生产前还需专用大文件性能/磁盘预算验收，不能用合成小文件冒充。
+
+## 发布、崩溃与数据库边界
+
+先在专用根的随机独占pending目录写副本/完整清单并fsync，再rename到不可覆盖的版本目录；最后以临时文件+独占hard-link发布alias，不存在部分JSON。重试验证现有对象与清单，不覆盖损坏/冲突对象。失败只清理本次创建的pending固定文件；不删除原片、已发布版本或别人的pending。崩溃可能留下孤儿对象/pending，后续只读列计划，不能自动清旧媒体。rename/fsync不被描述为断电后的完整事务保证。
+
+大文件工作全在DB事务外。未来组合应：取得live PublicationLease → 短Store事务读当前授权/映射/输入 → lease.check_binding(事务内读取的权威事实) → 幂等写版本/alias映射 → 提交前再次assert_live → 提交后释放句柄。check_binding不查文件/活库/IPC，不在DB写锁内等待hash。此流程仍非文件系统与SQLite原子事务；崩溃后对象已发布但DB未登记应可验证重试，不能凭磁盘孤儿推导进度或观看事实。现有OrdinaryMediaVersions.register尚未接入该lease，禁止把两次独立调用说成同事务保证。
+
+## 默认off组合与迁移验收矩阵
+
+生产组合尚未实现。建议按以下门禁逐项提交审查，默认关闭到全部通过：
+
+| 阶段 | 前置/操作 | 必须验证 | 失败/回滚 |
+| --- | --- | --- | --- |
+| 存储与证据 | 独立SHA签发源、密钥生命周期、受限目录/防回滚边界 | 真实授权、选集签名、完整内容绑定；大文件预算 | 拒绝发行，不由播放请求补证 |
+| 身份接线 | lease、真实WebPlayer、OrdinaryMediaVersions、resolver共享Store | 同版alias同row；替换/删除/映射变化拒绝；新版本独立row | 保留旧证据/原进度，不重绑 |
+| schema迁移 | owner显式迁移三个表，记录schema/备份/计划 | 空库/旧库/重试/崩溃恢复；不回填未知legacy版本 | 仅停止宣传；不删除generation/claim幂等记录 |
+| 组合默认off | 真实可信playback_writer_enabled回调、HTTP adapter、既有auth/origin | 关闭不构造三组件/表/路由，不接受客户端开关 | 保持原路径；已有持久fence不可绕过 |
+| 首次进度 | 定义未知legacy位置的可见策略 | 不自动当作已证同版续播、不批量清零/回填 | 用户显式恢复/选择，原行保留 |
+| 客户端就绪 | Web/TV显式claim、结构化冲突/错误、原观看租约 | 跨端/混合版本/迟到响应/并发序号/切源/pagehide | 已协商v2后故障停写，不能回落legacy |
+| 能力宣传 | 全范围证据覆盖与客户端验收后owner显式开启 | bootstrap唯一正协商、共享Store回调与legacy事务fence一致 | 停宣传不清持久fence；旧版本回滚也拒绝绕过 |
+
+当前全局Store回调会拒绝所有legacy写，因此部分媒体支持时不得全局启用；按资源能力需另案审查。默认off组合代码也必须证明关闭时不创建三表，不能仅隐藏UI。TV真机/签名发布另列前置，不用debug CI替代。
 
 ## bootstrap与验收门禁
 
