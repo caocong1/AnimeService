@@ -29,7 +29,7 @@ class ApiError(val code: Int, message: String, val details: Map<String, Any?>? =
  * The AnimeService HTTP API as the web UI uses it. LAN access needs no login; remote HTTPS
  * access uses the paired device cookie. Writes carry the bootstrap token and a same-origin Origin.
  */
-class Api(private val prefs: Prefs) {
+class Api(private val prefs: ServerStore) {
     val client: OkHttpClient = OkHttpClient.Builder()
         .cookieJar(PrefsCookieJar(prefs))
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -37,34 +37,29 @@ class Api(private val prefs: Prefs) {
         .readTimeout(100, TimeUnit.SECONDS)
         .build()
 
-    @Volatile private var token: String? = null
-    @Volatile private var capabilities: Map<String, Any?> = emptyMap()
-    @Volatile private var capabilitySnapshot: ServerBinding.Snapshot? = null
-    private val binding = ServerBinding()
+    private val auth = AuthState()
 
     val base: String get() = prefs.server.trimEnd('/')
 
     fun url(path: String) = base + path
 
-    /** The current server and connection generation; requests bind to it before they start. */
-    fun snapshot(): ServerBinding.Snapshot = binding.bind(base)
-    fun accepts(snapshot: ServerBinding.Snapshot): Boolean = binding.accepts(snapshot, base)
+    /** Everything one request needs, captured atomically for the configured server and its generation. */
+    fun context(): AuthState.Context = auth.context(base)
+    fun accepts(ctx: AuthState.Context): Boolean = auth.accepts(ctx, base)
+    private val token: String? get() = auth.context(base).token
 
     /** Optional capabilities the bootstrap advertised for the CURRENT server and generation; anything else is none. */
-    val negotiatedCapabilities: Map<String, Any?> get() = capabilitySnapshot?.let { if (accepts(it)) capabilities else null } ?: emptyMap()
+    val negotiatedCapabilities: Map<String, Any?> get() = auth.context(base).capabilities
 
     suspend fun bootstrap(): JSONObject {
-        val snap = snapshot()                                 // bound before the request: a switch mid-flight never credits the new server
-        val d = JSONObject(call(Request.Builder().url(snap.server + "/api/bootstrap").build()))
-        if (!accepts(snap)) throw ApiError(0, "服务器已切换")
-        token = d.optString("token")
-        capabilities = capabilityWhitelist(d.optJSONObject("capabilities"))
-        capabilitySnapshot = snap
+        val ctx = context()                                   // captured before the request: a switch mid-flight never credits the new server
+        val d = JSONObject(call(Request.Builder().url(ctx.snapshot.server + "/api/bootstrap").build()))
+        if (!auth.install(ctx, base, d.optString("token"), capabilityWhitelist(d.optJSONObject("capabilities")))) throw ApiError(0, "服务器已切换")
         return d
     }
 
     /** The server changed, a switch was rolled back or pairing ended: a new generation; nothing old may be reused. */
-    fun forgetServer() { binding.invalidate(); token = null; capabilities = emptyMap(); capabilitySnapshot = null }
+    fun forgetServer() = auth.invalidate()
 
     /** A structured reply: HTTP status (0 when unreachable) and the JSON object body when there is one. */
     class StructuredReply(val status: Int, val body: Map<String, Any?>?)
@@ -73,29 +68,34 @@ class Api(private val prefs: Prefs) {
      * Writer traffic keeps the structured 409/503 bodies instead of throwing; a 403 refreshes the token
      * once and retries the SAME request, like post(). A GET is sent when [body] is null.
      */
-    suspend fun structured(path: String, body: Map<String, Any?>?, snap: ServerBinding.Snapshot = snapshot()): StructuredReply {
-        if (!accepts(snap)) return StructuredReply(SERVER_CHANGED, null)
-        if (token == null && body != null) bootstrap()
-        val first = exchange(path, body, snap)
+    suspend fun structured(path: String, body: Map<String, Any?>?, bound: AuthState.Context = context()): StructuredReply {
+        var ctx = context()
+        if (ctx.snapshot != bound.snapshot) return StructuredReply(SERVER_CHANGED, null)
+        if (ctx.token == null && body != null) ctx = refreshed(bound) ?: return StructuredReply(SERVER_CHANGED, null)
+        val first = exchange(path, body, ctx)
         if (first.status != 403 || body == null) return first
         if ((first.body?.get("error") as? String)?.contains("不受信任") == true) return first
-        bootstrap()
-        if (!accepts(snap)) return StructuredReply(SERVER_CHANGED, null)   // never replay the packet against another server/generation
-        return exchange(path, body, snap)
+        val again = refreshed(bound) ?: return StructuredReply(SERVER_CHANGED, null)   // never replay the packet against another server/generation
+        return exchange(path, body, again)
     }
 
-    /** One request against the snapshot's server with the token captured now; URL, Origin and token never read the mutable base. */
-    private suspend fun exchange(path: String, body: Map<String, Any?>?, snap: ServerBinding.Snapshot): StructuredReply = withContext(Dispatchers.IO) {
-        if (!accepts(snap)) return@withContext StructuredReply(SERVER_CHANGED, null)
-        val bearer = token.orEmpty()
-        val request = if (body == null) Request.Builder().url(snap.server + path).header("X-Anime-Token", bearer).build()
-                      else Request.Builder().url(snap.server + path).header("Origin", originOf(snap.server)).header("X-Anime-Token", bearer)
+    /** A fresh token for [bound]'s generation, or null once that generation is gone; any other bootstrap failure propagates. */
+    private suspend fun refreshed(bound: AuthState.Context): AuthState.Context? {
+        try { bootstrap() } catch (e: ApiError) { if (accepts(bound)) throw e }
+        return context().takeIf { it.snapshot == bound.snapshot }
+    }
+
+    /** One request from one immutable context: URL, Origin and token all come from it, never from the mutable base. */
+    private suspend fun exchange(path: String, body: Map<String, Any?>?, ctx: AuthState.Context): StructuredReply = withContext(Dispatchers.IO) {
+        val spec = requestSpec(ctx, path)
+        val request = if (body == null) Request.Builder().url(spec.url).header("X-Anime-Token", spec.token).build()
+                      else Request.Builder().url(spec.url).header("Origin", spec.origin).header("X-Anime-Token", spec.token)
                           .post(JSONObject(body).toString().toRequestBody(JSON)).build()
         try {
             client.newCall(request).execute().use { r ->
                 val text = r.body?.string().orEmpty()
                 val parsed = try { toMap(JSONObject(text)) } catch (e: org.json.JSONException) { null }
-                if (!accepts(snap)) StructuredReply(SERVER_CHANGED, null) else StructuredReply(r.code, parsed)   // a late answer for another generation is dropped
+                if (!accepts(ctx)) StructuredReply(SERVER_CHANGED, null) else StructuredReply(r.code, parsed)   // a late answer for another generation is dropped
             }
         } catch (e: IOException) {   // SSL failures are IOExceptions too: unreachable, never a success
             StructuredReply(0, null)
@@ -108,13 +108,16 @@ class Api(private val prefs: Prefs) {
 
     suspend fun post(path: String, body: JSONObject = JSONObject()): JSONObject {
         if (token == null && path != LOGIN) bootstrap()
+        val ctx = context()
         return try {
-            JSONObject(call(postRequest(path, body)))
+            JSONObject(call(postRequest(path, body, ctx)))
         } catch (e: ApiError) {
             // The server issues a new token on every restart.
             if (e.code != 403 || e.untrusted || path == LOGIN) throw e
             bootstrap()
-            JSONObject(call(postRequest(path, body)))
+            val again = context()
+            if (again.snapshot != ctx.snapshot) throw ApiError(0, "服务器已切换")   // the same connection identity, or nothing
+            JSONObject(call(postRequest(path, body, again)))
         }
     }
 
@@ -124,18 +127,10 @@ class Api(private val prefs: Prefs) {
         bootstrap()
     }
 
-    private fun postRequest(path: String, body: JSONObject) = Request.Builder().url(url(path))
-        .header("Origin", origin())
-        .header("X-Anime-Token", token.orEmpty())
-        .post(body.toString().toRequestBody(JSON))
-        .build()
-
-    private fun origin(): String = originOf(base)
-
-    private fun originOf(server: String): String {
-        val u = server.toHttpUrlOrNull() ?: return server
-        val defaultPort = HttpUrl.defaultPort(u.scheme)
-        return u.scheme + "://" + u.host + if (u.port == defaultPort) "" else ":" + u.port
+    private fun postRequest(path: String, body: JSONObject, ctx: AuthState.Context): Request {
+        val spec = requestSpec(ctx, path)
+        return Request.Builder().url(spec.url).header("Origin", spec.origin).header("X-Anime-Token", spec.token)
+            .post(body.toString().toRequestBody(JSON)).build()
     }
 
     private suspend fun call(request: Request): String = withContext(Dispatchers.IO) {
@@ -161,6 +156,17 @@ class Api(private val prefs: Prefs) {
         private val JSON = "application/json".toMediaType()
         /** Structured reply status: the server bound to this request changed underneath it. */
         const val SERVER_CHANGED = -2
+
+        /** What one request carries on the wire, derived from its immutable context only. */
+        data class RequestSpec(val url: String, val origin: String, val token: String)
+
+        fun requestSpec(ctx: AuthState.Context, path: String) = RequestSpec(ctx.snapshot.server + path, originOf(ctx.snapshot.server), ctx.token.orEmpty())
+
+        fun originOf(server: String): String {
+            val u = server.toHttpUrlOrNull() ?: return server
+            val defaultPort = HttpUrl.defaultPort(u.scheme)
+            return u.scheme + "://" + u.host + if (u.port == defaultPort) "" else ":" + u.port
+        }
 
         /** Only the fields the app knows are kept from an optional capabilities object. */
         fun capabilityWhitelist(c: JSONObject?): Map<String, Any?> {
@@ -199,7 +205,7 @@ class Api(private val prefs: Prefs) {
     }
 }
 
-private class PrefsCookieJar(private val prefs: Prefs) : CookieJar {
+private class PrefsCookieJar(private val prefs: ServerStore) : CookieJar {
     private var cache: MutableList<Cookie>? = null
 
     @Synchronized

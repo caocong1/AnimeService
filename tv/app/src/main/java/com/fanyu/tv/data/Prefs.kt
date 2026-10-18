@@ -2,15 +2,21 @@ package com.fanyu.tv.data
 
 import android.content.Context
 
+/** What the API client reads and writes: the configured server and its session cookies. */
+interface ServerStore {
+    var server: String
+    var cookies: Set<String>
+}
+
 /** Everything the box remembers: the server, its session cookies and the danmu display. */
-class Prefs(context: Context) {
+class Prefs(context: Context) : ServerStore {
     private val sp = context.getSharedPreferences("fanyu", Context.MODE_PRIVATE)
 
-    var server: String
+    override var server: String
         get() = sp.getString("server", "") ?: ""
         set(value) = sp.edit().putString("server", value).apply()
 
-    var cookies: Set<String>
+    override var cookies: Set<String>
         get() = sp.getStringSet("cookies", emptySet()) ?: emptySet()
         set(value) = sp.edit().putStringSet("cookies", value).apply()
 
