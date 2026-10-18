@@ -1,43 +1,69 @@
 {
-  "snapshot_date": "2026-10-15",
+  "schema": "automation-apply/v1",
+  "snapshot_date": "2026-10-19",
   "timezone": "Asia/Shanghai",
-  "purpose": "portable documentation only; no live schedule changes",
+  "purpose": "approved prompt bundle, not applied; no live TOML edits or runtime switch changes",
+  "canonical_sha256": "UTF-8 without BOM; CRLF/CR to LF; remove terminal LF characters then append one LF; do not trim spaces",
+  "dispatch_caller_cli_isolation_passed": true,
+  "real_desktop_host_roundtrip_tested": false,
+  "host_ref_required": false,
+  "host_operation_absence_authorized": false,
   "tasks": [
+    {
+      "id": "automation",
+      "name": "家庭影视库自动追更",
+      "kind": "heartbeat",
+      "rrule": "FREQ=DAILY;BYHOUR=12,21;BYMINUTE=30;BYSECOND=0",
+      "status": "ACTIVE",
+      "target_thread_id": "保留现值；此说明不是待写入的字段值",
+      "project": "保留现有家庭影视项目上下文",
+      "source_config_sha256": "d970ac68dbc3681fff0405074593b54749d94037a84dbc3314289d14c1c5ea56",
+      "source_prompt_sha256_lf": "08aeffa4eb4639300619e266372f9a36762a81a20a229daa86d366993f750666",
+      "template": "automation.txt",
+      "prompt_sha256_lf": "3cc627b33d2c155979a62851c88232fb71280ab3ef2e0764ebbc2f22fd0e7bac",
+      "preserve_all_other_fields": true
+    },
     {
       "id": "automation-2",
       "name": "字幕v0→v1连续制作与派发",
       "kind": "heartbeat",
-      "observed_status": "ACTIVE",
-      "source_prompt_sha256": "1b26cb150f171d4b522ff7731675ffc3cfa53f88248d809e4b9daa778adffd7b",
+      "rrule": "FREQ=MINUTELY;INTERVAL=15",
+      "status": "ACTIVE",
+      "target_thread_id": "保留现值；此说明不是待写入的字段值",
+      "project": "保留现有AnimeService项目上下文",
+      "source_config_sha256": "24923f0aec336264f7fae61b31a1b070bc7631c7a23210d7adb94ab856ddc46d",
+      "source_prompt_sha256_lf": "eae03bcf65332fc2e7af49a4a928644fd7416ed42789fd63c2c4adcd92696d77",
       "template": "automation-2.txt",
-      "redactions": [
-        "target_thread_id omitted",
-        "inline thread IDs replaced with <LOCAL_THREAD_ID>"
-      ]
+      "prompt_sha256_lf": "c0609855e52eaf0c2e4e67c326dfdf798ad927b894a3bccc1aa11997c3631426",
+      "preserve_all_other_fields": true
     },
     {
       "id": "automation-3",
       "name": "想看首集实评与稳定更新",
       "kind": "heartbeat",
-      "observed_status": "ACTIVE",
-      "source_prompt_sha256": "c870372cf5dfcc6a099518dccb9eb6242030e794b39a240e0abcc6bb5735a134",
+      "rrule": "FREQ=HOURLY;INTERVAL=1",
+      "status": "ACTIVE",
+      "target_thread_id": "保留现值；此说明不是待写入的字段值",
+      "project": "保留现有AnimeService项目上下文",
+      "source_config_sha256": "bb3b0e7718ff4cb1040cf42778a242cd24560a42ac9a8631a18d2ce1097936ec",
+      "source_prompt_sha256_lf": "6a2d2d31d09b5f8dd07e2a374ade698cf5d11ff74f0a27f55ad7642cfc46055a",
       "template": "automation-3.txt",
-      "redactions": [
-        "target_thread_id omitted",
-        "inline thread IDs replaced with <LOCAL_THREAD_ID>"
-      ]
+      "prompt_sha256_lf": "3fe8206ecec917d5bca1cb78ddd29d482e1f71cd1f722a2b71bd373ebd72326b",
+      "preserve_all_other_fields": true
     },
     {
       "id": "automation-4",
       "name": "字幕遗留问题每周复盘",
       "kind": "heartbeat",
-      "observed_status": "ACTIVE",
-      "source_prompt_sha256": "25fa376a65374fe6c79a50e443b975b8a8bebd62cfa88d1a0e82f4f8a6f1d08b",
+      "rrule": "FREQ=WEEKLY;BYDAY=SU;BYHOUR=10;BYMINUTE=0;BYSECOND=0",
+      "status": "ACTIVE",
+      "target_thread_id": "保留现值；此说明不是待写入的字段值",
+      "project": "保留现有AnimeService项目上下文",
+      "source_config_sha256": "fc765ec2372ebe1bb2aff9de62daba156f9ec00fffe9c88e519bc6a28879eca0",
+      "source_prompt_sha256_lf": "766bb3086581791b6567900e7f9627d6a38cc08146340c9fc13086d91bd78cd8",
       "template": "automation-4.txt",
-      "redactions": [
-        "target_thread_id omitted",
-        "inline thread IDs replaced with <LOCAL_THREAD_ID>"
-      ]
+      "prompt_sha256_lf": "84465fbd6057b3f687c495aab9626eaa32a03f2a67a258af57f7080179edeced",
+      "preserve_all_other_fields": true
     }
   ]
 }

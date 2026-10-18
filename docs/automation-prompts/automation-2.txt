@@ -1,20 +1,27 @@
-模板快照（2026-10-15）：先读 ../PROJECT-RULES.md 和 ../AUTOMATION.md；占位符须按实时台账绑定。
-不自动创建任务或继承原部署授权。
+# 字幕v0→v1连续制作与派发
 
-2026-10-15卡住修复：本会话已通过应用原生压缩清理活动上下文，原聊天和审计历史保留。先读docs/CODEX-DISPATCH-HEALTH.md。本任务是一次有界检查：通常3–10分钟完成准备/派发/跟踪动作后结束本轮；等外部素材、下次时点或活动owner时只保存快照和下一动作，不在同轮常驻等待，不反复读取旧报告或图片。真实整集评审有进展可继续；字幕单集owner的v0→v1连续制作、六项质量义务不受调度轮次限制。独立本机守卫仅对这两条调度会话的定时轮次，20分钟无日志进展且无运行工具时按expectedTurnId中断，不释放租约或重复派发；命中后下轮先读data/diagnostics/codex-dispatch-guard/actions.jsonl末条和实时队列，保存已完成动作后续做，不能重放整轮。
+## 当前规则入口
 
-在D:/AnimeService按用户2026-10-15最新授权执行在追字幕准备、唯一整集会话派发与v0→v1连续交付跟踪。先读AGENTS.md最新顶部、docs/SUBTITLE-TWO-PASS.md、docs/SUBTITLE-DELIVERY.md和最新PROGRESS/HANDOFF短交接，按需读实际新证据，不重放旧rollout/图集或已应用脚本。
+在现有AnimeService项目（保留原项目与运行目录，不替换这些字段）与原调度聊天运行。先读AGENTS.md最新规则、PROGRESS/HANDOFF短交接及docs/AUTOMATION.md、SUBTITLE-TWO-PASS.md、SUBTITLE-DELIVERY.md、SUBTITLE-SESSION-PROMPT.txt；遇票据/停滞/日文来源时以DISPATCH-RECEIPT-CONTRACT.md、SUBTITLE-STALL-RECOVERY.md、SUBTITLE-JAPANESE-SOURCES.md的当前契约为准。读取本轮真正新增证据，不重放旧rollout、图集或修复脚本。此前已完成的恢复事件不得再次执行。
 
-每集先完整交付v0观看版，紧接着由同一负责人完成v1精校细调。画面字主动查漏补译、主动寻找并制作本集实际版本OP/ED歌词、字幕位置避让、必要动效和非排印改写/时轴回查是v1必做，不能为快整项省略；常规预算v0 60–90分钟、随后v1另60–90分钟，预算不是跳过工作的理由。集中按场景取帧、复用同曲歌词/术语/字体和未变检查。具体疑难首轮限时，真实无解保留已试方法/证据/现版表达与下一条件，归档统一issues.json后继续，不再卡几天或反复装模型。
+本任务只做协调、派发与材料准备，不写逐句字幕正文。单集v0后必须由同一owner继续v1；既有作品优先序取实时队列与最新用户指令，同集v1优先开下一集。区分：成品finished、观看索引edition、日文普通对白覆盖、正式accepted；dispatch回执接受也不是字幕accepted。中文v0可先交，v1标签/歌词双语不证明日文对白已齐。
 
-已看集不自动生产/回修/experience；refresh/status后按每集watches.finished复核，领取、继续和输出前均核。制作中变已看，负责人保存进度后安全停止，保留原字幕和历史。选择当前selected/watching、无cleanup_hold且原独立授权/映射盘点/本集边界有效的未看集；保留已有明确用户作品优先序，同一集v0之后的v1优先于开启另一集。原广告黑名单/保真/manifest/归属/未知下载回执保护不变。
+## 本轮有界清单
 
-使用.venv/Scripts/python.exe scripts/subtitle_delivery_queue.py refresh/status读取实时任务，kind=episode制作v0→v1，kind=refinement增量细调已交付基础稿。旧基础稿目录即使叫v1也不覆盖；观看索引edition=v0，精校新产物edition=v1、物理version递增。已有未看基础稿可refine建立去重任务，复用其原会话；旧blocked-stopped/unknown/committing以及已停止魔王大图正文聊天01a13370-fa22-7101-b69c-9b1c9e88954e不得自动唤醒或抢占，精确保存待核控制回执。
+1. 通常3–10分钟结束，10分钟后不启动新重活；只安全收尾已有动作并记下一条件。先只读队列、逐集已看/范围、当前owner精确turn/最新工具/产物与上次证据指纹。领取、继续及输出前复核selected/watching、授权/映射/分集边界、无cleanup_hold且本集未看；不改个人/观看状态以通过门禁。
+2. 回读现有download_gaps诊断及checked_at。download_ready不等于下载完成，source_not_found不等于未发布；retry/主源窗口未到就等待，候选核验、质量或来源禁用按具体原因记录。缓存陈旧则核现有后台健康。只经现有只读入口查看，不能调用会写缓存/ingest的reconcile_missing、另起Engine、强制抓源、重投或绕过下载/manifest/归属门禁。
+3. 若唯一owner确有新工具/输出，跟踪而不催“继续”。acknowledged、notLoaded、旧v0存在不证明正在制作。interrupted/failed时核精确turn、最后工具、遗留进程及用户停止意图；意图不明时记录具体阻塞并去重通知所需授权，不伪称正常活动。只有明确适用的恢复授权及真实停止写入证据，才沿既有受控同owner恢复；不重放过去事故授权。
+4. owner占槽时可有界准备一个下一未看集：核真实完成视频、输入身份、原稿/工具能力与实际readiness。日文依次核本地轨/存档、Jimaku、用户指定页；真实下载文件并核作品季集/对白/歌曲/来源声明，私有记录URL、上传/读取时间、字节/SHA与覆盖。失败记查询失败，候选记待匹配；CC标签是声明，ASR人工稿不是原生CC，同内容ASS/SRT不是独立证据。跨平台按实际声画与剪辑锚点分段匹配。复用同SHA材料，不反复下载或全量hash未变文件；新身份所需完整hash不能省略。准备不等于交付，不改固定input或抢槽。
+5. 需要更新任务投影时，只在原授权控制流程内做一次refresh并读回status；refresh会写状态，不作为只读探针。只对当前就绪job/revision执行一次begin，先归档并验证CLI返回的原始dispatch-ticket/v1，再调用宿主。严格按返回action：create使用该次完整session_prompt、正确项目/本地环境/当前默认模型创建；resume只发送到返回的负责线程。停止的旧正文聊天不得唤醒；仅当宿主明确isolated_owner_required=true且无thread_id、begin明确返回create时，允许独立修订owner，不写旧共享正文。unknown/committing/未证实停止者不得接管。
+6. 新派发按已验收票据接线：保存真实宿主threadId，并用原ticket进行confirm；host_ref仅记录宿主实际提供的turn/item关联，拿不到就留空，不猜latest、不把IPC requestId当持久operation id。begin后归档失败立即停止外部调用，保留意图；不补造票据或再次begin。结果丢失用原ticket的interrupted记诊断，保持committing、不释放/重投；failed同样不改owner。receipt_accepted、state_changed和resulting_revision分别读回。旧在途legacy没有原票据时保留明确legacy路径，不能从当前token拼票据。CLI票据路径已通过隔离验收；每轮仍须确认票据可读且原生创建/发送工具返回真实负责线程ID。工具能力缺失就停止新派发并记录具体阻塞；host_ref拿不到允许省略，不编造，也不因此调用legacy绕过保护。不以此prompt开启强制开关。
+7. 迟到created若revision/input/owner已变，读原receipts及reconcile-plan供owner处理；不靠当前身份重确认，不把只读plan当可执行恢复。缺席采集器仅可按既有私有权限、原ticket和真实host_ref做有界dry-run诊断；无host终态API，空结果/退出0/人工签核都不授权not_created、清租约或再次发送。
+8. 已发布v0须凭真实文件/视频绑定、完整中文覆盖及播放器暂停/跳转/下载回执走finished。continue_refinement=true表示同writer立即继续v1，不等下次15分钟。v1的screen_text/op/ed/placement/effects/semantics六项须真实工作与path/SHA证据、未决issue_ids，不能为预算整项省略；日文可取得材料应实际匹配与语义/时轴审校，缺口如实留存。真实v1及player核验通过才释放槽，accepted仍按实际听看门禁；不强换活动播放器、default或观看记录。单集owner质量预算不受本调度10分钟限制。
+9. 一次有界wait/cursor跟踪后结束。守卫回读先看status新鲜度/error，再按当前调度聊天与精确turn筛actions.jsonl中的控制尝试及exit_code/receipt/error，结合实时队列确认已做动作；不能只取全局末行或因没有action就判守卫没运行。守卫只管指定调度轮次，不管单集制作、不解业务锁；本任务不自行运行--apply/interrupt、改白名单或重放整轮。
 
-就绪先begin当前job_id/revision持久意图，再只按返回dispatch_action：create先list_projects核AnimeService、本地环境、默认模型创建单集会话，完整使用session_prompt；resume仅send_message_to_thread恢复返回responsible_thread_id。用户已授权就绪单集独立会话及原会话增量恢复，无需逐集再问。保存真实threadId并confirm；未知结果unknown保护、先list/read/wait对账，不重复创建或重发。整体一集主生产，active不重复催继续。
+## 停止与安静条件
 
-v0实际输出、播放暂停跳转下载和完整中文覆盖通过即上架；finished命令若返回continue_refinement=true，同一writer仍production/acknowledged，立即继续v1，不能结束或只给报告。v1必须有绑定确切媒体和v0基线的refinement-review.json，六项screen_text/op/ed/placement/effects/semantics逐项提供实际work_done及path/SHA证据；未决项必须真实归档issue_ids。finish/publish与宿主finished复核v1文件、报告和实际播放器回执通过才释放槽。v0和v1均有观看入口，用户可自己选择，活动播放器不强换。正式accepted只记真实四阶段，不以报告/ASR/静音技术检查冒充亲听。
+已看即不自动生产/回修/experience；制作中变已看时保存进度并安全停止，保留历史。用户停止、未知派发、committing、有效owner/租约和未核实遗留进程均保护。仅新材料/新turn/新产物或明确恢复授权触发下一动作；同一阻塞不重复催。私有记录本轮指纹、完成动作、证据、下一条件与通知指纹。只对真实新版本交付、新实质失败或需要用户操作去重通知；没有新事实安静结束。
 
-wait_threads用cursor有界跟踪并记录私有回执，持续会话不等heartbeat小批。本调度不写逐句正文、不运行模型研究、不新下载已有文件或反复做旧字体样片。每周automation-4仅复盘有新条件的单点未决，不承担v1正常制作，也不能因旧已看问题唤醒writer。qB4870唯一后台执行，不自动启动切换、不第二Engine/服务重启、不Computer Use/桌面、不付费/音视频外传/公开分享；原媒体/原稿/default/观看和并发工作保留。无变化安静，通知去重，仅真实版本交付、新实质失败或需要用户操作时通知。
+## 禁止事项
 
-停止owner的受控例外：若refinement任务明确isolated_owner_required=true且没有thread_id，说明宿主已核旧writer明确停止及既有成品基线，按begin返回create新建单独私有修订负责人；不恢复旧停止聊天，不读取旧rollout/图片或写旧共享稿。unknown/committing及未确认停止者仍不得接管。
+不写逐句正文、不跑模型研究、不唤醒已停止正文聊天、不回修已看、不伪造stopped/absence/finished/accepted，不改SQL/owner/lease/观看或固定input。唯一现有动画下载后台不另启动、不切换实例、不建第二Engine、不重启服务、不Computer Use、不付费或外传音视频，不改任务/提示词。dispatch_receipts_required和播放v2能力保持现状；不迁表、不宣传。禁止常驻等待、反复读旧报告和反复同一能力失败。

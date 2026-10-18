@@ -1,10 +1,9 @@
-# 定时提示词模板
+# 审定的完整任务prompt
 
-2026-10-15 从本项目实际任务提取，仅作方法记录和迁移参考，不是可直接导入的任务定义。当前周期及角色见 [定时任务](../AUTOMATION.md)。
+四份txt为最终完整prompt，manifest列源配置/原prompt及最终prompt摘要；本目录是公开脱敏导出，不是活动任务备份，也不意味着已经应用。第一项属于独立家庭影视项目，保留其原项目/目标和下载规则，不因本仓库收录而迁入AnimeService。
 
-- [字幕 v0→v1 调度](automation-2.txt)
-- [想看首集实评](automation-3.txt)
-- [遗留问题周复盘](automation-4.txt)
-- [来源 hash 与脱敏说明](manifest.json)
+保留现有四周期/ACTIVE/heartbeat及目标/项目/环境/其它字段，只替换prompt。摘要采用UTF-8无BOM，CRLF/CR转LF、末尾LF规范为一个，不去掉空格。应用前比源配置原始字节SHA、原prompt规范摘要和协调轮空闲；运行TOML只读。保存后用原生读取核全文SHA与所有保留字段，不Run now。失败只恢复本次修改且没有并发新编辑的那一项；工具不支持时停止，不猜IPC/新建任务。
 
-模板保存提取时原提示词内容，可能尚未包含后续顶部规则。使用前读 [当前规则](../PROJECT-RULES.md)，特别是成品接线、服务端续播、已看不回修和停止 owner 的宿主控制。<LOCAL_THREAD_ID> 不能直接用于派发。原始实际 threadId、任务目录与原始文件留本机；未复制其它项目任务。
+任务2原CLI/假宿主隔离验收通过，真实桌面宿主/终态API未验；原ticket归档后才能发宿主调用，host_ref缺省允许，不补造。旧legacy在途保留兼容；生产not_created自动接受不放行，强制开关与v2宣传不动。
+
+完整流程见[AUTOMATION.md](../AUTOMATION.md)。本机信箱automation-apply-26还包括应用清单、粘贴提示词及未来receipt目标；私有目标/账号/路径、原始配置与执行日志不入库。应用后自然轮短观察另记，不常驻等待。

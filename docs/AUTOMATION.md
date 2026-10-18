@@ -1,60 +1,62 @@
 # 定时任务与持续制作
 
-2026-10-16 日文来源更新：automation-2准备/交接与automation-4新材料复盘执行 [逐集日文来源](SUBTITLE-JAPANESE-SOURCES.md)。逐集核Jimaku/用户指定页的实际下载，区分查无/查失败/候选/待匹配/已匹配，保留来源声明及SHA，明确日文对白覆盖。学生会E2已有4份候选；新材料由原调度沿唯一owner增量处理，不把材料核实写成成品交付。两个任务通过应用工具更新提示词并回读；周期、目标聊天和原资源/已看/owner保护保持，回执见私有`data/subtitle-studio/jimaku-12682-verification-20261016/`。
+本文和automation-prompts保存审定规则与脱敏完整prompt；文档入库不等于运行任务已更新。周期/状态按本机配置核对，实际应用前须重新读配置、运行状态、原目标与项目，不能复建历史任务。时间按Asia/Shanghai，应用时核界面时区。
 
-配置核对日期：2026-10-15；时间按 Asia/Shanghai。这里只保存本项目的方式和脱敏模板，不创建、更新或恢复任何任务。任务是否仍 ACTIVE、当前负责人和输入版本，执行前须重新读取应用配置与实时队列。
+## 分工、周期与预算
 
-## 当前分工
-
-| 入口 | 核对时状态与周期 | 职责 |
+| 任务 | 保留状态/周期 | 职责与本轮上限 |
 | --- | --- | --- |
-| automation-2：字幕v0→v1连续制作与派发 | ACTIVE，每15分钟，原聊天 heartbeat | 在追材料准备、去重派发、跟踪唯一单集负责人；不逐句写正文 |
-| automation-3：想看首集实评与稳定更新 | ACTIVE，每小时，原聊天 heartbeat | wish/trial 首集实评、主备选源及后续稳定更新；样本由后台提交 |
-| automation-4：字幕遗留问题每周复盘 | ACTIVE，每周日10:00，原研究聊天 heartbeat | 只对具体未决项的新材料/新技术条件验证；已看集不自动改字幕 |
-| AnimeService-CodexDispatchGuard | 独立 Windows 本机任务，每5分钟 | 只检查指定两个调度 heartbeat 的无进展轮次；不承担制作或重投 |
+| automation：家庭影视库自动追更 | ACTIVE，每日12:30/21:30，原heartbeat | 独立家庭影视项目原五季范围；普通检查约10分钟，一集新可行动缺口；不是动画下载/字幕入口 |
+| automation-2：字幕v0→v1连续制作与派发 | ACTIVE，每15分钟，原heartbeat | watching未看集材料/缺口只读诊断、唯一派发、真实owner跟踪；通常3–10分钟，10分钟后不开始新重活 |
+| automation-3：想看首集实评与稳定更新 | ACTIVE，每小时，原heartbeat | wish/trial变化指纹、一个首集的可恢复真实评审批次；通常3–10分钟，未看完整集不得报完整评分 |
+| automation-4：字幕遗留问题每周复盘 | ACTIVE，周日10时，原heartbeat | 仅有新条件的遗留单点，最多两项、单项10分钟、总30分钟；不是正常v1制作 |
+| CodexDispatchGuard | 独立本机计划，每5分钟 | 仅指定两个调度heartbeat的无进展诊断/受控中断；非第五个桌面任务，不管单集制作或重投 |
 
-其它项目的定时任务不属于这里。旧“字幕每小时改几句”、旧迅雷 UI heartbeat、每两小时原声循环已被后续决定覆盖；不要照历史配置复建。
+家庭影视任务只在其原项目运行、沿原下载优先级与五季授权；不得搬到AnimeService或套用动画的唯一下载器规则。需要桌面交互、文件移动/目录整理的步骤转独立维护，定时轮不开Computer Use、不启动下载器、不搬活动文件。四周期保留的理由是后台已负责发现/下载，协调不靠高频重试；v0→v1由持续owner推进，不等15分钟。
 
-## 一轮调度如何工作
+## 从下载缺口到字幕交付
 
-1. 读 [当前规则](PROJECT-RULES.md) 和必要专题，再读实时队列/短交接，只看新增证据。
-2. 复核 selected、watching/wish/trial、授权、映射、盘点、逐集边界、cleanup_hold、watches.finished 及原 owner/lease。
-3. 准备或跟踪本轮可执行动作。就绪后先 `begin` 持久意图，再按返回 action 创建单集聊天或恢复指定原聊天；记录真实 threadId，成功后 `confirm`。
-4. 外部结果未知先 `unknown` 并核对实际会话；不能因时限或守卫中断重新创建。active 不重复发继续，跟踪使用 cursor 与有界 wait。
-5. 更新私有短交接、实际阶段和下一动作，然后结束。通常3–10分钟内完成有界检查；等待素材、owner 或下个时点不常驻同轮。
+1. 读AGENTS/PROJECT-RULES及最新短交接，复核selected、wish/trial/watching、原授权、映射/盘点、分集边界、cleanup_hold和逐集watches.finished；领取/继续/输出前都核，不能改个人或已看状态来入队。
+2. 来源发现、download_gaps核对、ingest/下载与完成对账属于唯一现有Engine。定时任务只回读现有只读视图的分类与checked_at；reconcile_missing会写缓存/可能ingest，不是只读探针。无只读接口就登记缺口，不实例化Engine或直写SQL。
+3. download_ready不等于下载完成，source_not_found不等于确证未发布；retry/主源窗口未到等待，candidate_review/quality_required/sources_disabled按真实原因处理。旧缓存标陈旧并核后台健康，不强制催抓、不绕下载回执/manifest/归属门禁。
+4. 任务3只管wish/trial；任务2管watching字幕准备，owner占槽时仍可有界准备一个下一未看集readiness，不抢writer、不改固定input、不把准备算交付。首集实评保存实际覆盖游标；无可靠断点能力就登记一次工程缺口，不用片段补整集评分或把定时轮无限延长。
+5. 日文材料逐集核本地轨/存档、Jimaku、用户指定页，实际文件核作品/季集/对白/歌曲/来源声明并存私有URL/时间/字节/SHA及覆盖。查询失败、未发现、候选、待匹配、已匹配分别记录；CC标签仅声明，ASR人工稿非原生CC，同文ASS/SRT不是独立来源。跨平台按真实声画/剪辑锚点分段匹配，不凭片头偏移推整片。见SUBTITLE-JAPANESE-SOURCES.md。
+6. v0可先交完整中文，普通对白日文缺口如实明示；finished、edition、日文覆盖、accepted四者分开。歌词双语、bilingual文件名或edition=v1不证明全双语，技术检查不等于亲听。
+7. 唯一owner实际交付v0后，finished若返回continue_refinement=true，立即同writer继续v1；screen_text/op/ed/placement/effects/semantics六项须实际工作、证据与未决issue_ids，预算不授权整类略过。真正v1/文件/视频绑定/player核验完成才释放槽。publish经统一/watch入口，原视频/v0/v1并存，活动播放不强换，不回填观看/default/accepted。
 
-单集负责人持续完成 v0→v1，不等下一次 heartbeat 才改下一批。v0 finished 回执若返回 continue_refinement=true，保留唯一 writer 并立即继续；v1 六项、实际成片和播放器回执核过后才结束。已看保护与停止 owner 例外均由宿主当前事实决定。
+## 原票据派发与回执
 
-本机控制入口为 `scripts/subtitle_delivery_queue.py`。`status` 只读；`refresh`、`begin`、`confirm`、`progress`、`finished`、`blocked`、`refine` 等会修改调度状态，不是无害演示。先用 `--help` 查看当前参数；不要复制文档中的旧 job/revision 到生产执行。
+真实控制入口为scripts/subtitle_delivery_queue.py。status、receipts、reconcile-plan只读；refresh/begin/confirm/progress/finished/blocked/refine会写状态，不作为生产测试探针。
 
-## 安静、去重和失败退出
+- 新派发先按实时revision做一次begin，CLI返回ticket_path；成功归档且原票据可读后才能调用宿主，严格按create/resume返回动作，保存真正负责threadId。票据内部create/reuse原值不改。归档后续失败可能已committing：立即停外部动作，不重复begin或从当前token补票据。
+- 新confirm携原ticket，host_ref仅传真实宿主提供的关联，缺省允许；不能猜latest turn、把IPC requestId当持久operation id。真实桌面工具不返回准确线程回执时停止新派发，不能借legacy绕过保护。
+- 回读receipt_id、receipt_accepted、state_changed、reason和resulting revision。created只说明聊天创建/复用，不是字幕finished/accepted。相同规范化回执重放返回首次结果；不换ID补身份。
+- 丢响应使用interrupted --ticket，仅诊断、保留committing；failed同样不清owner/租约、不重投。v1无unknown结果；无原票据的既有legacy在途仍明确兼容，不补造历史v1，不开dispatch_receipts_required。
+- 原票据跨revision/input/owner迟到时保留事实并读原receipts/reconcile-plan，plan当前不执行恢复；禁止用当前凭证确认旧回调。reuse失败不清旧owner，stopped/watched/scope变化继续保护。
+- 第26轮临时DB/假宿主/真实CLI验收覆盖以上边界；不等于真实宿主端到端或终态API验收。细节以DISPATCH-RECEIPT-CONTRACT.md为准。
 
-无变化、等待、旧失败和同文晚稿保持安静。仅真实交付版本、新实质失败或用户操作需求通知，并持久去重。材料已到、任务已创建、模型已安装都不等于成品。准备/编码/等待/返工分别计时，不能拿自然日跨度当实际工作时长。
+## 停滞、守卫与缺席诊断
 
-疑难先限量验证；没有新证据就记录已尝试条件、当前处理与下一可证伪条件。周复盘查新方案，不能承担 v1 的日常画面字、OP/ED、位置或动效工作。付费或私有音视频外传先说明实际范围和成本，由用户决定。
+acknowledged、notLoaded或旧成品存在不代表仍在制作；核精确turn、最新工具/输出、遗留进程和用户停止意图。interrupted/failed不证明工具已停止，更不证明无副作用。明确适用恢复授权且原writer真实停止才受控同owner恢复；已完成事故不可重放。保留用户停止、未知派发、committing、有效租约与其它writer。仅宿主明确isolated_owner_required且begin返回create时允许独立修订owner，不能唤醒旧停止正文聊天。详见SUBTITLE-STALL-RECOVERY.md。
 
-## 卡住识别与恢复
+保留桌面停滞修复：制作使用项目既有环境，实际字体测宽/ffmpeg/浏览器输出能力检查，不把Pillow等工具依赖失败冒充素材缺失。Windows票据ACL以.NET设置并读回，begin前预检；真正归档仍再校验，不降低权限标准，不事后猜造票据。
 
-2026-10-18字幕制作停滞修复见 [中断恢复](SUBTITLE-STALL-RECOVERY.md)：区分应用轮次中断与宿主owner保护，用户明确恢复后沿原owner受控resume；不要长期以“acknowledged”代替实际进展。Pillow已补入依赖，票据ACL读回不再依赖PowerShell模块，begin在领取前先校验。单集制作期间继续准备下一未看集，但不抢制作槽。
+守卫仅对配置白名单目标、正确项目/heartbeat或精确登记恢复轮、inProgress、20分钟无日志进展且无运行工具同时成立时，按expectedTurnId请求中断；不释放业务锁、不创建AI轮次、不杀应用/单集owner。脚本共享codex_dispatch.json及ANIMESERVICE_DISPATCH_CONFIG覆盖，wait_seconds为60–86400整数、非法回退1200；空targets/cwd或缺db_files拒启动，node先PATH。无--apply仅写诊断；业务调度不自行运行--apply或改白名单。
 
-2026-10-15 两个调度曾在工具完成后停留模型 HTTP 等待；真实恢复经过应用精确 expectedTurnId 中断和 completed 手动压缩。不能以“思考中”标签推断一直有工作，也不能以 rollout 总大小等同当轮请求大小。
+先看status.json新鲜度/整体error，再按当前调度聊天、精确turn及时间筛actions.jsonl的控制尝试和control_exit_code/receipt/error；每次有status，只有尝试控制才追加actions。不能把全局末行、缺行或IPC成功当业务完成，结合实时队列只续未完成动作，不重放整轮。
 
-`.codex/config.toml` 入库的两个设置为自动压缩阈值200,000 token、工具输出上限6,000 token；不设置模型、账号或网络。驻留旧线程未必立即载入新项目配置。不要为此自行重启应用。
+codex_absence_verifier是独立只读--dry-run采集器，不是生产核验器；报告固定diagnostic_only、absence_authorized=false。原ticket、真实可用host_ref、既有私有输出目录是前提，权限只核不修，报告/sha256独占创建。版本白名单state 1..61/history 1..8/logs 1..2，未知schema fail closed；默认20秒、200行，time-limit范围0.05..30、max-rows 1..1000；SQL预算不保证可中断OS文件I/O。错误/截断/超时非零，退出0仅声明诊断范围完成。没有宿主operation级终态API：投影终态/空列表/人工签核都不授权not_created、清owner或重投。详见DISPATCH-ABSENCE-EVIDENCE.md。
 
-守卫源码为 `scripts/codex_dispatch_guard.py` 和 `scripts/codex_dispatch_control.cjs`。只有指定调度会话、项目路径、匹配 heartbeat（或精确登记的恢复轮次）、inProgress、至少20分钟无日志进展、无运行工具同时成立才经应用 IPC 按 expectedTurnId 中断。它只读 Codex 状态，不改 Anime DB、不释放业务租约、不创建 AI 轮次、不杀应用、不处理中途工作的单集 owner。
+## 安静、质量与禁止事项
 
-不带 `--apply` 只判断并写私有诊断快照，带 `--apply` 才可能中断。调度会话白名单、恢复轮次、项目路径、`node` 路径、Codex 数据库文件名与状态目录都在 `scripts/codex_dispatch.json`，两个脚本共用；`ANIMESERVICE_DISPATCH_CONFIG` 可指向另一份。`wait_seconds` 单位为秒，范围 60–86400，非整数或越界回退旧默认 1200；`targets` 为空、`cwd` 为空或 `db_files` 缺项则拒绝启动。`node` 先取 PATH 再取配置路径。每次运行都会写 `status.json`，读取 Codex 状态失败时 `error` 字段说明原因，控制步骤的结果与错误按线程记在 `actions.jsonl`。克隆不会注册 Windows 任务，新环境不能直接认为可运行；迁移应先改配置文件中的目标和依赖，再隔离测试和人工核对。
+输入/问题指纹未变、未到窗口、活动owner、相同旧故障或同SHA材料保持安静；昂贵hash/解码只随真实新身份或问题变化，必要的完整SHA不能省略。记录真实动作/证据、下一触发与通知指纹，使用既有受控记录，不另造生产表。仅新合格首集/版本交付、新实质失败或需用户动作去重通知；不无限期冒称被阻塞owner正在工作。
 
-`scripts/codex_absence_verifier.py --dry-run --ticket TICKET.json --host-ref thread:<id>/turn:<id> --out REPORT.json` 只读采集同一组投影库里与一次派发相关的 turn 状态、投影水位、create/reuse 调用项（SQL 内投影白名单字段，不取正文）与 spawn edge，写出不可变、脱敏的诊断报告并附 sha256；它不是核验器，报告始终 `absence_authorized=false`，退出 0 只表示声明的诊断范围跑完，非 0 表示不支持的 schema、库不可读、截断或超时。边界见 [DISPATCH-ABSENCE-EVIDENCE.md](DISPATCH-ABSENCE-EVIDENCE.md)。详见 [调度健康](CODEX-DISPATCH-HEALTH.md)。
+周复盘只处理新条件遗留单点，不代替日常v1；无问题安静，不自行删除任务。仅既有授权且隔离的能力试验，新环境/长下载单列owner方案。已看不自动生产/回修；制作中变已看安全保存并停止。定时轮不写逐句正文、不唤醒停止线程，不启动/切换下载器或第二Engine、不服务重启/Computer Use、不付费或外传音视频、不手工改DB/owner/lease/观看/任务提示词，不常驻等待。
 
-## 模板与迁移
+## 模板、应用与证据
 
-Owner round 14: the standalone diagnostic collector is not imported by the worker and requires no worker restart. Supported migration sets are state 1..61, history 1..8 and logs 1..2; unknown sets fail closed. Dispatcher cwd and item locators are checked, but matched locators are NOT authenticated ticket-to-host binding. Bad JSON, invalid time/type data, scope conflicts and truncation produce incomplete nonzero reports. SQL VM work uses a deadline progress handler; busy waits and total rows are bounded. Large SQLite values and the report have size caps.
+automation-prompts四份txt/manifest是完整脱敏导出；项目/目标保留现值的文字是说明，不能写进字段。日期性修订已并入规则正文，具体事件仍留历史交接；本轮不改SUBTITLE-SESSION-PROMPT.txt，完整保留桌面10-18停滞/依赖/唯一owner修复。
 
-Provide an existing private output directory (POSIX owner-only; Windows current user and SYSTEM only). Permissions are checked, never repaired. Both report and sha256 names are reserved exclusively. Bounds: --time-limit 0.05..30 seconds (default 20), --max-rows 1..1000 (default 200). The SQL deadline does not guarantee that operating-system filesystem I/O can be interrupted. Real historical dry-run requires the ORIGINAL archived begin ticket; never fabricate it from a current job or substitute a synthetic test ticket. No verifier injection, prompt migration or enforcement enablement is included.
+源配置SHA和原prompt摘要应用前逐项核对，确认没有正在执行的协调轮；用桌面原生任务工具只替换prompt并保留rrule/ACTIVE/kind/target/project及所有其它字段，独立读回规范化SHA/字段后再下一项。原生工具不可用、源变化或在途则停止；不猜IPC、不写运行TOML、不Run now。失败只恢复本次修改且无并发新编辑的那项并读回，禁止批量恢复或重建。CLI缺管理界面不影响它用于隔离验证业务调用协议。[OpenAI官方定时任务说明](https://learn.chatgpt.com/docs/automations)。
 
-References: [Python sqlite3 progress handler](https://docs.python.org/3.14/library/sqlite3.html#sqlite3.Connection.set_progress_handler), [SQLite URI read-only mode](https://www.sqlite.org/uri.html).
-
-本次从本机三个任务的 prompt 字段生成 [提示词模板目录](automation-prompts/README.md)，不复制账号、真实目标 threadId 或其它项目配置。manifest 记录原提示词 SHA-256，原自动化文件仍在本机。模板中的线程占位符必须重新绑定；先读当前规则，不能粘贴模板就继承旧用户授权。
-
-用户请求迁移/修改时，通过应用的任务工具读取后更新，保留无关字段并回读结果；本文不建议直接写运行中的 automation.toml。项目采用的准备、唯一派发、完整制作和守卫限制来自本机实现，不是通用产品保证。[OpenAI 官方定时任务说明](https://developers.openai.com/training/walkthroughs/scheduled-tasks)可供了解周期入口和本机运行条件；本项目具体规则以这里及实时台账为准。
+dispatch强制开关、播放v2宣传与迁表保持现状；文档/测试提交无需worker替换。真实配置应用及自然计划轮观察另有脱敏回执，不能因文档或磁盘文件更新就宣称应用内存已生效。
