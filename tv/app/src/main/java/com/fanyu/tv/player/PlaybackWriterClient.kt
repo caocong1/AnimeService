@@ -85,8 +85,8 @@ class PlaybackWriterClient(
 
     fun onChange(listener: (Status) -> Unit) { listeners += listener }
 
-    private fun notify() { listeners.toList().forEach { it(status) } }
-    private fun set(next: Status, nextConflict: Conflict?) { status = next; conflict = nextConflict; notify() }
+    private fun emit() { listeners.toList().forEach { it(status) } }
+    private fun set(next: Status, nextConflict: Conflict?) { status = next; conflict = nextConflict; emit() }
     private fun live(t: Ticket) = t.epoch == epoch && status != Status.DISPOSED
 
     /** Only a 2xx with a JSON object body can succeed; everything else is classified, never trusted. */
@@ -142,7 +142,7 @@ class PlaybackWriterClient(
         }
         val active = body["active"] == true
         observedGeneration = gen
-        notify()
+        emit()
         return StateResult(true, null, gen, active, if (active) sanitizeLabel(body["device_id"] as? String) else null)
     }
 
@@ -233,12 +233,12 @@ class PlaybackWriterClient(
                     Conflict(reason, safeLong(b?.get("generation")) ?: t.generation, if (active) sanitizeLabel(b?.get("device_id") as? String) else null))
                 return SendResult(false, reason)
             }
-            if (b?.get("ignored") == true) { unsaved = true; notify(); return SendResult(false, reason, ignored = true) }   // out_of_order: not applied
+            if (b?.get("ignored") == true) { unsaved = true; emit(); return SendResult(false, reason, ignored = true) }   // out_of_order: not applied
             return fail(t, reason)
         }
         if (cl.kind != "ok" || b == null) return fail(t, cl.kind, cl.http)
         if (b["ok"] != true || safeLong(b["generation"]) != t.generation || safeLong(b["sequence"]) != sent) return fail(t, "protocol", cl.http)
-        unsaved = false; lastError = null; notify()
+        unsaved = false; lastError = null; emit()
         return SendResult(true, null, sequence = sent)
     }
 
