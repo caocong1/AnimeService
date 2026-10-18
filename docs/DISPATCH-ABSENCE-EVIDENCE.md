@@ -35,9 +35,13 @@ Codex 把线程状态投影到 `~/.codex/` 下的 SQLite 文件；文件名带 s
 
 **不可证明（保持 unknown，走显式人工对账）**：turn 仍 `inProgress`（包括应用崩溃后永远停在 inProgress 的孤儿 turn）；投影落后于 rollout（条件 2 不成立，常见于应用未运行）；单次 `list_threads` 为空；任何"等了多久"的时间推断；证据 JSON 里自报的 `terminal: true`。
 
+**投影终态不等于副作用终态。** `thread_turns.status` 与调用项 `status` 只说明 turn/item 在宿主记录里结束了；公开 app-server 文档的 turn/interrupt、turn/completed 也只定义 turn 与 item 的状态，没有承诺"某个外部创建请求以后绝不会完成"。因此上面五项同时成立得到的仍是 owner 的保守推断，不是宿主保证：在宿主提供 operation 级终态（可查询、持久、幂等的操作 id 与其最终状态）之前，`not_created` 只能作为"高置信缺席"由 owner 签核后使用，默认继续拒绝。调度 helper 里的 IPC `requestId` 只证明一次连接内的请求/响应关联，`timeoutMs` 或断连也不是终态取消证明；工具包装返回成功、turn 结束、列表未命中、日志静默都不是已验证的创建/缺席事实。
+
+**create 与 reuse 必须分开。** 复用票据（resume）的失败永远不能证明原负责聊天消失，不得清空 owner；只有 `dispatch_action = create` 的派发才谈"未创建"。
+
 ## 证据契约建议
 
-证据是调用方的声明，核验器是权威：`absence_verifier(ticket, evidence, host_ref)` 只读重新执行同样的查询，逐项与证据比对，任一条件不满足或异常即返回非 True，不做任何 IPC。
+证据是调用方的声明，核验器是权威。分两步：先由只读快照步骤（独立进程，mode=ro、query_only、短事务、按索引范围查询，只取 type/status/调用名/关联字段，不 SELECT 消息或参数正文）生成**不可变快照文件**并记录其 SHA-256；`absence_verifier(ticket, evidence, host_ref)` 在回执事务内只做快速核验——快照文件存在、hash 与证据一致、快照由可信本机身份生成、快照内各字段满足全部条件、`issued_at`/`checked_at` 绑定成立——不在写事务里查活库、等待网络或聊天。任一条件不满足或异常即返回非 True。
 
 ```json
 {
@@ -59,6 +63,8 @@ Codex 把线程状态投影到 `~/.codex/` 下的 SQLite 文件；文件名带 s
 - 绑定：`job_id`、`dispatch_digest` 与票据一致；`issued_at` 作为所有时间比较的下界；`checked_at` 带时区、不早于 `issued_at`、不晚于现在 5 分钟。
 - 投影库持续变化，不能用内容哈希绑定；记录三个库的 size/mtime 与 `_sqlx_migrations` 最高 version，核验器发现 schema 版本不在已知集合时 fail closed。
 - 读活库用 `mode=ro` 加 busy_timeout（WAL 下读安全），不要 `immutable=1`。
+- 报告与快照只保留字段名、状态类别、脱敏关联 id 与证据缺口；不放消息正文、完整 token 或带凭据的 URL。
+- 关联链必须原始且完整：job/input/dispatch 摘要 → 原始 tool call 项 → 宿主 operation/request（若存在）→ 实际 thread id 或终态证据；任一环缺失即报告"能力不足"，不用 clientThreadId 或包装返回补链。
 
 ## 边界与风险
 
@@ -66,6 +72,10 @@ Codex 把线程状态投影到 `~/.codex/` 下的 SQLite 文件；文件名带 s
 - 条件 1 依赖调度线程知道自己的 turn id。若 automation 无法得到，退化为 `thread:<dispatcher>` 加 `issued_at` 之后的 turn 集合：集合内任一 turn 仍 inProgress 即不终态。
 - 标记检索依赖 session_prompt 内嵌的 JOB_ID；手工创建、改了提示词或标题的线程检索不到，只能靠条件 3 的调用项结果。
 - 核验器本身是守卫同类的本机只读脚本，应沿用 `scripts/codex_dispatch.json` 的 `codex_home`/`db_files` 配置与 fail-closed 约定，不新增写权限。
+
+## 结论
+
+现有投影能可靠证明"已创建"，不能证明"不可能再创建"。`not_created` 的自动接受应等待宿主提供 operation 级终态查询；在此之前可实现的只是只读快照 + 人工签核的保守流程，默认仍拒绝。
 
 ## 建议落地顺序
 
