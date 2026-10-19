@@ -169,3 +169,23 @@ def test_nothing_runs_without_a_deployed_certificate(listener, monkeypatch):
     monkeypatch.setattr(edge, 'load_deployment', lambda: {})
     edge.maintain_https(Stop(listener.clock))
     assert listener.calls == [] and not (listener.root / 'data/https-health.json').exists()
+
+
+@pytest.mark.parametrize('script', ['https_upnp.ps1', 'https_renew.py'])
+def test_child_launch_failure_is_private_and_does_not_stop_the_listener(listener, monkeypatch, script):
+    original = edge.subprocess.run
+    def run(args, **kw):
+        if script_of(args) == script:
+            raise OSError(PRIVATE_TOKEN)
+        return original(args, **kw)
+    monkeypatch.setattr(edge.subprocess, 'run', run)
+    stop = Stop(listener.clock, iterations=2)
+    edge.maintain_https(stop)
+    assert stop.waits == [20, 20]
+    health = listener.health()
+    assert health['mapping' if script.endswith('.ps1') else 'renewal'] == 'unexpected'
+    if script.endswith('.ps1'):
+        assert health['renewal'] == 'ok'
+    else:
+        assert health['mapping'] == 'mapping_ready' and health['renew_ok'] is False
+    never_persisted(listener.root)

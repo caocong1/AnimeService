@@ -15,6 +15,7 @@ POWERSHELL=str(Path(os.environ.get('SystemRoot','C:/Windows'))/'System32/Windows
 def outcome(args,timeout,known,flags):
     try:result=subprocess.run(args,capture_output=True,creationflags=flags,timeout=timeout)
     except subprocess.TimeoutExpired:return 'timeout'
+    except OSError:return 'unexpected'  # a failed child launch must not tear down the HTTPS listener
     tokens=result.stdout.decode(errors='replace').split()
     token=tokens[-1] if tokens else ''
     return token if known.get(token)==result.returncode else 'unexpected'
