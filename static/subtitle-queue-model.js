@@ -9,7 +9,14 @@
     needs_completed_manifest_and_ownership: '待核对已下载视频的归属', target_changed_or_missing: '需重新匹配视频',
     needs_reliable_chinese_dialogue_base: '缺可用中文字幕原稿', archived_input_changed_or_invalid: '原稿文件待核对',
     pending_inventory: '视频已到，待盘点字幕', readiness_proof_or_exact_input_missing: '就绪证明待补',
-    refinement_baseline_or_target_changed: 'v0 基线或视频已变化，待重新核对'};
+    refinement_baseline_or_target_changed: 'v0 基线或视频已变化，待重新核对',
+    production_blocked: '负责人已记录具体阻塞，等待核验处理', scope_protected: '个人范围或授权保护',
+    preparation_check_required: '准备证据待核验'};
+  Object.assign(REASON, {needs_actual_clean_mother_review: '待检查制作母片',
+    needs_verified_local_finished_output_tools: '待核验字幕输出工具',
+    needs_reliable_japanese_dialogue_or_real_transcription: '日文对白材料待核验',
+    needs_actual_audio_picture_and_player_capability: '音画与播放能力待核验',
+    late_review_target_changed: '修订媒体已变化，待重新核对'});
   const GAP = {download_ready: '已发现资源，后台正在入队', download_retry: '获取种子失败，等待重试', candidate_review: '候选待核验',
     quality_required: '候选不符合画质要求', primary_window: '等待主源发布', source_not_found: '尚未发现本集资源', sources_disabled: '没有启用的订阅源'};
   const rel = s => s < 60 ? '刚刚' : s < 3600 ? `${Math.floor(s / 60)} 分钟前` : s < 86400 ? `${Math.floor(s / 3600)} 小时前` : `${Math.floor(s / 86400)} 天前`;
@@ -27,10 +34,10 @@
         return {label: `制作中 · ${item.edition}`, detail, tone: 'signal'};
       }
       case 'starting':
-        return item.stalled ? {label: '启动回执未确认', detail: `${span(item.stalled_seconds)}没有确认；下一轮调度核实后继续，不会重复开会话`, tone: 'warn'}
+        return item.stalled ? {label: '启动回执未确认', detail: `${span(item.stalled_seconds)}没有确认；等待调度核验原启动结果`, tone: 'warn'}
           : {label: STATUS.starting, detail: '等待负责会话的启动回执', tone: 'signal'};
       case 'queued':
-        return {label: `排队第 ${item.position} 位`, detail: item.ahead ? `前面还有 ${item.ahead} 集；一次只做一集` : '制作槽空闲，下一轮调度（15 分钟内）开始', tone: 'muted'};
+        return {label: `排队第 ${item.position} 位`, detail: item.ahead ? `前面还有 ${item.ahead} 集；一次只做一集` : '制作槽空闲，等待下一轮调度核验', tone: 'muted'};
       case 'preparing': return {label: STATUS.preparing, detail: reasons(item) || '后台核对素材中', tone: 'muted'};
       case 'downloading': return {label: `视频下载中 ${item.download_progress ?? 0}%`, detail: '下载完成后核对归属并盘点字幕', tone: 'muted'};
       case 'waiting_video': {
@@ -71,7 +78,7 @@
 
   function health(queue, now = Date.now() / 1000) {
     const parts = [], s = queue.scheduler, slot = queue.slot || {};
-    parts.push(slot.occupied && slot.item ? `制作槽：${slot.item.title} 第 ${slot.item.episode} 集（${slot.item.edition}${slot.item.stalled ? '，可能卡住' : ''}）` : '制作槽空闲');
+    parts.push(slot.occupied ? slot.item ? `制作槽：${slot.item.title} 第 ${slot.item.episode} 集（${slot.item.edition}${slot.item.stalled ? '，可能卡住' : ''}）` : '制作槽由保护中的任务占用，等待核验' : '制作槽空闲');
     if (s) parts.push(s.ok ? `调度检查 ${rel(now - s.checked_at)}${s.last_activity ? ` · 调度会话最近活动 ${rel(now - s.last_activity)}` : ''}${s.stale ? '（守卫记录已过时）' : ''}` : '调度守卫读取异常');
     return parts.join(' · ');
   }

@@ -20,7 +20,7 @@ async function page(search = '?view=all', fail = false) {
   }
   const location = {pathname: '/', search, hash: ''};
   const document = {hidden: false, querySelectorAll: () => pagers, addEventListener(name, fn) { events[name] = fn; }};
-  const context = vm.createContext({URLSearchParams, Set, Promise, console, location, STATES, $, calls, document, Date: PageDate,
+  const context = vm.createContext({URLSearchParams, Set, Promise, console, location, STATES, App: {quarters: []}, $, calls, document, Date: PageDate,
     setInterval(fn, ms) { timers.push({fn, ms}); return timers.length; }, clearInterval() {},
     history: Object.fromEntries(['pushState', 'replaceState'].map(k => [k, (_, __, url) => {location.search = new URL(url, 'http://test').search;}])),
     window: {scrollTo() {}}, addEventListener(name, fn) {events[name] = fn;},
@@ -111,11 +111,11 @@ test('retry after a list request failure restores the independent list view', as
   assert.equal(p.ids().length, 20);
 });
 
-test('states without shows stay visible but disabled, and a requested empty state stays selectable', async () => {
+test('states without shows remain selectable for union filters, including a requested empty state', async () => {
   const p = await page('?view=all');
   const html = p.$('#state-filter').innerHTML;
   assert.match(html, /data-f="watching" aria-pressed="false">在追 <span class="num">30<\/span>/);
-  assert.match(html, /data-f="dropped" aria-pressed="false" disabled>弃番 <span class="num">0<\/span>/);
+  assert.match(html, /data-f="dropped" aria-pressed="false">弃番 <span class="num">0<\/span>/);
   assert.doesNotMatch(html, /data-f="" aria-pressed="false" disabled/);
   const empty = await page('?view=all&state=dropped');
   assert.match(empty.$('#state-filter').innerHTML, /data-f="dropped" aria-pressed="true">弃番/);

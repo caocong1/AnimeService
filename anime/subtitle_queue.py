@@ -20,6 +20,17 @@ RANK = {'producing': 0, 'starting': 0, 'queued': 1, 'preparing': 2, 'downloading
         'waiting_video': 4, 'blocked': 5, 'v0_ready': 6, 'done': 7}
 DOWNLOADING = ('held', 'cleaned', 'file_missing', 'error', 'complete')
 _PATH = re.compile(r'[A-Za-z]:[\\/][^\s]*|(?<![\w:])/[^\s]+')
+PUBLIC_REASONS = frozenset(('needs_verified_completed_media', 'completed_media_needs_inventory_or_reconcile',
+    'needs_completed_manifest_and_ownership', 'target_changed_or_missing', 'needs_reliable_chinese_dialogue_base',
+    'needs_reliable_japanese_dialogue_or_real_transcription', 'archived_input_changed_or_invalid',
+    'needs_actual_clean_mother_review', 'needs_verified_local_finished_output_tools',
+    'needs_actual_audio_picture_and_player_capability', 'readiness_proof_or_exact_input_missing',
+    'refinement_baseline_or_target_changed', 'late_review_target_changed'))
+
+
+def public_reasons(reasons):
+    return list(dict.fromkeys(r if isinstance(r, str) and r in PUBLIC_REASONS
+                              else 'preparation_check_required' for r in reasons or []))
 
 
 def public_text(value, limit=200):
@@ -31,7 +42,7 @@ def last_events(db):
     if not _exists(db, 'subtitle_delivery_events'):
         return {}
     return {row['job_id']: (row['kind'], row['recorded']) for row in
-            db.rows('SELECT job_id,kind,MAX(recorded) recorded FROM subtitle_delivery_events GROUP BY job_id')}
+            db.rows("SELECT job_id,kind,MAX(recorded) recorded FROM subtitle_delivery_events WHERE kind NOT IN ('readiness','readiness-observed') GROUP BY job_id")}
 
 
 def work(db, job, events, now, edition):
@@ -55,14 +66,15 @@ def work(db, job, events, now, edition):
         status = 'producing'
     elif dispatch == 'blocked-stopped' or state == 'blocked':
         status = 'blocked'
-        out['reasons'] = [public_text(r) for r in payload.get('production_blockers') or []] \
-            or ([public_text(job['scope_blocker'])] if job['scope_blocker'] else []) \
-            or list(assessment.get('reasons') or [])
+        # Owner prose can contain credentials, account names or host identities.
+        # Keep that evidence private instead of trying to redact arbitrary text.
+        out['reasons'] = (['production_blocked'] if payload.get('production_blockers') else
+                          ['scope_protected'] if job['scope_blocker'] else public_reasons(assessment.get('reasons')))
     elif state in ('ready', 'late-review'):
         status = 'queued'
     else:
         status = 'preparing'
-        out['reasons'] = list(assessment.get('reasons') or [])
+        out['reasons'] = public_reasons(assessment.get('reasons'))
     limit = STALL_SECONDS.get(status)
     out['stalled'] = bool(limit and now - activity > limit)
     out['stalled_seconds'] = int(now - activity) if out['stalled'] else 0
@@ -102,7 +114,7 @@ def episode_item(db, sid, ep, season, title, jobs, episode, gap, events, now):
     elif episode and episode['status'] not in DOWNLOADING:
         item.update(status='downloading', download_progress=round((episode['progress'] or 0) * 100))
     elif gap:
-        item['gap'] = {'code': gap.get('code'), 'reason': public_text(gap.get('reason')),
+        item['gap'] = {'code': gap.get('code'), 'reason': None,
                        'retry_at': gap.get('retry_at'), 'checked_at': gap.get('checked_at')}
     return item
 
@@ -121,6 +133,10 @@ def scheduler_health(root, now):
 
 
 def production_queue(db, now=None, show=None):
+    if not hasattr(db, 'con'):
+        from .read_projection import read_projection
+        with read_projection(db.path) as snapshot_db:
+            return production_queue(snapshot_db, now=now, show=show)
     now = now or time.time()
     snapshot = queue_snapshot(db)
     jobs = SubtitleDelivery(db, initialize=False).snapshot()['jobs']

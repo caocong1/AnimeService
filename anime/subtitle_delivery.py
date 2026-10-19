@@ -356,8 +356,21 @@ class SubtitleDelivery:
                                 value = {**prior, 'latest_assessment': value,
                                          'scope_blocker': blocker, 'finished': value['finished']}
                                 key, state = old['input_key'], old['state']
+                            observational = (old['dispatch_state'] in RETAINED_DISPATCH or old['lease_expires'] > self.clock()) and (
+                                assessment['input_signature'] == old['input_key']
+                                and prior.get('scope_blocker') == blocker
+                                and prior.get('finished') == value['finished'])
                             if old['payload'] == _json(value) and old['state'] == state:
                                 c.execute('DELETE FROM kv WHERE key=?', (error_key,))
+                                continue
+                            if observational:
+                                # Latest diagnostic evidence is not a new dispatch identity.
+                                # Keep the immutable ticket revision and activity timestamp;
+                                # actual input/scope/watched changes still take the CAS path.
+                                c.execute('UPDATE subtitle_delivery_jobs SET payload=? WHERE id=?', (_json(value), identity))
+                                c.execute('DELETE FROM kv WHERE key=?', (error_key,))
+                                self._event(c, identity, 'readiness-observed', {'state': state, 'input_key': key})
+                                changes += 1
                                 continue
                             c.execute('UPDATE subtitle_delivery_jobs SET state=?,revision=revision+1,input_key=?,payload=?,updated=? WHERE id=?',
                                       (state, key, _json(value), self.clock(), identity))

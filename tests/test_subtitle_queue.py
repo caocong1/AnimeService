@@ -77,7 +77,7 @@ def test_episodes_without_jobs_show_download_and_inventory_state(delivery):
     queue = production_queue(db, now=now[0])
     waiting = item(queue, 42, 3)
     assert waiting['status'] == 'waiting_video' and waiting['gap'] == {
-        'code': 'download_retry', 'reason': '获取种子失败，等待自动重试', 'retry_at': now[0] + 600, 'checked_at': now[0]}
+        'code': 'download_retry', 'reason': None, 'retry_at': now[0] + 600, 'checked_at': now[0]}
     downloading = item(queue, 43, 3)
     assert downloading['status'] == 'downloading' and downloading['download_progress'] == 40
     assert not [i for i in queue['items'] if (i['show_id'], i['episode']) == (42, 1)]  # watched episodes leave the queue
@@ -121,7 +121,7 @@ def test_api_route_filters_by_show_and_exposes_nothing_private(delivery):
     only = client.get('/api/subtitle-queue?show=43').json()
     assert {i['show_id'] for i in everything['items']} == {42, 43} and {i['show_id'] for i in only['items']} == {43}
     blocked = item(everything, 42, 1)
-    assert blocked['status'] == 'blocked' and blocked['reasons'] == ['encoder missing at [路径]']
+    assert blocked['status'] == 'blocked' and blocked['reasons'] == ['production_blocked']
     assert not everything['slot']['occupied']  # a stopped owner frees the slot
     text = json.dumps(everything, ensure_ascii=False)
     for private in ('actual-fixture-chat', 'test-owner', 'thread_id', 'lease_owner', 'lease_token', 'dispatch_token',
@@ -134,3 +134,25 @@ def test_public_text_hides_local_paths_but_keeps_times():
     assert public_text('encoder missing at C:\\synthetic\\tools\\ffmpeg.exe and /opt/synthetic/core.py') == 'encoder missing at [路径] and [路径]'
     assert public_text('retry 2026-10-19 12:00 after 3/4 attempts') == 'retry 2026-10-19 12:00 after 3/4 attempts'
     assert len(public_text('x' * 500)) == 200
+
+
+def test_owner_prose_and_unknown_assessment_strings_are_not_public(delivery):
+    db,scheduler,_,now=delivery
+    identity,intent=begin(scheduler)
+    scheduler.reconcile_dispatch(identity,intent['dispatch_token'],thread_id='sensitive-responsible-id')
+    scheduler.record_blocked(identity,'sensitive-responsible-id',
+        ['account sensitive-account; dispatch_token=sensitive-authority; host sensitive-host'],owner_stopped=True)
+    text=json.dumps(production_queue(db,now=now[0]))
+    for secret in ['sensitive-account','sensitive-authority','sensitive-host','sensitive-responsible-id']:
+        assert secret not in text
+
+
+def test_projection_uses_one_database_snapshot(delivery,monkeypatch):
+    db,_,_,now=delivery
+    import anime.read_projection as projection
+    original=projection.sqlite3.connect;calls=[]
+    def connect(*args,**kwargs):calls.append(args[0]);return original(*args,**kwargs)
+    monkeypatch.setattr(projection.sqlite3,'connect',connect)
+    result=production_queue(db,now=now[0])
+    assert len(calls)==1 and str(calls[0]).endswith('?mode=ro')
+    assert result['summary']['queued']==4
