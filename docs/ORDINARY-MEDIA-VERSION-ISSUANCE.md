@@ -68,3 +68,47 @@ OrdinaryIssuer只允许显式注入受信source验证密钥、独立publication�
 当前callback是Store级全局开关，开启会拒绝所有legacy进度写。因此不能在只有部分普通媒体证据可用时全局开关、再让不支持资源退回legacy；需先完成范围内覆盖与客户端就绪，或另行设计经过审查的按资源门禁（本轮未做）。
 
 最少验收：真实大文件耗时与预算可见失败；发行期间原地写/rename/删除/映射变化；完整字节一致但file-id变化；清单伪造/重放/错映射；崩溃在hash后/证据提交前后的重试；首次legacy位置来源未知；旧alias与新版本独立、同版别名同一行；混合客户端/feature-off与回滚仍受持久fence保护。全部在隔离库/合成或专用副本中做，未经后续明确部署步骤不创建生产表或回填进度。
+
+## 第34轮：可信输入、密钥与锚点的隔离第一增量
+
+新增 `ordinary_attestation.py` 与 `ordinary_anchor.py`，均无生产构造点、HTTP/CLI、Engine、数据库或网络。上述“尚未实现独立证据生产者/轮换/锚点”的历史描述，现细化为：已有隔离组件和合成测试，生产许可/facts builder、实际密钥部署、外部锚点与发行器组合仍未接线，不能据此启用。
+
+### 谁在何时签发什么
+
+只有受信控制面的 intake 协调者可准入两种许可：`custody-handoff/v1`（完成选定输入的独立字节交接审查后），或 `owner-reviewed-import/v1`（owner明确审查并接纳旧媒体的新观察，不冒充历史下载完成证据）。许可有独立intake_id与明确approved；不是媒体路径/key、qB完成状态或HTTP请求。`SourceAttestor.attest(intake_id)`仅向受信approve_intake回调取当前许可、授权范围、服务端规范路径/大小、association_digest和input_signature，再持有Windows拒绝写/删共享的稳定只读句柄读完全部字节；签发前重新核许可与输入、句柄/路径身份和预算。失败没有envelope，原片保留。
+
+可信SHA来源是这个有明确准入、时点、范围和持有句柄的独立交接观察。不能把任意当前路径hash、mtime、infohash或下载完成状态替代许可。签名只能证明受信生产者在该准入窗口观察到的完整字节，不证明交接之前的历史来源，也不保证释放句柄后的永久不可变。新证据仍由OrdinaryIssuer二次核当前输入并复制/复核，不能跳过原发行器。
+
+生产approve_intake尚未实现：必须由同Store权威事实产生，核个人选择/独立授权/cleanup与已看边界、真实任务及所选文件manifest、季/本地集映射、输入版本和交接决定。input_signature必须规范化绑定这些事实以及intake_id、mode、许可修订，不能信任调用者给的签名或复用过期dict。SourceAttestor内不读qB/HTTP，也不替callback证明事实来源。当前只有合成许可测试；不得拿本轮对真实文件的性能测量当作该许可或签名证据。
+
+envelope保持ordinary-source/v1和原固定字段/MAC域，现有OrdinaryIssuer.source可验证其密码学及结构；使用TimedOrdinaryIssuer时另加密钥当前有效区间检查。首次HTTP播放不能生成许可/补证，旧key不重绑，未知legacy进度不追认、不搬迁、不清零。生产调用方必须把准入证据与签发envelope关联保存，后续源证据格式如需显式携带许可详情需另审，不能静默扩展现固定字段。
+
+### 密钥生命周期与专用目录
+
+TimedKey用系统随机32字节密钥、随机key_id，source/publication角色隔离，Keyring拒绝重复id和跨角色复用密钥材料。签发key_id显式选择；生效区间为[not_before,not_after)。源签发时issued/expires必须落在密钥期限内；验证时当前时间也必须仍在期限内，包括历史manifest中的源证据，不能靠历史at参数复活过期密钥。轮换保留旧验证key至约定重叠窗口，窗口内旧source/publication可验，过期立即拒绝；缺key或未知key拒绝。
+
+这意味着不能靠删旧key完成无限期历史保留，也不能无限延长已过期key。生产需要确定足够验证窗口与经过审查的历史checkpoint/重签迁移；过期历史链目前fail closed。这是上线前阻塞项，不宣传为自动轮换服务。
+
+密钥生成/保存仅有显式模块API，**本轮未生成或部署生产密钥**。新目录独占创建后才设受保护DACL，仅当前用户和SYSTEM；不收紧既有父目录。密钥写前校验继承ACL，仅这两个主体FullControl，目录/文件所有者也必须属于这两个主体，防止其它所有者通过隐含WRITE_DAC改权限；临时独占文件写/flush/fsync后独占hard-link暴露完整目标，不覆盖旧文件，读回再验ACL、规范JSON与结构。密钥repr不含secret，不打印密钥或异常子进程输出。HMAC验证者也能签名，故该边界是受信本机控制面，不是公钥认证或同账户恶意进程隔离。
+
+实际部署须由owner单独准备专用路径/祖先写权限、签发者与验证者职责、密钥清单及轮换/到期/撤销计划，在受限目录生成并离线核角色/key_id/期限，再显式装载；不从环境/HTTP隐式学习密钥，不改运行配置或启动后台扫描。
+
+### 外部单调锚点与崩溃边界
+
+AnchoredLedger是独立的签名append-only alias→manifest摘要账本；每条绑定schema、外部anchor identity、单调sequence、前一条完整摘要及不可重绑alias。读取必须验证整链与外部head；旧清单替换、缺行、重放另一序号、降级schema、签名伪造或同alias新摘要均拒绝。并发根锁不等待、不抢占。新记录独占临时文件flush/fsync后hard-link发布，随后外部CAS；CAS前异常留下完整pending事实，同值重试可完成；CAS成功但响应丢失时读回已提交事实幂等返回。不同pending事实拒绝，不能自动删除重写。
+
+外部anchor必须提供不可回退的(identity, sequence, digest)持久根及原子compare_exchange；缺失/不确定/CAS未确认均失败。**没有生产anchor provider**，测试使用受控合成服务。旁边的head.json、同一份目录/磁盘快照、由账本自己签名的旧head都不能充当防回滚根；ACL也不能防当前用户将整个历史回拷。不得把本组件说成已解决整机/同账户恶意回滚。fsync/rename/hard-link不被描述为跨资源或断电原子事务。
+
+当前账本尚未接入OrdinaryIssuer.publish、PublicationLease或inventory；下一增量须定义锁顺序，先验证已锚定alias不重绑，再在完整发布验证后提交外部CAS，且只有anchor已确认才向调用方交出lease。对象/alias与anchor不原子，崩溃后必须可读计划并以原受信输入重试，绝不让未锚定文件通过生产resolver。没有该组合时，单独使用旧发行器仍没有防回滚能力。
+
+### 原机真实预算与第3项前置
+
+数字证据留owner回执review34-budget.json，不入库真实文件标识、路径或SHA。测量只对三个现有1GiB级完整文件用现有Windows稳定句柄及1MiB块完整读取；不签发真实envelope，不复制媒体、不联网。记录1/2/3并发、合作式短时限、RSS、进程逻辑读取计数及全系统磁盘计数。缓存未驱逐，系统磁盘计数含其它进程，read_time不是可归因的占用率；不能当冷盘SLA、独占磁盘负载或完整发行复制性能。真实发行还需另验复制+副本复核、空间预留/磁盘不足、同卷并发、公平准入及实际设备预算。单次内核阻塞IO仍不能保证硬中断。
+
+第3项开始前：落实受审生产intake/facts builder和input_signature定义、真正独立的anchor provider及密钥期限/历史策略、账本与发行lease组合及崩溃恢复计划、专用存储ACL/容量、真实复制预算。随后才能将同Store事实短事务、live PublicationLease及可信enablement默认off组合接线；事务内不等待hash/复制/网络/anchor IPC，必须先取得不可变已锚定快照和live lease，提交前assert_live。生产schema另有独立迁移步骤；本轮不建表、不回填、不宣传能力、不替换worker。
+
+### 连续字节托管的生产阻塞条件
+
+`custody-handoff/v1`不能只有“曾批准过此路径”的记录。受信交接者必须在独立准入决定之前已持有拒绝写/删共享的句柄（或有同等已审的不可变输入承诺），并一直保留到SourceAttestor完成签发；SourceAttestor可以在此期间打开同一文件的第二个只读句柄。签名完成后，后续publisher仍须用该完整SHA重新验证原片及副本，不将释放句柄后的路径状态当证据。`owner-reviewed-import/v1`则明确是owner接纳本次新观察，不证明旧下载历史。
+
+本轮合成补验已证明外层Windows稳定句柄跨越准入与签发时，重命名被拒绝、源签名可验证；**生产连续托管协调者仍未实现**，approve_intake这个回调本身不能证明上述时序。因此本轮c是可审的隔离签发基础，不代表任意传入approved字典就有可信原始来源。真实回调、托管许可归档和协调者必须另审，不能接HTTP补证或跳过独立许可。
