@@ -203,6 +203,10 @@ def main():
         if name in ('confirm', 'unknown'):
             p.add_argument('--ticket', help='begin ticket file: records a dispatch-receipt/v1 instead of the legacy path')
             p.add_argument('--host-ref', help='host operation/request reference; requires --ticket')
+        if name == 'confirm':
+            p.add_argument('--reconcile-receipt', help='explicit local recovery of this original rejected created receipt')
+            p.add_argument('--expected-revision', type=int, help='explicit CURRENT revision for created-receipt reconciliation')
+            p.add_argument('--host-evidence', help='fresh raw native tool observation bundle; requires the two reconciliation flags')
         if name == 'blocked':
             p.add_argument('--reason', action='append', required=True)
             p.add_argument('--stopped', action='store_true')
@@ -214,6 +218,10 @@ def main():
     args = parser.parse_args()
     if getattr(args, 'host_ref', None) and not getattr(args, 'ticket', None):
         raise ValueError('--host-ref requires the original --ticket')
+    reconciliation = [getattr(args, k, None) for k in ('reconcile_receipt', 'expected_revision', 'host_evidence')]
+    if any(v is not None for v in reconciliation):
+        if not all(v is not None for v in reconciliation) or not args.ticket or args.host_ref:
+            raise ValueError('Reconciliation requires original --ticket, --reconcile-receipt, --expected-revision and --host-evidence; no replacement host-ref')
     reading = args.command in ('status', 'receipts', 'reconcile-plan')
     db = ReadStore(args.db) if reading else ControlStore(args.db)
     delivery = SubtitleDelivery(db, initialize=not reading)
@@ -292,6 +300,14 @@ def main():
             result = delivery.record_dispatch_receipt(ticket, 'interrupted', evidence={'note': 'dispatch response unknown'},
                                                       host_ref=args.host_ref,
                                                       recorded_by='subtitle_delivery_queue unknown --ticket')
+        elif args.command == 'confirm' and args.reconcile_receipt:
+            from anime.dispatch_reconciliation import reconcile_created
+            ticket = load_ticket(args.ticket)
+            if ticket['job_id'] != args.job_id:
+                raise ValueError('ticket belongs to another job')
+            result = reconcile_created(delivery, ticket, args.reconcile_receipt, args.expected_revision,
+                                       args.thread_id, args.host_evidence,
+                                       recorded_by='subtitle_delivery_queue confirm --reconcile-receipt')
         elif args.command == 'confirm' and args.ticket:
             ticket = load_ticket(args.ticket)
             if ticket['job_id'] != args.job_id:

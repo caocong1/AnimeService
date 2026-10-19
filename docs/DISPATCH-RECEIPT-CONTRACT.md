@@ -118,7 +118,7 @@ Use interrupted --ticket on lost response; legacy unknown moves revision and is
 not a substitute for migrated diagnostics. Never fabricate host_ref to evade a
 stored idempotent result. Ticket/archive failure leaves committing protected.
 
-A FUTURE mutating reconciliation needs a separate owner-reviewed contract:
+An explicit mutating reconciliation requires the following separate contract:
 original ticket + immutable original receipt id + explicit expected CURRENT
 revision + fresh authoritative host reverification evidence/operation identity.
 Inside one transaction, first replay a reconciliation id, then CAS that explicit
@@ -128,5 +128,56 @@ receipt referencing the original fact atomically. Never borrow new credentials,
 issue a fake replacement begin ticket, rewrite the original receipt or reuse a
 host reference as a retry nonce. Changed dispatch/input/owner or stopped work is
 a conflict, not permission to transfer or restart it. not_created remains disabled
-without an approved terminal-absence verifier. No mutating recovery command or
-production caller migration has been implemented in this round.
+without an approved terminal-absence verifier. The original review round did not
+implement a mutating recovery command or production caller migration.
+
+## Explicit created-fact recovery (2026-10-19 user authorization)
+
+The existing local `confirm` now has an opt-in reconciliation branch:
+
+```text
+subtitle_delivery_queue.py confirm JOB --thread-id ORIGINAL_THREAD --ticket ORIGINAL_TICKET --reconcile-receipt ORIGINAL_REJECTED_RECEIPT --expected-revision CURRENT_REVISION --host-evidence PRIVATE_BUNDLE.json
+```
+
+This handles only an original `dispatch-receipt/v1` created fact rejected with
+`revision_moved`. It is not a general retry, absence verifier, replacement ticket,
+legacy fallback or permission to restart a stopped owner. `reconcile-plan` remains
+read-only and `can_apply=false`. Do not execute this branch periodically.
+
+The operator must have explicit user recovery authorization and save actual raw
+native `create_thread`/`send_message_to_thread`, `read_thread`, and `wait_threads`
+responses in a private `dispatch-created-host-observation/v1` bundle. The bundle
+binds job, input, original receipt, explicit current revision, exact local thread,
+project, initial template input, matching terminal turn, completed last tool,
+checked_at/checked_by, and authorization_ref. Both native snapshots must show an
+inactive thread; check residual encoding/writer processes separately before
+recovery. The original tool response supplies the thread ID; no invented operation
+ID is accepted. The CLI computes the bundle file hash. Observations must be made
+after the original rejection and be at most five minutes old on first application.
+This is an explicitly authorized local operator workflow, not cryptographically
+authenticated remote evidence and not an HTTP/client-supplied authority adapter.
+
+In one transaction, replay the derived reconciliation ID first, then verify the
+immutable original ticket digest and rejected receipt, reject contradictory
+created-thread facts, compare the explicit current revision and the original
+dispatch/input/owner/lease credentials, and recheck scope, exact watched state,
+stop/state/thread protections and other occupied production slots. An expired
+original dispatch lease alone does not erase a real created fact. No credentials
+are replaced. A successful CAS changes only this dispatch to acknowledged with
+the original thread. The derived `dispatch-reconciliation/v1` receipt and event
+commit atomically; the original rejected receipt remains byte-for-byte intact.
+Repeated identical calls return their original result even after later stop/watch
+changes. Failed gates record no job change; malformed evidence fails closed.
+
+After this acknowledgement, the existing stopped-observation/begin/resume/confirm
+workflow may proceed only under the same explicit user authorization and fresh
+runtime checks. It resumes that same chat once. Finished releases still require
+their real release/player evidence. The enforcement flag, ordinary confirm path,
+not_created restriction, media/default/accepted/watching state and other owners
+are unchanged. No background task is authorized to repeat this recovery.
+
+### 宿主项目与authority元数据校验
+
+宿主返回的cwd须显式存在、非空且为绝对路径，再与受信项目根比较；不允许缺失、空、点目录或相对路径借用调用者的当前目录。无效材料在应用前拒绝，jobs/events/receipts不变。
+
+在事务前检查已解码的宿主结构（含键、值与嵌套原生JSON）、文件路径/文件名、checked_by、authorization_ref、recorded_by及最终envelope。dispatch/lease原始token不得进入这些字段；JSON Unicode转义及嵌套转义同样拒绝，超过检查深度也拒绝，不将输入内容拼进错误。该检查不改写归档原始字节。来自DB的结果payload只能在事务内取得，持久化/返回前同样检查；拒绝时回滚本次CAS、事件和回执。旧结果重放也在返回前检查。

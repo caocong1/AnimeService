@@ -22,3 +22,13 @@ Windows PowerShell 5会继承宿主PowerShell 7的PSModulePath，导致Get-Acl�
 ## 后续准备
 
 唯一制作槽有人工作时，调度仍可完成下一未看集的只读材料核实、真实洁净检查和工具能力准备，沿既有readiness路径登记；不得因此抢占writer、反复下载或把准备写成完成。v0发布后须按实际player报告调用finished，回执continue_refinement=true就由原writer继续v1；v1真正完成后才释放槽并按原优先序派发后集。
+
+## 显式 created 事实的人工对账恢复
+
+原始 created 回执因 revision 变化被拒绝时，先用只读 reconcile-plan 核原 ticket、拒绝回执与当前事实。只有用户明确授权、原负责线程已停止写入、范围/未看/固定输入仍满足，才可由 owner 使用 confirm 的显式对账参数；协调轮不得因看到旧拒绝回执而自动恢复。
+
+恢复材料须保留原 ticket 和原拒绝回执，另归档新鲜的原生宿主读回结果，绑定同一 job、input、负责线程和明确的当前 revision。宿主 cwd 必须显式为绝对路径并属于项目；缺失或相对值不得从调用进程补齐。原始响应、真实线程/turn 关联和恢复目录只保存在私有审计区，不写入公开文档或提交信息。
+
+对账只确认真实聊天归属，不创建聊天、不替旧回调补当前凭证、不证明 finished/accepted。成功时 job、派生事件和回执在同一事务应用，原拒绝回执不变；重放只返回首次结果。范围、已看、停止写入、后续 begin、线程冲突和其它 owner 的保护不得绕过。
+
+跟踪原 owner 的后续进展只读真实新 turn/tool 与 finished 事实，禁止重放同一恢复流程或循环执行 blocked/begin/resume/confirm。edition、finished-observed、正式审阅和 accepted 分开记录。宿主材料缺失、不新鲜或身份不一致时停止，交 owner 重新核验；不得清回执、改 owner/lease 或伪造缺席证据。

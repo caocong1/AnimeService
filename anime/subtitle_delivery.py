@@ -765,8 +765,8 @@ class SubtitleDelivery:
     def reconciliation_plan(self, ticket, receipt_id):
         """Read-only review of a recorded created fact after revision changes.
 
-        This is NOT a new ticket or authorization to apply. A future mutation
-        needs explicit owner-reviewed host reverification plus a fresh current
+        This is NOT a new ticket or authorization to apply. Explicit local recovery
+        needs operator-reviewed host reverification plus a fresh current
         revision CAS, retaining the ORIGINAL dispatch/input/owner binding.
         """
         validate_ticket(ticket)
