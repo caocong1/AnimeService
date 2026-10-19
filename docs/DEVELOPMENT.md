@@ -39,6 +39,25 @@ Bangumi 同步入口 `/manage#bangumi`，GET `/api/bangumi-sync` 只返回非秘
 
 季度搜索按响应实际条数推进 offset。Bangumi 的实验性搜索接口可能把请求的 limit 限制为更小的值，不能按请求条数推进。同步按唯一作品 ID 核对 total；分页提前为空、偏移不符或重复导致覆盖不足时保留旧成功时间并报告不完整。`catalog_<季度>` 中的 `count`/`total`/`pages`/`complete` 记录本次分页覆盖情况，包含所有动画类型；页面再按日本 TV/WEB 等规则筛选。普通目录同步只更新资料，不改变追番、观看、源映射或下载授权。
 
+## Python依赖锁的隔离重建
+
+公开输入为`requirements.txt`和`requirements-dev.txt`（后者通过`-r requirements.txt`包含运行依赖）。锁针对Windows/Python **3.14**；本次核验解释器为3.14.5。历史锁没有入库的生成器或命令记录；桌面来源提交只追加Pillow，本节记录已验证的重建步骤，不追认旧生成命令。
+
+使用全新临时环境，只安装公开输入及其闭包；不要在生产`.venv`执行安装或把整份生产`pip freeze`直接覆盖公开锁：
+
+```powershell
+py -3.14 -m venv .venv-lock-audit
+.venv-lock-audit/Scripts/python.exe -m pip install -r requirements-dev.txt -c requirements.lock.txt
+.venv-lock-audit/Scripts/python.exe -m pip check
+.venv-lock-audit/Scripts/python.exe -m pip freeze > requirements.lock.candidate.txt
+```
+
+先比较候选与现锁，再由owner审查提交；不要把候选重定向到生产环境文件。正常复建用现锁作约束，避免解析时升级。新增仓库确需依赖或发现缺项时，先只读取得生产当前版本与依赖元数据，单独生成这些公开闭包包的精确约束，隔离解析/安装并保存report，再freeze；范围矛盾、生产缺装或无法复建就报告，不在生产补装、不改声明范围、不自行升级。
+
+公开锁只包含上述输入的闭包；私有字幕核心、本机专用工具包、editable/file/direct URL依赖和安装器自身不入锁。`pywin32`未被这组输入及其传递依赖要求，本机已有副本保留，但不随公开锁分发。完整私有核心回归仍在原机现环境跑，不能用临时环境缺少私有核心而跳过的结果冒充原机全测。`yt-dlp`的日期版本按已安装规范形式记录，PEP 440等价表示不改变`requirements.txt`声明。
+
+本次只以生产已安装版本补齐NumPy/yt-dlp、排除闭包外pywin32，并排序/规范freeze输出；没有安装或升级生产包。复建环境`pip check`通过后，还需原机完整Python套件及只读生产`pip check`通过，才普通推送。
+
 ## 部署与本机配置
 
 这是 Windows 本机应用。当前存储适配仍约定新媒体 `D:/MediaLibrary/Anime`、未完成目录 `D:/MediaDownloads/Incomplete`；qB API 为 `127.0.0.1:4870`，账号文件为 `D:/MediaService/config/downloader-account.json`。不要为试用重置既有凭据、修改其他下载器任务或重建其配置。现有部署采用 qB 后台优先，禁止因离线自动启动或切换实例；源码保留的遗留启动分支不构成执行授权。
