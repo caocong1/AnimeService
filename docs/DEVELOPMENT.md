@@ -162,7 +162,7 @@ B站 UGC标题搜索保留原查询，最多追加两次去版本/标点、去�
 
 续期子进程总时限为propagation_timeout+600秒，超时退出1；不会打印异常/原始provider日志。UPnP仅新增空闲的指定TCP端口或接受完全匹配且启用的原映射；冲突保留原项并退出3，不把冲突报成成功，不更新别人的映射。UPnP COM本身不承诺可中断期限，应由既有任务执行时限约束。
 
-原机若仍用带本机值的旧脚本，先由owner准备受限data/https.json，核对现有端口/证书/任务与回滚，再在独立维护步骤切计划任务。拉取代码不会创建私有配置、签发证书、运行UPnP或停止edge；证书、私钥与配置始终留本机。`tests/test_https_maintenance.py`仅用临时配置、假子进程和合成映射验证，不能冒充真实续期/路由器验收。
+调度方是`anime/edge.py`的https-edge线程，不是Windows计划任务：每30分钟用`%SystemRoot%\System32`下的64位Windows PowerShell执行`https_upnp.ps1 -ConfigPath data/https.json`，每24小时用项目`.venv`解释器执行`https_renew.py`，续期成功且证书文件mtime变化才reload本项目nginx。没有`data/https.json`时监听器照常运行，维护子进程不启动并记为`config_missing`。`data/https-health.json`只保存固定结果类别（`mapping`/`mapped`、`renewal`/`renew_ok`/`checked`），不保存脚本输出；`mapping_conflict`（退出码3）和任何非预期输出/退出码都不算成功。切换调用方等于一次受控加载（线程启动即做首轮映射与证书检查），由owner准备受限data/https.json、核对端口/证书与回滚后按verified流程加载并读回。拉取代码不会创建私有配置、签发证书、运行UPnP或停止edge；证书、私钥与配置始终留本机。`tests/test_https_maintenance.py`仅用临时配置、假子进程和合成映射验证，不能冒充真实续期/路由器验收。
 
 ## 设备配对与重启
 
