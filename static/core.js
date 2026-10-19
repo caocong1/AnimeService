@@ -112,7 +112,7 @@ const icon = (k, cls = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" fill="n
 /* ---------- Shell ---------- */
 
 const NAV_HEALTH = '/manage#status';
-const NAV = [['home', '/', '追番'], ['following', '/?view=all', '全部追番'], ['season', '/season', '新番'], ['library', '/library', '片库'], ['subtitles', '/subtitle-library', '字幕库'], ['manage', '/manage', '后台']];
+const NAV = [['home', '/', '追番'], ['following', '/?view=all', '全部追番'], ['season', '/season', '新番'], ['library', '/library', '片库'], ['subtitles', '/subtitle-queue', '字幕'], ['manage', '/manage', '后台']];
 
 function shell(active) {
   const links = cls => NAV.map(([k, href, label]) =>

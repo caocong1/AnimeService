@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>字幕队列 · 番屿</title><link rel="icon" href="/static/icon.svg"><link rel="stylesheet" href="/static/tokens.css"><link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/subtitle-queue.css?v=queue1"><script src="/static/theme.js"></script></head>
+<body><main id="main"><header class="page-head"><div><h1>字幕队列</h1><p class="meta" id="summary" role="status">正在读取制作队列…</p></div><div class="tools"><a class="btn quiet" href="/subtitle-library">成品与历史</a><button class="btn quiet" id="refresh" type="button">刷新</button></div></header>
+<p class="muted" id="health"></p>
+<p id="notice" class="queue-notice" role="alert" hidden></p>
+<div id="queue" aria-live="polite"><div class="skeleton"></div></div>
+<p class="muted" id="updated"></p>
+<p class="muted">一次只制作一集：先出 v0 观看版，同一负责人紧接着做 v1 精校版，之后才轮到下一集。排队顺序按当前队列快照，新视频到位后可能变化。"可能卡住"只表示长时间没有进度回报。</p>
+</main><script src="/static/core.js?v=20261016-unified"></script><script src="/static/finished-releases.js?v=20261016-unified"></script><script src="/static/subtitle-queue-model.js?v=queue1"></script><script src="/static/subtitle-queue.js?v=queue1"></script></body></html>

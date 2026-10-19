@@ -424,6 +424,10 @@ tr.is-error td { color: var(--danger); }
 .ep-row[data-next] .no { background: var(--signal); color: var(--on-signal); }
 .ep-row[data-s="resume"] .st, .ep-row[data-s="ready"] .st { color: var(--signal); }
 .ep-row[data-s="missing"] .st { color: var(--warn); }
+.ep-sub { margin: calc(-1 * var(--row-gap) + 4px) 0 0 72px; padding: 0 var(--s-4) 4px; font-size: var(--text-s); color: var(--muted); overflow-wrap: anywhere; }
+.ep-sub[data-tone="signal"] { color: var(--signal); }
+.ep-sub[data-tone="ok"] { color: var(--ok); }
+.ep-sub[data-tone="warn"] { color: var(--warn); }
 .ep-row[data-s="missing"] .no { color: var(--warn); }
 .ep-row[data-s="future"], .ep-row[data-s="aired"] { background: none; border: 1px dashed var(--line); }
 .ep-row[data-s="future"] .no, .ep-row[data-s="aired"] .no { color: var(--dim); }

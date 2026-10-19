@@ -28,7 +28,15 @@
     const tick = e.s === 'future' ? '' : e.s === 'watched'
       ? `<button class="btn small quiet" type="button" data-watch="${e.n}" data-finished="false" aria-label="第 ${e.n} 集改为未看">${icon('check')}<span class="lbl">已看</span></button>`
       : `<button class="btn small" type="button" data-watch="${e.n}" data-finished="true" aria-label="第 ${e.n} 集标记看完">${icon('check')}<span class="lbl">看完</span></button>`;
-    return `<div class="ep-row" data-s="${e.s}"${isNext ? ' data-next' : ''}><span class="no"><span>${e.n}</span></span><span class="st">${EP_LABEL[e.s]}</span><span class="info">${epInfo(e, raw)}</span><span class="acts">${play}${tick}</span></div>`;
+    return `<div class="ep-row" data-s="${e.s}"${isNext ? ' data-next' : ''}><span class="no"><span>${e.n}</span></span><span class="st">${EP_LABEL[e.s]}</span><span class="info">${epInfo(e, raw)}</span><span class="acts">${play}${tick}</span></div>${subtitleLine(e)}`;
+  }
+
+  /* One line under an unwatched episode: where its own subtitles are in the production queue. */
+  function subtitleLine(e) {
+    const q = d.queue?.[e.n];
+    if (!q || e.s === 'watched' || q.status === 'done') return '';
+    const tone = SubtitleQueueModel.describe(q).tone;
+    return `<div class="ep-sub" data-tone="${tone}">${esc(SubtitleQueueModel.line(q))}${q.status === 'queued' || q.stalled || q.refinement?.stalled ? ` <a class="link" href="/subtitle-queue">看队列</a>` : ''}</div>`;
   }
 
   function episodes() {
@@ -194,9 +202,11 @@
   async function load() {
     try {
       await boot();
-      const [detail, releases] = await Promise.all([api('/shows/' + sid),
-        FinishedReleases.load({verifyMedia: true}).catch(e => { toast(e.message); return []; })]);
+      const [detail, releases, queue] = await Promise.all([api('/shows/' + sid),
+        FinishedReleases.load({verifyMedia: true}).catch(e => { toast(e.message); return []; }),
+        api('/subtitle-queue?show=' + sid).catch(() => null)]);  // the queue line is optional; the page never waits on it failing
       d = detail;
+      d.queue = Object.fromEntries((queue?.items || []).map(i => [i.episode, i]));
       applyAiringSchedule(d);
       const baseline = d.board;
       d.board = FinishedReleases.applyBoard(d.show, baseline, releases);

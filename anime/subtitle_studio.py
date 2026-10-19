@@ -596,6 +596,11 @@ def register_subtitle_studio(app,engine):
     def library():return studio.library()
     @app.get('/subtitle-library')
     def library_page():return FileResponse(Path(__file__).resolve().parents[1]/'static/subtitle-library.html')
+    from .subtitle_queue import production_queue
+    @app.get('/api/subtitle-queue')
+    def subtitle_queue(show:int|None=None):return production_queue(app.state.db,show=show)
+    @app.get('/subtitle-queue')
+    def subtitle_queue_page():return FileResponse(Path(__file__).resolve().parents[1]/'static/subtitle-queue.html')
     @app.get('/api/subtitle-studio/{sid}/{ep}/workbook')
     def workbook(sid:int,ep:int):
         studio.ensure(sid,ep)

@@ -59,3 +59,12 @@
 
 
 2026-10-16用户最新更正：自制字幕只是播放源，统一使用普通追番 /watch?release=不可变ID，同一Artplayer、弹幕与分集界面；不得另建独立播放器。原视频/v0/v1在播放源选择器切换，旧finished-player链接仅兼容跳转。版本续播仍走/api/finished-viewing，已看共用原watches；不强换活动播放。新交付回执和首页/全部追番/分集/字幕库必须使用统一入口。隔离浏览器验证 scripts/verify_unified_player.cjs 配合 scripts/unified_player_fixture.py；真实观看记录禁止用于测试。
+
+
+## 2026-10-20 字幕队列：按制作顺序看每集在等什么
+
+用户反馈多部在追作品长期没有字幕、一集卡住后面全部跟着等，而字幕库只按"已做好/制作中/准备中/待开始"分类，看不出顺序、位置和是否卡住。新增只读页面 `/subtitle-queue`（主导航"字幕"入口；字幕库保留为"成品与历史"）与 `GET /api/subtitle-queue`（`?show=` 只筛选条目，位置、制作槽与汇总保持全局）。作品分集页在每个未看集下方多一行"字幕 · …"，并在排队或疑似卡住时链接到队列。
+
+`anime/subtitle_queue.py` 只读 `subtitle_delivery_jobs/events`、负责人阶段回报、finished 观察、`episodes`、`download_gaps` 缓存与 `queue_snapshot`，不实例化 Engine、不写任何表；投影不含负责线程、租约/派发 token 或本机路径，负责人写的阻塞原因会把路径替换成"[路径]"。每集状态只取下列之一：`producing`（已确认负责人；阶段与最近回报）、`starting`（committing/unknown 启动回执待确认）、`queued`（就绪，按当前队列快照顺序给出第几位与前面几集）、`preparing`（素材/洁净/能力门未齐，给出原因码）、`downloading`、`waiting_video`（给出 download_gaps 的原因与重试时间）、`blocked`（含 blocked-stopped）、`v0_ready`（已交付 v0；附 v1 后续的同样状态）、`done`（v1 已交付）。
+
+"可能卡住"只由记录的活动推断：制作中超过 90 分钟、启动回执超过 30 分钟没有任务变更、事件或阶段回报就标 `stalled` 并给出时长；它提示去核桌面会话，不证明会话已停止，也不改变任何调度状态。页面同时显示制作槽占用情况与调度守卫 `status.json` 的最近检查/活动时间（不含线程 ID）。验证：`tests/test_subtitle_queue.py`、`tests/subtitle-queue-model.test.cjs`。
