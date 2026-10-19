@@ -17,9 +17,10 @@
     else if(pendingReceipt){label='素材待提交 / 回执核查';next='后台核实下载任务回执；未知任务保留，确认后继续下载，不重复提交。';}
     else if(j.material_ready&&!j.clean_review_ready){label='素材已齐 · 待检查原片';next='检查本集候选画面和软字幕关闭情况，再准备输出并排队。';}
     else if(j.material_ready&&!j.capability_ready){label='素材已齐 · 准备输出通道';next='确认本机整集字幕输出与播放工具可用后，自动排队。';}
-    else if(complete&&!j.chinese_bases){label='视频已到 · 待盘点字幕';next='从已完成视频盘点真实中文字幕，归档后核对本集，不重新下载。';}
+    else if(complete&&!j.chinese_bases){label='视频已到 · 待盘点字幕';next='补齐可用中文字幕原稿；现有视频没有可提取中文轨时，查找独立字幕或校对硬字幕。';}
     else if(complete){label='素材已到 · 待匹配本集';next='核视频归属、原稿与本集时轴匹配，检查后排队。';}
     else if(j.chinese_bases){label='字幕已收集 · 等待视频';next='取得匹配本集的完整视频后继续，已有原稿保留。';}
+    if(j.preparation_wait?.attention_required){label='视频已到 · 准备待处理';next+=' 本集准备已等待超过6小时，缺件处理尚未完成，尚未排定开工时间。';}
     return {category:all||j.chinese_bases?'preparing':'waiting',stage:'materials',label,next};
   }
   function gaps(j) {

@@ -15,7 +15,7 @@ class ShowListSnapshot:
     def __init__(self,db,clause,args,quarter,with_boards):
         self.shows={};self.episodes=defaultdict(list);self.watched=defaultdict(set)
         self.airings=defaultdict(list);self.candidates=defaultdict(list)
-        self.memberships={};self.progress={};self.settings={}
+        self.memberships={};self.quarters=defaultdict(list);self.progress={};self.settings={}
         self.blocked_episodes=defaultdict(set)
         with db.connect() as c:
             # All database fields in one response come from the same WAL snapshot.
@@ -46,11 +46,12 @@ class ShowListSnapshot:
                 self.watched[w['show_id']].add(w['episode'])
             for batch in chunks(ids):
                 marks=','.join('?' for _ in batch)
-                sql=f'SELECT show_id,kind FROM quarter_members WHERE show_id IN ({marks})'
+                sql=f'SELECT show_id,quarter,kind FROM quarter_members WHERE show_id IN ({marks})'
                 params=batch
-                if quarter:sql+=' AND quarter=?';params=[*batch,quarter]
-                else:sql+=" AND kind='continuing'"
-                for r in c.execute(sql,params):self.memberships[r['show_id']]=r['kind']
+                for r in c.execute(sql,params):
+                    self.quarters[r['show_id']].append(r['quarter'])
+                    if r['quarter']==quarter or not quarter and r['kind']=='continuing':
+                        self.memberships[r['show_id']]=r['kind']
             if not with_boards or not ids:return
             keys=[hashlib.sha256(e['path'].lower().encode()).hexdigest()[:32]
                 for eps in self.episodes.values() for e in eps if e['status']=='complete' and e['path']]

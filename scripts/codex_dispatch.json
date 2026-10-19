@@ -11,6 +11,12 @@
   "wait_seconds": 1200,
   "node": "C:/Program Files/nodejs/node.exe",
   "codex_home": null,
-  "db_files": {"state": "state_5.sqlite", "history": "thread_history_1.sqlite", "logs": "logs_2.sqlite"},
-  "run_dir": "data/diagnostics/codex-dispatch-guard"
+  "db_files": {
+    "state": "state_5.sqlite",
+    "history": "thread_history_1.sqlite",
+    "logs": "logs_2.sqlite"
+  },
+  "run_dir": "data/diagnostics/codex-dispatch-guard",
+  "owner_guard_enabled": false,
+  "owner_db": null
 }

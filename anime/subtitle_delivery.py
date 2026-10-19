@@ -407,6 +407,12 @@ class SubtitleDelivery:
 
     def snapshot(self):
         """Read-only queue; an expired lease never erases dispatch uncertainty."""
+        # The live Store otherwise opens a new connection for every lookup.
+        # Keep the backlog and job facts consistent, without running migrations.
+        if not hasattr(self.db, 'con'):
+            from .read_projection import read_projection
+            with read_projection(self.db.path) as db:
+                return SubtitleDelivery(db, clock=self.clock, initialize=False).snapshot()
         if not _exists(self.db, 'subtitle_delivery_jobs'):
             return {'jobs': [], 'summary': {state: 0 for state in sorted(STATES)}}
         jobs = []
@@ -432,7 +438,9 @@ class SubtitleDelivery:
             jobs.append(value)
         jobs.sort(key=lambda job: (job['priority'], job['episode'], job['created'], job['id']))
         from .subtitle_enrollment import coverage
+        from .subtitle_preparation import preparation_plan
         return {'jobs': jobs, 'summary': {state: sum(job['state'] == state for job in jobs) for state in sorted(STATES)},
+                'preparation': preparation_plan(self.db, jobs),
                 'enrollment_coverage': coverage(self.db),
                 'preparation_features': {'research_modes': list(RESEARCH_MODES), 'all_available_unwatched': True,
                                          'watched_acquisition_guard': True, 'watching_auto_enrollment': True}}

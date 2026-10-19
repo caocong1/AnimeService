@@ -12,6 +12,7 @@ function loadConfig(filename = process.env.ANIMESERVICE_DISPATCH_CONFIG || path.
 }
 function validateScope(config, threadId, turnId) {
   if (!Object.hasOwn(config.targets, threadId) || !/^[0-9a-f-]{36}$/.test(turnId || '')) throw Error('outside dispatcher scope');
+  if (config.exact_turns_only && config.recovery_turns?.[threadId] !== turnId) throw Error('outside exact turn scope');
 }
 module.exports = {loadConfig, validateScope};
 function main() {

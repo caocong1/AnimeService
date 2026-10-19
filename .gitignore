@@ -44,6 +44,7 @@
 !/scripts/viewing_queue.py
 !/scripts/airing_numbering_diff.py
 !/scripts/subtitle_delivery_queue.py
+!/scripts/codex_subtitle_owner_guard.py
 !/scripts/supervisor.py
 !/scripts/stop_danmu.py
 !/scripts/stop_https.py
@@ -122,6 +123,7 @@
 !/scripts/repair_subtitle_enrollment.py
 !/scripts/deploy_subtitle_enrollment.py
 !/docs/SUBTITLE-ENROLLMENT.md
+!/docs/SUBTITLE-PREPARATION-BACKLOG.md
 
 !/scripts/deploy_bahamut_alignment.py
 
@@ -134,3 +136,6 @@
 !/scripts/https_renew.py
 !/scripts/https_upnp.ps1
 !/scripts/stop_https.py
+
+!/scripts/subtitle_dispatch_once.py
+!/docs/DISPATCH-CALLER.md

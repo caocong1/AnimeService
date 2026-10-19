@@ -30,3 +30,6 @@ v1另建输出：edition=v1，baseline_release_id=本集v0ID，refinement_review
 
 
 2026-10-16用户最新更正：自制字幕只是播放源，统一使用普通追番 /watch?release=不可变ID，同一Artplayer、弹幕与分集界面；不得另建独立播放器。原视频/v0/v1在播放源选择器切换，旧finished-player链接仅兼容跳转。版本续播仍走/api/finished-viewing，已看共用原watches；不强换活动播放。新交付回执和首页/全部追番/分集/字幕库必须使用统一入口。隔离浏览器验证 scripts/verify_unified_player.cjs 配合 scripts/unified_player_fixture.py；真实观看记录禁止用于测试。
+
+
+2026-10-19 会话健康：小批取帧/实看，复用已保存证据；不要把整集图集或长工具输出重复载入上下文。阶段交接保存简短RECOVERY.txt，包含job/input/edition、已完成工具/输出、未决项和下一命令。已有v1完整输出后优先完成播放器及finished收尾，不因可归档的单点问题无限另起修订。自动压缩/网络卡住由独立守卫及原调度按SUBTITLE-STALL-RECOVERY.md恢复同一owner，不能自行清租约或重建负责人；实际质量义务不减少。

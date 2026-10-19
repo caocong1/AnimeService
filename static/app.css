@@ -339,6 +339,7 @@ tr.is-error td { color: var(--danger); }
 
 .shelf-tools { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: center; margin-bottom: var(--s-3); }
 .shelf-tools .search { flex: 1 1 240px; max-width: 360px; }
+.following-quarter { display: flex; align-items: center; gap: var(--s-2); font-size: var(--text-s); color: var(--muted); white-space: nowrap; }
 .shelf-tools .seg button:disabled { opacity: .45; cursor: default; }
 @media (max-width: 720px) {
   .shelf-tools { gap: var(--s-2); }

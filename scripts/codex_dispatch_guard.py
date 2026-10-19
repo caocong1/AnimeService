@@ -1,7 +1,7 @@
 """Bounded, local no-progress guard for the two AnimeService AI dispatchers.
 
-Reads Codex projections/logs only. Never opens the AnimeService database, starts
-an AI turn, releases a lease, or interrupts an episode production thread.
+Reads Codex projections/logs. Optional current-writer guard reads AnimeService
+read-only; neither guard starts an AI turn or releases a lease.
 """
 import argparse
 import hashlib
@@ -57,6 +57,10 @@ def load_config(path=CONFIG_PATH):
     if not isinstance(config['run_dir'],str) or not config['run_dir'].strip():raise ValueError('run_dir must be a nonempty path')
     for key in ('node','codex_home'):
         if config[key] is not None and (not isinstance(config[key],str) or not config[key].strip()):raise ValueError(f'{key} must be a path or null')
+    if config.get('owner_guard_enabled') is not None and not isinstance(config['owner_guard_enabled'], bool):
+        raise ValueError('owner_guard_enabled must be boolean')
+    if config.get('owner_guard_enabled') and (not isinstance(config.get('owner_db'), str) or not Path(config['owner_db']).is_absolute()):
+        raise ValueError('owner_db must be an explicit absolute path')
     config['_config_path']=str(Path(path).resolve())
     config['_config_sha256']=hashlib.sha256(raw).hexdigest()
     return config
@@ -170,6 +174,12 @@ def run(apply, home=None, now=None, config=None):
             with (run_dir / 'actions.jsonl').open('a', encoding='utf-8') as f:
                 f.write(json.dumps({'at': now, **row}, ensure_ascii=False) + '\n')
         except OSError as error:status['error']='action_log: '+type(error).__name__
+    if not config_error and config.get('owner_guard_enabled'):
+        try:
+            from codex_subtitle_owner_guard import run as guard_owner
+            status['owner_guard'] = guard_owner(apply, home, config, now)
+        except Exception as error:
+            status['owner_guard'] = {'threads': [], 'error': f'{type(error).__name__}: {error}'}
     # Concurrent diagnostic/apply invocations must not share one temporary file.
     with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=run_dir,prefix='status-',suffix='.tmp',delete=False) as f:
         tmp=Path(f.name);f.write(json.dumps(status,ensure_ascii=False,indent=2)+'\n')
@@ -184,7 +194,9 @@ def main():
     args = parser.parse_args()
     status = run(args.apply)
     print(json.dumps(status, ensure_ascii=False))
-    sys.exit(1 if status['error'] or any(row.get('control_error') or row.get('control_exit_code') not in (None,0) for row in status['threads']) else 0)
+    owner = status.get('owner_guard', {})
+    sys.exit(1 if status['error'] or owner.get('error') or any(row.get('control_error') or row.get('control_exit_code') not in (None,0)
+        for row in status['threads'] + owner.get('threads', [])) else 0)
 
 
 if __name__ == '__main__':

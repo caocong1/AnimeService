@@ -65,6 +65,7 @@ def resources(db, sid, ep):
 
 def catalogue(db):
     queue = SubtitleDelivery(db, initialize=False).snapshot()
+    preparation = {r['job_id']: r for r in queue.get('preparation', {}).get('available', [])}
     rows = []
     for job in queue['jobs']:
         show = db.show(job['show_id']); payload = job['payload']
@@ -93,6 +94,10 @@ def catalogue(db):
                      'clean_review_ready': assessment.get('clean_review_ready') is True,
                      'capability_ready': assessment.get('capability_ready') is True,
                      'reasons': assessment.get('reasons') or [], 'updated': job['updated']})
+        pending = preparation.get(job['id'])
+        if pending:
+            rows[-1]['preparation_wait'] = {k: pending[k] for k in
+                ('waiting_since', 'waiting_seconds', 'attention_required', 'actions')}
     return {'schema': 1, 'generated_at': time.time(), 'jobs': rows}
 
 

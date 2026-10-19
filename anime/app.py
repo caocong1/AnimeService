@@ -250,6 +250,7 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
             data=filtered
         for s in data:
             s['quarter_kind']=snapshot.memberships.get(s['id'],'new')
+            s['quarters']=sorted(set(filter(None,[s['quarter'],*snapshot.quarters[s['id']]])))
             s['tags']=json.loads(s['tags']);s['mapping']=json.loads(s['mapping']);s.pop('metadata')
             eps=snapshot.episodes[s['id']]
             s['downloaded']=sum(e['status']=='complete' for e in eps);s['downloading']=sum(e['status'] not in ('complete','held') for e in eps)
@@ -481,6 +482,7 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
         if s['selected'] and not before and after and s['state'] in ('wish','trial','watching','paused'):state='completed'
         elif s['selected'] and before and not after and s['state']=='completed':state='watching'
         if state:engine.state(sid,state);db.event('show:'+str(sid),f'看完全部 {s["total"]} 集，自动设为看完' if state=='completed' else '取消已看，自动恢复在追')
+        elif s['state']=='wish' and db.show(sid)['state']=='trial':state='trial'
         return {'ok':True,'state':state}
     @app.post('/api/player/probe')
     def probe():

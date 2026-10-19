@@ -12,13 +12,14 @@
 
   const params = new URLSearchParams(location.search);
   // Preserve old bookmarks that opened the shelf with a search/state filter.
-  const all = params.get('view') === 'all' || params.has('q') || Object.hasOwn(STATES, params.get('state'));
+  const all = params.get('view') === 'all' || params.has('q') || params.has('quarter') || params.getAll('state').some(s => Object.hasOwn(STATES, s));
   shell(all ? 'following' : 'home');
   const ACTIVE = new Set(['watching', 'trial', 'wish']);
-  let shows = [], filter = '', query = '', page = 1, pageSize = 20, stopObserving, loading = false, lastLoad = 0;
+  let shows = [], filters = new Set(), quarter = '', query = '', page = 1, pageSize = 20, stopObserving, loading = false, lastLoad = 0;
   function readUrl() {
     const p = new URLSearchParams(location.search);
-    filter = Object.hasOwn(STATES, p.get('state')) ? p.get('state') : '';
+    filters = new Set(p.getAll('state').filter(s => Object.hasOwn(STATES, s)));
+    quarter = /^\d{4}-(01|04|07|10)$/.test(p.get('quarter') || '') ? p.get('quarter') : '';
     query = p.get('q') || '';
     const n = Number(p.get('page'));
     page = Number.isSafeInteger(n) && n > 0 ? n : 1;
@@ -102,21 +103,25 @@
   }
 
   function renderShelf() {
+    const quarters = [...new Set([...App.quarters, ...shows.flatMap(s => s.quarters || [s.quarter]), quarter].filter(q => /^\d{4}-(01|04|07|10)$/.test(q)))].sort().reverse();
+    $('#following-quarter').innerHTML = '<option value="">不限季度</option>' + quarters.map(q => `<option value="${q}">${quarterName(q)}</option>`).join('');
+    $('#following-quarter').value = quarter;
+    const seasonal = shows.filter(s => !quarter || (s.quarters || [s.quarter]).includes(quarter));
     const counts = {};
-    for (const s of shows) counts[s.state] = (counts[s.state] || 0) + 1;
+    for (const s of seasonal) counts[s.state] = (counts[s.state] || 0) + 1;
     const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.f : undefined;
-    $('#state-filter').innerHTML = [['', '全部', shows.length], ...Object.entries(STATES).map(([k, v]) => [k, v, counts[k] || 0])]
-      .map(([k, v, n]) => `<button type="button" data-f="${k}" aria-pressed="${filter === k}"${!k || n || filter === k ? '' : ' disabled'}>${v} <span class="num">${n}</span></button>`).join('');
+    $('#state-filter').innerHTML = [['', '全部', seasonal.length], ...Object.entries(STATES).map(([k, v]) => [k, v, counts[k] || 0])]
+      .map(([k, v, n]) => `<button type="button" data-f="${k}" aria-pressed="${k ? filters.has(k) : !filters.size}">${v} <span class="num">${n}</span></button>`).join('');
     if (focused !== undefined) { const again = document.querySelector(`#state-filter [data-f="${focused}"]`); if (again) again.focus(); }
     const q = query.trim().toLowerCase();
-    const rows = shows.filter(s => (!filter || s.state === filter) && (!q || (s.title + ' ' + s.original).toLowerCase().includes(q)));
+    const rows = seasonal.filter(s => (!filters.size || filters.has(s.state)) && (!q || (s.title + ' ' + s.original).toLowerCase().includes(q)));
     const pages = Math.max(1, Math.ceil(rows.length / pageSize));
     page = Math.min(page, pages);
     const start = (page - 1) * pageSize;
-    $('#summary').textContent = `${shows.length} 部 · 筛选结果 ${rows.length} 部`;
+    $('#summary').textContent = `${quarter ? quarterName(quarter) + ' · ' : ''}${filters.size ? [...filters].map(s => STATES[s]).join('、') + ' · ' : ''}筛选结果 ${rows.length} 部`;
     $('#shelf').innerHTML = rows.length ? rows.slice(start, start + pageSize).map(s => `<div class="shelf-row" style="${lineColour(s.id)}">${cover(s.image, s.title, '', '/show/' + s.id)}
       <div><a class="name" href="/show/${s.id}">${esc(s.title)}</a><div class="facts">${facts(s)}</div></div>${epStrip(s)}<div class="end">${ticket(s, false)}</div></div>`).join('')
-      : shows.length ? `<div class="empty"><p>没有符合「${esc(query || STATES[filter] || '')}」的作品</p><button class="btn small" type="button" id="clear">清除筛选</button></div>`
+      : shows.length ? `<div class="empty"><p>没有符合当前筛选条件的作品</p><button class="btn small" type="button" id="clear">清除筛选</button></div>`
       : `<div class="empty"><h2>还没有追番</h2><a class="btn primary" href="/season">${icon('season')}去看新番</a></div>`;
     const numbers = [...new Set([1, pages, ...Array.from({length: 5}, (_, i) => page - 2 + i).filter(n => n > 0 && n <= pages)])].sort((a, b) => a - b);
     const links = numbers.map((n, i) => `${i && n - numbers[i - 1] > 1 ? '<span aria-hidden="true">…</span>' : ''}<button class="btn small" type="button" data-page="${n}" aria-label="第 ${n} 页"${n === page ? ' aria-current="page"' : ''}>${n}</button>`).join('');
@@ -132,7 +137,8 @@
   function syncUrl(push = false) {
     const p = new URLSearchParams();
     p.set('view', 'all');
-    if (filter) p.set('state', filter);
+    for (const state of Object.keys(STATES)) if (filters.has(state)) p.append('state', state);
+    if (quarter) p.set('quarter', quarter);
     if (query) p.set('q', query);
     if (page > 1) p.set('page', page);
     if (pageSize !== 20) p.set('size', pageSize);
@@ -144,19 +150,24 @@
   $('#q').addEventListener('input', search);
   $('#q').addEventListener('compositionend', search);
   document.addEventListener('change', e => {
+    if (e.target.id === 'following-quarter') { quarter = e.target.value; page = 1; syncUrl(true); renderShelf(); return; }
     if (!e.target.matches('[data-page-size]')) return;
     pageSize = Number(e.target.value); page = 1; syncUrl(true); renderShelf();
     $('#' + e.target.id).focus();
   });
   document.addEventListener('click', e => {
     const f = e.target.closest('[data-f]');
-    if (f) { filter = f.dataset.f; page = 1; syncUrl(true); renderShelf(); $(`[data-f="${filter}"]`).focus(); }
+    if (f) {
+      const state = f.dataset.f;
+      if (!state) filters.clear(); else if (filters.has(state)) filters.delete(state); else filters.add(state);
+      page = 1; syncUrl(true); renderShelf(); $(`[data-f="${state}"]`).focus();
+    }
     const p = e.target.closest('[data-page]');
     if (p && !p.disabled && Number(p.dataset.page) !== page) {
       page = Number(p.dataset.page); syncUrl(true); renderShelf();
       $('h1').focus({preventScroll: true}); window.scrollTo({top: 0, behavior: 'instant'});
     }
-    if (e.target.closest('#clear')) { filter = ''; query = ''; page = 1; $('#q').value = ''; syncUrl(true); renderShelf(); $('#q').focus(); }
+    if (e.target.closest('#clear')) { filters.clear(); quarter = ''; query = ''; page = 1; $('#q').value = ''; syncUrl(true); renderShelf(); $('#q').focus(); }
     if (e.target.closest('#retry')) load();
   });
 

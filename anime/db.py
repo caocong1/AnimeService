@@ -106,6 +106,19 @@ class Store:
                 BEGIN ''' + enqueue.format(sid='OLD.show_id') + ''' END;''')
             c.execute("""INSERT OR IGNORE INTO bangumi_sync_queue(show_id,revision,state,updated)
                 SELECT id,1,'pending',strftime('%s','now') FROM shows WHERE selected=1""")
+            # Shared by web/finished releases and desktop history. Progress and
+            # repeated sync cannot override a later manual tracking choice.
+            c.executescript('''CREATE TRIGGER IF NOT EXISTS watched_wish_insert
+                AFTER INSERT ON watches WHEN NEW.finished=1 AND NEW.episode>0
+                BEGIN
+                    UPDATE shows SET state='trial' WHERE id=NEW.show_id AND selected=1 AND state='wish';
+                END;
+                CREATE TRIGGER IF NOT EXISTS watched_wish_update
+                AFTER UPDATE OF finished ON watches
+                WHEN NEW.finished=1 AND OLD.finished IS NOT 1 AND NEW.episode>0
+                BEGIN
+                    UPDATE shows SET state='trial' WHERE id=NEW.show_id AND selected=1 AND state='wish';
+                END;''')
     @contextlib.contextmanager
     def connect(self):
         c=sqlite3.connect(self.path,timeout=20); c.row_factory=sqlite3.Row
@@ -135,6 +148,19 @@ class Store:
         with self.connect() as c:
             return c.execute('DELETE FROM events WHERE time<? AND id<=?',(now-keep_days*86400,floor['id'])).rowcount
     def show(self,sid):return self.one('SELECT * FROM shows WHERE id=?',(sid,))
+    def promote_watched_wishes(self,quarter):
+        """Explicit quarter-scoped backfill; routine auto transitions use watch triggers."""
+        with self.gate,self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            rows=[dict(r) for r in c.execute('''SELECT id,title,state FROM shows
+                WHERE selected=1 AND state='wish'
+                AND (quarter=? OR id IN (SELECT show_id FROM quarter_members WHERE quarter=?))
+                AND EXISTS(SELECT 1 FROM watches WHERE show_id=shows.id AND episode>0 AND finished=1)''',(quarter,quarter))]
+            for row in rows:
+                c.execute("UPDATE shows SET state='trial' WHERE id=? AND state='wish'",(row['id'],))
+                c.execute("INSERT INTO events(time,level,scope,message) VALUES(?,'info',?,?)",
+                          (time.time(),'show:'+str(row['id']),'已有已看集，想看自动改为试看'))
+            return rows
     def mapping(self,sid):return json.loads(self.show(sid)['mapping'])
     def local_airings(self,sid):
         # Catalog rows retain Bangumi `sort` numbering; consumers use the explicit airing offset,

@@ -10,6 +10,11 @@ TURN = {'status': 'inProgress', 'started_at': 1}
 USER = {'type': 'userMessage', 'content': [{'type': 'text', 'text': '<heartbeat><automation_id>automation-3</automation_id></heartbeat>'}]}
 
 
+@pytest.fixture(autouse=True)
+def isolate_dispatcher_tests_from_owner_database(monkeypatch):
+    monkeypatch.setitem(guard.CONFIG, 'owner_guard_enabled', False)
+
+
 def test_only_stale_scheduled_model_wait_is_interrupted():
     assert guard.decide(TID, 'D:\\AnimeService', TURN, [USER], 50, 1300) == 'interrupt_stale_model_wait'
     assert guard.decide(TID, '\\\\?\\D:\\AnimeService', TURN, [USER], 50, 1300) == 'interrupt_stale_model_wait'

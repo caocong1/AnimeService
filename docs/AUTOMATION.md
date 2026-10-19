@@ -10,7 +10,7 @@
 | automation-2：字幕v0→v1连续制作与派发 | ACTIVE，每15分钟，原heartbeat | watching未看集材料/缺口只读诊断、唯一派发、真实owner跟踪；通常3–10分钟，10分钟后不开始新重活 |
 | automation-3：想看首集实评与稳定更新 | ACTIVE，每小时，原heartbeat | wish/trial变化指纹、一个首集的可恢复真实评审批次；通常3–10分钟，未看完整集不得报完整评分 |
 | automation-4：字幕遗留问题每周复盘 | ACTIVE，周日10时，原heartbeat | 仅有新条件的遗留单点，最多两项、单项10分钟、总30分钟；不是正常v1制作 |
-| CodexDispatchGuard | 独立本机计划，每5分钟 | 仅指定两个调度heartbeat的无进展诊断/受控中断；非第五个桌面任务，不管单集制作或重投 |
+| CodexDispatchGuard | 独立本机计划，每5分钟 | 两个调度heartbeat及当前有效唯一字幕owner的无进展诊断/精确中断；不解业务锁或重投 |
 
 家庭影视任务只在其原项目运行、沿原下载优先级与五季授权；不得搬到AnimeService或套用动画的唯一下载器规则。需要桌面交互、文件移动/目录整理的步骤转独立维护，定时轮不开Computer Use、不启动下载器、不搬活动文件。四周期保留的理由是后台已负责发现/下载，协调不靠高频重试；v0→v1由持续owner推进，不等15分钟。
 
@@ -19,7 +19,7 @@
 1. 读AGENTS/PROJECT-RULES及最新短交接，复核selected、wish/trial/watching、原授权、映射/盘点、分集边界、cleanup_hold和逐集watches.finished；领取/继续/输出前都核，不能改个人或已看状态来入队。
 2. 来源发现、download_gaps核对、ingest/下载与完成对账属于唯一现有Engine。定时任务只回读现有只读视图的分类与checked_at；reconcile_missing会写缓存/可能ingest，不是只读探针。无只读接口就登记缺口，不实例化Engine或直写SQL。
 3. download_ready不等于下载完成，source_not_found不等于确证未发布；retry/主源窗口未到等待，candidate_review/quality_required/sources_disabled按真实原因处理。旧缓存标陈旧并核后台健康，不强制催抓、不绕下载回执/manifest/归属门禁。
-4. 任务3只管wish/trial；任务2管watching字幕准备，owner占槽时仍可有界准备一个下一未看集readiness，不抢writer、不改固定input、不把准备算交付。首集实评保存实际覆盖游标；无可靠断点能力就登记一次工程缺口，不用片段补整集评分或把定时轮无限延长。
+4. 任务3只管wish/trial；任务2管watching字幕准备，每轮必须从status.preparation.available按最近实际尝试轮换一个作品，owner占槽也推进一次有界实际准备；规则见[准备积压处理](SUBTITLE-PREPARATION-BACKLOG.md)。不抢writer、不改固定input、不把重复读报告/refresh算准备。首集实评保存实际覆盖游标；无可靠断点能力就登记一次工程缺口，不用片段补整集评分或把定时轮无限延长。
 5. 日文材料逐集核本地轨/存档、Jimaku、用户指定页，实际文件核作品/季集/对白/歌曲/来源声明并存私有URL/时间/字节/SHA及覆盖。查询失败、未发现、候选、待匹配、已匹配分别记录；CC标签仅声明，ASR人工稿非原生CC，同文ASS/SRT不是独立来源。跨平台按真实声画/剪辑锚点分段匹配，不凭片头偏移推整片。见SUBTITLE-JAPANESE-SOURCES.md。
 6. v0可先交完整中文，普通对白日文缺口如实明示；finished、edition、日文覆盖、accepted四者分开。歌词双语、bilingual文件名或edition=v1不证明全双语，技术检查不等于亲听。
 7. 唯一owner实际交付v0后，finished若返回continue_refinement=true，立即同writer继续v1；screen_text/op/ed/placement/effects/semantics六项须实际工作、证据与未决issue_ids，预算不授权整类略过。真正v1/文件/视频绑定/player核验完成才释放槽。publish经统一/watch入口，原视频/v0/v1并存，活动播放不强换，不回填观看/default/accepted。
@@ -41,7 +41,7 @@ acknowledged、notLoaded或旧成品存在不代表仍在制作；核精确turn�
 
 保留桌面停滞修复：制作使用项目既有环境，实际字体测宽/ffmpeg/浏览器输出能力检查，不把Pillow等工具依赖失败冒充素材缺失。Windows票据ACL以.NET设置并读回，begin前预检；真正归档仍再校验，不降低权限标准，不事后猜造票据。
 
-守卫仅对配置白名单目标、正确项目/heartbeat或精确登记恢复轮、inProgress、20分钟无日志进展且无运行工具同时成立时，按expectedTurnId请求中断；不释放业务锁、不创建AI轮次、不杀应用/单集owner。脚本共享codex_dispatch.json及ANIMESERVICE_DISPATCH_CONFIG覆盖，wait_seconds为60–86400整数、非法回退1200；空targets/cwd或缺db_files拒启动，node先PATH。无--apply仅写诊断；业务调度不自行运行--apply或改白名单。
+守卫仅对配置白名单目标、正确项目/heartbeat或精确登记恢复轮、inProgress、20分钟无日志进展且无运行工具同时成立时，按expectedTurnId请求中断；不释放业务锁、不创建AI轮次、不杀应用；2026-10-19授权增加当前有效单集owner的只读发现与精确turn中断，受控同owner恢复及重试上限见SUBTITLE-STALL-RECOVERY.md。脚本共享codex_dispatch.json及ANIMESERVICE_DISPATCH_CONFIG覆盖，wait_seconds为60–86400整数、非法回退1200；空targets/cwd或缺db_files拒启动，node先PATH。无--apply仅写诊断；业务调度不自行运行--apply或改白名单。
 
 先看status.json新鲜度/整体error，再按当前调度聊天、精确turn及时间筛actions.jsonl的控制尝试和control_exit_code/receipt/error；每次有status，只有尝试控制才追加actions。不能把全局末行、缺行或IPC成功当业务完成，结合实时队列只续未完成动作，不重放整轮。
 

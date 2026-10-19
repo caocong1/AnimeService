@@ -119,7 +119,7 @@ class DandanHistory:
                     VALUES(?,?,1,'dandan',?) ON CONFLICT(show_id,episode) DO UPDATE SET
                     finished=1,updated=max(watches.updated,excluded.updated)
                     WHERE watches.method='dandan' ''',(sid,ep,watched))
-            # Count episode identities, not source files/versions. Never change tracking state.
+            # Count episode identities, not versions. Store promotes a newly watched wish to trial.
             c.execute('''UPDATE shows SET watched=(SELECT count(*) FROM watches
                 WHERE watches.show_id=shows.id AND finished=1)''')
             synced=c.execute("SELECT count(*) FROM watches WHERE method='dandan' AND finished=1").fetchone()[0]
