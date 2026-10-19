@@ -74,7 +74,12 @@ def episode_item(db, sid, ep, season, title, jobs, episode, gap, events, now):
     item = {'show_id': sid, 'episode': ep, 'season': season, 'title': title, 'status': 'waiting_video',
             'edition': 'v0', 'stage': None, 'progress': None, 'since': None, 'last_activity': None,
             'stalled': False, 'stalled_seconds': 0, 'position': None, 'ahead': None, 'reasons': [],
-            'gates': None, 'gap': None, 'download_progress': None, 'release_id': None, 'refinement': None}
+            'gates': None, 'gap': None, 'download_progress': None, 'release_id': None, 'refinement': None,
+            'video_ready_at': None, 'waiting_seconds': None}
+    if episode and episode['status'] == 'complete' and episode['first_completed']:
+        # How long a playable file has waited for its own subtitles; the first completion is recorded once.
+        item['video_ready_at'] = episode['first_completed']
+        item['waiting_seconds'] = max(0, int(now - episode['first_completed']))
     job, refinement = jobs.get('episode'), jobs.get('refinement')
     observation = db.get(f'subtitle_delivery_finished_{sid}_{ep}', {}) or {}
     delivered = job['delivery_finished'] if job else bool(observation.get('release_id'))
@@ -126,7 +131,7 @@ def production_queue(db, now=None, show=None):
         sid = row['id']
         season = db.mapping(sid).get('season', 1)
         watched = {r['episode'] for r in db.rows('SELECT episode FROM watches WHERE show_id=? AND finished=1', (sid,))}
-        episodes = {e['episode']: e for e in db.rows('SELECT episode,status,progress FROM episodes WHERE show_id=?', (sid,))}
+        episodes = {e['episode']: e for e in db.rows('SELECT episode,status,progress,first_completed FROM episodes WHERE show_id=?', (sid,))}
         by_episode = {}
         for job in jobs:
             if job['show_id'] == sid and job['kind'] in ('episode', 'refinement'):

@@ -44,6 +44,9 @@ test('sections put attention first and watchable last', () => {
 
 test('show page line and overview health text', () => {
   assert.equal(m.line({...base, position: 3, ahead: 3}, now), '字幕 · 排队第 3 位 · 前面还有 3 集；一次只做一集');
+  assert.equal(m.waited({...base, waiting_seconds: 3 * 86400}), '视频到位 3.0 天');
+  assert.equal(m.waited({...base, status: 'done', waiting_seconds: 3 * 86400}), '');
+  assert.equal(m.waited(base), '');
   const busy = m.health({slot: {occupied: true, item: {...base, status: 'producing', stalled: true}},
     scheduler: {ok: true, checked_at: now - 120, last_activity: now - 300, stale: false}}, now);
   assert.equal(busy, '制作槽：示例 第 3 集（v0，可能卡住） · 调度检查 2 分钟前 · 调度会话最近活动 5 分钟前');

@@ -9,7 +9,8 @@
   }
   function row(item) {
     const d = SubtitleQueueModel.describe(item, now()), r = ['v0_ready', 'done'].includes(item.status) ? release(item) : null;
-    return `<article class="queue-row" data-tone="${d.tone}"><div class="queue-ep"><a href="/show/${item.show_id}">${esc(item.title)}</a><span>第 ${item.episode} 集</span></div>` +
+    const waited = SubtitleQueueModel.waited(item);
+    return `<article class="queue-row" data-tone="${d.tone}"><div class="queue-ep"><a href="/show/${item.show_id}">${esc(item.title)}</a><span>第 ${item.episode} 集${waited ? ' · ' + esc(waited) : ''}</span></div>` +
       `<div class="queue-state"><b>${esc(d.label)}</b>${d.detail ? `<span>${esc(d.detail)}</span>` : ''}</div>` +
       `<div class="queue-acts">${r ? `<a class="btn small" href="${esc(r.player_url)}">${icon('play')}<span class="lbl">播放 ${esc(FinishedReleases.label(r))}</span></a>` : ''}</div></article>`;
   }

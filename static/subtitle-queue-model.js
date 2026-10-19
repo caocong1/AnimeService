@@ -66,6 +66,8 @@
   }
 
   function line(item, now) { const d = describe(item, now); return `字幕 · ${d.label}${d.detail ? ' · ' + d.detail : ''}`; }
+  /* How long a playable video has waited for its own subtitles; empty once v1 is done or no video exists yet. */
+  function waited(item) { return item.waiting_seconds > 0 && item.status !== 'done' ? `视频到位 ${span(item.waiting_seconds)}` : ''; }
 
   function health(queue, now = Date.now() / 1000) {
     const parts = [], s = queue.scheduler, slot = queue.slot || {};
@@ -74,6 +76,6 @@
     return parts.join(' · ');
   }
 
-  const api = {STATUS, STAGE, describe, sections, line, health};
+  const api = {STATUS, STAGE, describe, sections, line, waited, health};
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.SubtitleQueueModel = api;
 })(typeof window === 'undefined' ? globalThis : window);

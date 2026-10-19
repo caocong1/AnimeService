@@ -82,9 +82,11 @@ def test_episodes_without_jobs_show_download_and_inventory_state(delivery):
     assert downloading['status'] == 'downloading' and downloading['download_progress'] == 40
     assert not [i for i in queue['items'] if (i['show_id'], i['episode']) == (42, 1)]  # watched episodes leave the queue
     assert queued(queue) == [(43, 1, 1, 0), (42, 2, 2, 1), (43, 2, 3, 2)]
-    db.execute("UPDATE episodes SET status='complete',path='fixture.mkv',size=1 WHERE show_id=43 AND episode=3")
+    assert downloading['video_ready_at'] is None and downloading['waiting_seconds'] is None
+    db.execute("UPDATE episodes SET status='complete',path='fixture.mkv',size=1,first_completed=? WHERE show_id=43 AND episode=3", (now[0] - 7200,))
     arrived = item(production_queue(db, now=now[0]), 43, 3)
     assert arrived['status'] == 'preparing' and arrived['reasons'] == ['pending_inventory']
+    assert arrived['video_ready_at'] == now[0] - 7200 and arrived['waiting_seconds'] == 7200
 
 
 def test_delivered_v0_shows_its_v1_follow_up(delivery):
