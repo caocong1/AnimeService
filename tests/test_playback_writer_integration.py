@@ -108,6 +108,52 @@ def test_default_off_legacy_routes_keep_working_without_creating_v2_tables(media
     assert not db.rows("SELECT name FROM sqlite_master WHERE name='playback_writers'")
 
 
+def test_explicit_empty_writer_schema_is_passive_for_all_legacy_progress_paths(media):
+    db,app,client,resolve,key,plain,_=media
+    writers=PlaybackWriters(db,resolve)
+    assert writers.capabilities()['enabled'] is False
+    assert client.post(f'/api/web/media/{key}/progress',json=packet()).status_code==200
+    finished=client.post('/api/finished-viewing/test-v0/progress',json={**packet(),'session':'finished-session-123456789'})
+    assert finished.status_code==200 and finished.json()=={'ok':True}
+    stamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
+    entries={key:{'id':key,'show_id':42,'episode':2,'path':str(plain),'size':5,'name':'synthetic','folder':'synthetic'}}
+    result=DandanHistory(db).merge({'recent':[{'path':str(plain),'played':stamp,'seconds':50}],
+        'files':[{'path':str(plain),'size':5,'duration':100}],'seen':[]},entries)
+    assert result['resume_files']==1 and result['progress_fenced']==0
+    assert not db.rows('SELECT * FROM playback_writers')
+    assert not db.rows('SELECT * FROM playback_claim_receipts')
+    assert len(db.rows('SELECT * FROM web_progress'))==2
+    assert not db.rows('SELECT * FROM watches')
+
+
+def test_schema_creation_never_pins_unknown_legacy_position_or_clears_watches(media):
+    db,app,client,resolve,key,*_=media
+    db.execute('DELETE FROM ordinary_media_versions')
+    db.execute('INSERT INTO web_progress(media_id,position,duration,updated) VALUES(?,?,?,?)',(key,37,100,1))
+    db.execute("INSERT INTO watches(show_id,episode,finished,position,method,updated) VALUES(42,2,0,37,'manual',1)")
+    before=(db.rows('SELECT * FROM web_progress'),db.rows('SELECT * FROM watches'))
+    writers=PlaybackWriters(db,resolve)
+    with pytest.raises(ValueError,match='no trusted version evidence'):
+        writers.claim(claim(key))
+    assert not db.rows('SELECT * FROM ordinary_media_versions')
+    assert not db.rows('SELECT * FROM playback_writers')
+    assert before==(db.rows('SELECT * FROM web_progress'),db.rows('SELECT * FROM watches'))
+
+
+def test_history_import_skips_only_the_fenced_media_after_disable(media,tmp_path):
+    db,app,client,resolve,key,plain,_=media
+    writers=PlaybackWriters(db,resolve,enabled=lambda:True);assert writers.claim(claim(key))['ok']
+    writers.enabled=lambda:False
+    other=tmp_path/'other.mp4';other.write_bytes(b'video')
+    other_key=hashlib.sha256(str(other).lower().encode()).hexdigest()[:32]
+    stamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
+    entries={k:{'id':k,'show_id':42,'episode':2,'path':str(p),'size':5,'name':'synthetic','folder':'synthetic'} for k,p in [(key,plain),(other_key,other)]}
+    result=DandanHistory(db).merge({'recent':[{'path':str(p),'played':stamp,'seconds':50} for p in [plain,other]],
+        'files':[{'path':str(p),'size':5,'duration':100} for p in [plain,other]],'seen':[]},entries)
+    assert result['progress_fenced']==1 and result['resume_files']==1
+    assert db.rows('SELECT media_id FROM web_progress')==[{'media_id':other_key}]
+
+
 @pytest.mark.parametrize('route',['ordinary','finished','finished_alias'])
 def test_durable_fence_blocks_each_legacy_route_before_receipt_write(media,route):
     db,app,client,resolve,key,*_=media

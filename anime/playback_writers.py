@@ -116,14 +116,17 @@ class PlaybackWriters:
         self.ttl = integer(ttl, 'ttl', 15, 600)
         self.keep_days = integer(keep_days, 'keep_days', 1, 30)
         with db.connect() as c:
-            c.executescript('''
+            # One explicit schema transaction: executescript without BEGIN can
+            # commit each DDL separately and leave half a schema after failure.
+            c.execute('BEGIN IMMEDIATE')
+            for statement in ('''
                 CREATE TABLE IF NOT EXISTS playback_writers(
                   media_key TEXT PRIMARY KEY,generation INTEGER NOT NULL,session TEXT NOT NULL,
-                  token_digest TEXT NOT NULL,device_id TEXT NOT NULL,sequence INTEGER NOT NULL,expires REAL NOT NULL);
+                  token_digest TEXT NOT NULL,device_id TEXT NOT NULL,sequence INTEGER NOT NULL,expires REAL NOT NULL)''', '''
                 CREATE TABLE IF NOT EXISTS playback_claim_receipts(
-                  request_id TEXT PRIMARY KEY,request_digest TEXT NOT NULL,result TEXT NOT NULL,recorded_at REAL NOT NULL);
-                CREATE INDEX IF NOT EXISTS playback_claim_receipts_age ON playback_claim_receipts(recorded_at);
-            ''')
+                  request_id TEXT PRIMARY KEY,request_digest TEXT NOT NULL,result TEXT NOT NULL,recorded_at REAL NOT NULL)''', '''
+                CREATE INDEX IF NOT EXISTS playback_claim_receipts_age ON playback_claim_receipts(recorded_at)'''):
+                c.execute(statement)
 
     def capabilities(self):
         # Internal only. Production must not advertise until Web AND signed TV are ready.
