@@ -229,7 +229,7 @@ def main():
     if any(v is not None for v in reconciliation):
         if not all(v is not None for v in reconciliation) or not args.ticket or args.host_ref:
             raise ValueError('Reconciliation requires original --ticket, --reconcile-receipt, --expected-revision and --host-evidence; no replacement host-ref')
-    reading = args.command in ('status', 'receipts', 'reconcile-plan')
+    reading = args.command in ('status', 'receipts', 'reconcile-plan') or (args.command == 'register-evidence' and args.dry_run)
     db = ReadStore(args.db) if reading else ControlStore(args.db)
     delivery = SubtitleDelivery(db, initialize=not reading)
     try:
@@ -246,7 +246,14 @@ def main():
             result = delivery.refresh()
         elif args.command == 'register-evidence':
             from anime.subtitle_evidence import register_evidence
-            result = register_evidence(delivery, args.show_id, args.episode, args.kind, args.report, dry_run=args.dry_run)
+            try:
+                result = register_evidence(delivery, args.show_id, args.episode, args.kind, args.report, dry_run=args.dry_run)
+            except ValueError as error:
+                print(json.dumps({'ok': False, 'reason': str(error)}, ensure_ascii=False))
+                return 2
+            except (OSError, sqlite3.Error, KeyError, TypeError):
+                print(json.dumps({'ok': False, 'reason': 'Evidence validation unavailable'}, ensure_ascii=False))
+                return 2
         elif args.command == 'progress':
             from anime.subtitle_delivery_view import report_progress
             result = report_progress(db, args.job_id, args.thread_id, args.stage, args.done, args.total)
@@ -357,4 +364,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

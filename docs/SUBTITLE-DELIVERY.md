@@ -142,5 +142,7 @@ begin 在同一事务的 dispatch-ticket-issued 事件保存完整票据摘要�
 
 - KIND 取 `delivery_capability_report`、`capability_report`、`base_review`、`japanese_dialogue_report`，对应 readiness 适配器读取的 `subtitle_delivery_readiness_<sid>_<ep>` 记录键；报告文件必须在私有字幕档案目录内，工具自算 sha256。
 - 登记前按适配器同样的规则核绑定：目标指纹必须等于当前目标（冻结 head → 记录中的临时目标 → 工作稿目标，同一优先序）、角色/作品/集、全部实际检查项为 True、未过期、reviewer 与 evidence 存在；抽样候选审阅须有至少 3 张真实 PNG 样帧。不满足即拒绝，不写任何记录。
-- 保护：只对 watching 作品、范围有效、未看的集；派发在途（committing/unknown）时拒绝改输入。合并写入该记录的对应键（保留 dispatch_standard 等其它键），若已有工作项则记 `evidence-registered` 事件，然后走 `record_preparation` 由适配器重评并返回三门与原因码。`--dry-run` 只核验不写。
+- 保护：只对 watching、范围有效、未看且未交付的既有单集工作项；未知派发、负责 owner、租约与终态均拒绝。校验后同事务复核范围/输入，合并本集证据引用、由只读适配器重评本集并写 `evidence-registered` 事件；异常全部回滚，不调用广泛 refresh/record_preparation。相同引用重放幂等。`--dry-run` 使用只读连接，不建表或导出视图。
 - 它不生产证据、不冻结目标、不派发、不改 accepted/default/观看；登记后是否 ready 仍由适配器决定。验证：`tests/test_subtitle_evidence.py`。
+
+Owner review: `--dry-run` opens a query-only connection without schema initialization or view export. Registration requires an existing undispatched, unowned, unleased, unwatched and unfinished episode job. Proof merge, this job reassessment and the evidence event commit atomically after scope/input CAS; no broad refresh/enrollment is invoked. Re-registering the same reference is idempotent. Rejections are sanitized JSON with exit status 2. Reports are limited to 1 MiB; expiry must be finite. A report reference never manufactures visual/audio observations or changes a frozen target.

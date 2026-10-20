@@ -55,7 +55,7 @@ def test_capability_report_is_bound_to_the_current_target_and_reassessed(deliver
     assert record['delivery_capability_report']['path'] == str(report.resolve())
     assert record['delivery_capability_report']['sha256'] == result['sha256']
     events = [json.loads(r['payload']) for r in db.rows("SELECT payload FROM subtitle_delivery_events WHERE job_id='episode:42:1' AND kind='evidence-registered'")]
-    assert events == [{'kind': 'delivery_capability_report', 'sha256': result['sha256'], 'file': 'capability-42-1.json'}]
+    assert events == [{'kind': 'delivery_capability_report', 'sha256': result['sha256']}]
     # Other keys of the record survive; re-registering a newer report replaces only its own reference.
     db.set('subtitle_delivery_readiness_42_1', {**record, 'dispatch_standard': 'finished_v1'})
     newer = write(root, 'capability-42-1-b.json', capability(evidence='second synthetic check'))
@@ -150,3 +150,96 @@ def test_cli_registers_and_prints_no_credentials(delivery, monkeypatch, capsys):
     printed = json.loads(capsys.readouterr().out)
     assert printed['registered'] and printed['state'] == 'ready' and 'lease_token' not in json.dumps(printed)
     assert db.get('subtitle_delivery_readiness_42_1')['delivery_capability_report']['sha256'] == printed['sha256']
+
+
+def rows_snapshot(db):
+    return {t: db.rows('SELECT * FROM ' + t + ' ORDER BY rowid') for t in
+            ('kv', 'subtitle_delivery_jobs', 'subtitle_delivery_events', 'watches', 'subtitle_studio_jobs')}
+
+
+@pytest.mark.parametrize('change', [
+    "UPDATE subtitle_delivery_jobs SET dispatch_state='acknowledged',thread_id='synthetic-owner' WHERE id='episode:42:1'",
+    "UPDATE subtitle_delivery_jobs SET lease_owner='reserved',lease_expires=9999999999 WHERE id='episode:42:1'",
+    "UPDATE subtitle_delivery_jobs SET state='accepted' WHERE id='episode:42:1'",
+])
+def test_owner_reserved_and_terminal_states_have_zero_side_effects(delivery, change):
+    db, scheduler, ready, now = delivery
+    report = write(archive(db), 'report.json', capability())
+    db.execute(change)
+    before = rows_snapshot(db)
+    with pytest.raises(ValueError, match='protected|Completed'):
+        register_evidence(scheduler, 42, 1, 'delivery_capability_report', report)
+    assert rows_snapshot(db) == before
+
+
+def test_assessment_error_leaves_no_reference_or_event(delivery):
+    db, scheduler, ready, now = delivery
+    report = write(archive(db), 'report.json', capability())
+    before = rows_snapshot(db)
+    def fail(*args):
+        raise RuntimeError('synthetic assessment failure')
+    scheduler.readiness = fail
+    with pytest.raises(RuntimeError, match='synthetic assessment'):
+        register_evidence(scheduler, 42, 1, 'delivery_capability_report', report)
+    assert rows_snapshot(db) == before
+
+
+def test_concurrent_scope_change_is_rechecked_before_commit(delivery):
+    db, scheduler, ready, now = delivery
+    report = write(archive(db), 'report.json', capability())
+    def race(*args):
+        db.execute('UPDATE shows SET authorized=0 WHERE id=42')
+        return ready(*args)
+    scheduler.readiness = race
+    before = rows_snapshot(db)
+    with pytest.raises(ValueError, match='changed'):
+        register_evidence(scheduler, 42, 1, 'delivery_capability_report', report)
+    assert rows_snapshot(db) == before
+    assert db.show(42)['authorized'] == 0  # the concurrent user's change is retained
+
+
+def test_proof_replay_is_idempotent_and_other_jobs_are_untouched(delivery):
+    db, scheduler, ready, now = delivery
+    report = write(archive(db), 'report.json', capability())
+    others = db.rows("SELECT * FROM subtitle_delivery_jobs WHERE id!='episode:42:1'")
+    register_evidence(scheduler, 42, 1, 'delivery_capability_report', report)
+    before = rows_snapshot(db)
+    assert register_evidence(scheduler, 42, 1, 'delivery_capability_report', report)['replayed']
+    assert rows_snapshot(db) == before
+    assert db.rows("SELECT * FROM subtitle_delivery_jobs WHERE id!='episode:42:1'") == others
+
+
+def test_event_failure_rolls_back_reference_and_job(delivery, monkeypatch):
+    db, scheduler, ready, now = delivery
+    report = write(archive(db), 'report.json', capability())
+    before = rows_snapshot(db)
+    def fail(*args):
+        raise RuntimeError('synthetic commit failure')
+    monkeypatch.setattr(scheduler, '_event', fail)
+    with pytest.raises(RuntimeError, match='synthetic commit'):
+        register_evidence(scheduler, 42, 1, 'delivery_capability_report', report)
+    assert rows_snapshot(db) == before
+
+
+def test_cli_dry_run_never_initializes_schema(tmp_path):
+    import sqlite3, subprocess
+    path = tmp_path / 'existing.db'
+    with sqlite3.connect(path) as c:
+        c.execute('CREATE TABLE kv(key TEXT PRIMARY KEY,value TEXT)')
+    result = subprocess.run([sys.executable, str(Path(queue_cli.__file__)), '--db', str(path),
+                             'register-evidence', '42', '1', '--kind', 'base_review',
+                             '--report', str(tmp_path / 'absent.json'), '--dry-run'], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert 'Traceback' not in result.stderr
+    with sqlite3.connect(path) as c:
+        assert c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [('kv',)]
+
+
+def test_nonfinite_expiry_and_conflicting_episode_are_refused(delivery):
+    db, scheduler, ready, now = delivery
+    root = archive(db)
+    for bad in (capability(expires_at=float('inf')), capability(show_id=True)):
+        before = rows_snapshot(db)
+        with pytest.raises(ValueError):
+            register_evidence(scheduler, 42, 1, 'delivery_capability_report', write(root, 'bad.json', bad))
+        assert rows_snapshot(db) == before
