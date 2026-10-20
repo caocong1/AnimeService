@@ -9,7 +9,7 @@ import json
 import pytest
 
 from anime.db import Store
-from anime.subtitle_delivery import SubtitleDelivery
+from anime.subtitle_delivery import SubtitleDelivery, priority_show_ids
 from anime.viewing_workflow import KEY, POLICY
 from test_subtitle_delivery import Readiness
 
@@ -142,3 +142,43 @@ def test_priority_lane_show_goes_before_everything_unfinished(staged):
     assert lane == [(43, 1, 1, True), (43, 2, 2, True), (42, 1, 3, False), (42, 2, 4, False)]
     db.set('subtitle_delivery_policy', {**STAGED, 'priority_show_ids': ['43']})  # only integer ids count
     assert order(scheduler) == ['episode:42:1', 'episode:43:1', 'episode:42:2', 'episode:43:2']
+
+
+@pytest.mark.parametrize('value', [43, '43', {'43': True}, None, [True, False, 0, -1, '43']])
+def test_priority_lane_accepts_only_positive_integer_ids_in_an_array(staged, value):
+    db, scheduler, ready, now = staged
+    db.set('subtitle_delivery_policy', {**STAGED, 'priority_show_ids': value})
+    assert priority_show_ids({'priority_show_ids': value}) == set()
+    assert order(scheduler) == ['episode:42:1', 'episode:43:1', 'episode:42:2', 'episode:43:2']
+
+
+def test_malformed_policy_falls_back_without_mutating_it(staged):
+    db, scheduler, ready, now = staged
+    db.set('subtitle_delivery_policy', ['synthetic-invalid-policy'])
+    assert order(scheduler) == ['episode:42:1', 'episode:43:1', 'episode:42:2', 'episode:43:2']
+    assert db.get('subtitle_delivery_policy') == ['synthetic-invalid-policy']
+
+
+def test_priority_lane_never_preempts_an_existing_writer(staged):
+    db, scheduler, ready, now = staged
+    identity = dispatched(scheduler)
+    db.set('subtitle_delivery_policy', {**STAGED, 'priority_show_ids': [43], 'queue_order': 'longest_unserved'})
+    other = scheduler.get('episode:43:1')
+    before = db.rows('SELECT * FROM subtitle_delivery_jobs ORDER BY id')
+    with pytest.raises(ValueError, match='single production owner'):
+        scheduler.reserve(other['id'], 'dispatcher', other['revision'])
+    assert db.rows('SELECT * FROM subtitle_delivery_jobs ORDER BY id') == before
+    assert scheduler.get(identity)['thread_id'] == 'original-episode-chat'
+
+
+@pytest.mark.parametrize('change', ['unauthorized', 'unselected', 'watched'])
+def test_priority_lane_keeps_authorization_selection_and_watched_gates(staged, change):
+    db, scheduler, ready, now = staged
+    db.set('subtitle_delivery_policy', {**STAGED, 'priority_show_ids': [43]})
+    if change == 'unauthorized': db.execute('UPDATE shows SET authorized=0 WHERE id=43')
+    elif change == 'unselected': db.execute('UPDATE shows SET selected=0 WHERE id=43')
+    else: db.execute('INSERT INTO watches(show_id,episode,finished) VALUES(43,1,1)')
+    row = scheduler.get('episode:43:1')
+    before = db.rows('SELECT * FROM subtitle_delivery_jobs ORDER BY id')
+    with pytest.raises(ValueError): scheduler.reserve(row['id'], 'dispatcher', row['revision'])
+    assert db.rows('SELECT * FROM subtitle_delivery_jobs ORDER BY id') == before

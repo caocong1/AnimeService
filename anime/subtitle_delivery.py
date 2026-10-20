@@ -123,7 +123,13 @@ def validate_absence_evidence(evidence, job_id, dispatch_token, issued_at, now):
 
 def delivery_policy(db):
     """The owner-maintained `subtitle_delivery_policy` record; missing keys mean the historical behaviour."""
-    return db.get('subtitle_delivery_policy', {}) or {}
+    value = db.get('subtitle_delivery_policy', {})
+    return value if isinstance(value, dict) else {}
+
+
+def priority_show_ids(policy):
+    value = policy.get('priority_show_ids')
+    return {x for x in value if type(x) is int and x > 0} if isinstance(value, list) else set()
 
 
 def last_served(db):
@@ -443,7 +449,7 @@ class SubtitleDelivery:
         if not _exists(self.db, 'subtitle_delivery_jobs'):
             return {'jobs': [], 'summary': {state: 0 for state in sorted(STATES)}}
         policy = delivery_policy(self.db)
-        lane = {x for x in policy.get('priority_show_ids') or [] if isinstance(x, int)}
+        lane = priority_show_ids(policy)
         jobs = []
         for row in self.db.rows('SELECT * FROM subtitle_delivery_jobs ORDER BY created,id'):
             value = {**row, 'payload': json.loads(row['payload'])}

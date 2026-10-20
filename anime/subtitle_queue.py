@@ -9,7 +9,7 @@ import re
 import time
 from pathlib import Path
 
-from .subtitle_delivery import SubtitleDelivery, PROTECTED_DISPATCH, _exists, delivery_policy
+from .subtitle_delivery import SubtitleDelivery, PROTECTED_DISPATCH, _exists, delivery_policy, priority_show_ids
 from .subtitle_delivery_view import STAGES
 from .viewing_workflow import queue_snapshot
 
@@ -208,7 +208,7 @@ def production_queue(db, now=None, show=None):
     items, shows = [], []
     order = {job['id']: index for index, job in enumerate(jobs)}  # the scheduler's own claim order
     guard = owner_guard(db.path.parent.parent, now)
-    lane = {x for x in delivery_policy(db).get('priority_show_ids') or [] if isinstance(x, int)}
+    lane = priority_show_ids(delivery_policy(db))
     for row in snapshot['queues']['watching']:
         sid = row['id']
         season = db.mapping(sid).get('season', 1)
