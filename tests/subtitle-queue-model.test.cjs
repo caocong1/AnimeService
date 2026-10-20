@@ -16,7 +16,7 @@ test('every status has a readable label and next step', () => {
   const stalled = m.describe({...base, status: 'producing', stalled: true, stalled_seconds: 5 * 3600}, now);
   assert.equal(stalled.tone, 'warn');
   assert.match(stalled.label, /可能卡住/);
-  assert.match(stalled.detail, /^5\.0 小时没有进度回报；若桌面制作会话已停止，需要你授权恢复$/);
+  assert.match(stalled.detail, /^5\.0 小时没有进度回报；需核验原负责人状态，按既有规则恢复$/);
   assert.match(m.describe({...base, status: 'starting', stalled: true, stalled_seconds: 2400}, now).detail, /40 分钟没有确认/);
   assert.match(m.describe({...base, status: 'waiting_video', gap: {code: 'download_retry', reason: '', retry_at: now + 600}}, now).detail, /等待重试 · \d\d:\d\d 重试/);
   assert.equal(m.describe({...base, status: 'waiting_video'}, now).detail, '后台尚未发现本集资源');
@@ -31,7 +31,7 @@ test('every status has a readable label and next step', () => {
   assert.equal(m.describe({...base, status: 'v0_ready', refinement: {...base, status: 'queued', position: 2, ahead: 2}}, now).detail, 'v1 精校排队第 2 位，前面还有 2 集');
   assert.equal(m.describe({...base, status: 'producing', owner_state: 'working', owner_last_activity: now - 120}, now).detail, '负责会话工作中 · 最近活动 2 分钟前');
   assert.match(m.describe({...base, status: 'producing', stalled: true, stalled_seconds: 1200, owner_state: 'idle'}, now).detail, /^负责会话已空闲 20 分钟；/);
-  assert.match(m.describe({...base, status: 'producing', stalled: true, stalled_seconds: 1500, owner_state: 'stuck'}, now).detail, /守卫已请求中断/);
+  assert.match(m.describe({...base, status: 'producing', stalled: true, stalled_seconds: 1500, owner_state: 'stuck'}, now).detail, /守卫记录需核验/);
   assert.equal(m.describe({...base, status: 'v0_ready', refinement: {...base, status: 'producing', stalled: true, stalled_seconds: 7200}}, now).tone, 'warn');
   assert.equal(m.describe({...base, status: 'done'}, now).tone, 'ok');
 });

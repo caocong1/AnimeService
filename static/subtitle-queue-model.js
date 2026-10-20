@@ -30,8 +30,8 @@
         if (item.stalled) {
           const seen = span(item.stalled_seconds);
           const detail = item.owner_state === 'idle' ? `负责会话已空闲 ${seen}；等待调度按规则恢复，仍无进展就需要你处理`
-            : item.owner_state === 'stuck' ? `负责会话空挂 ${seen}，守卫已请求中断；等待调度恢复`
-            : `${seen}没有进度回报；若桌面制作会话已停止，需要你授权恢复`;
+            : item.owner_state === 'stuck' ? `负责会话空挂 ${seen}，守卫记录需核验；按既有规则处理`
+            : `${seen}没有进度回报；需核验原负责人状态，按既有规则恢复`;
           return {label: `可能卡住 · ${item.edition}`, detail, tone: 'warn'};
         }
         const stage = STAGE[item.stage];

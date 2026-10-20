@@ -20,7 +20,7 @@ GUARD_STATUS = 'data/diagnostics/codex-dispatch-guard/status.json'
 OWNER_GUARD_STATUS = 'data/diagnostics/codex-subtitle-owner-guard/status.json'
 # The owner guard's decisions, folded to what a viewer needs to know about the responsible chat.
 OWNER_STATES = {'recent_progress': 'working', 'tool_in_progress': 'working', 'terminal_or_idle': 'idle',
-                'interrupt_stale_owner_wait': 'stuck', 'already_attempted': 'stuck', 'changed_before_control': 'stuck'}
+                'interrupt_stale_owner_wait': 'stuck', 'already_attempted': 'stuck'}
 RANK = {'producing': 0, 'starting': 0, 'queued': 1, 'preparing': 2, 'downloading': 3,
         'waiting_video': 4, 'blocked': 5, 'v0_ready': 6, 'done': 7}
 DOWNLOADING = ('held', 'cleaned', 'file_missing', 'error', 'complete')
@@ -53,15 +53,40 @@ def last_events(db):
 def owner_guard(root, now):
     """What the owner guard last saw of the responsible chat, keyed by job; no chat or turn identifiers."""
     try:
-        status = json.loads((Path(root) / OWNER_GUARD_STATUS).read_text(encoding='utf-8-sig'))
-    except (OSError, ValueError):
+        with (Path(root) / OWNER_GUARD_STATUS).open('rb') as stream:
+            raw = stream.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            return {}
+        status = json.loads(raw.decode('utf-8-sig'))
+    except (OSError, ValueError, UnicodeError):
         return {}
-    if not status.get('at') or now - float(status['at']) > 1800:
+    if not isinstance(status, dict) or status.get('error') or not isinstance(status.get('threads'), list):
+        return {}
+    at = status.get('at')
+    if (isinstance(at, bool) or not isinstance(at, (int, float))
+            or not 0 < at <= now + 30 or now - at > 1800):
         return {}  # a stale guard record says nothing about the chat now
-    return {row['id']: {'state': OWNER_STATES.get(row.get('decision'), 'unknown'), 'checked_at': status['at'],
-                        'last_activity': float(row.get('last_log_at') or 0) or None,
-                        'input_key': row.get('input_key'), 'revision': row.get('revision')}
-            for row in status.get('threads') or [] if row.get('id')}
+    result, duplicates = {}, set()
+    for row in status['threads']:
+        if not isinstance(row, dict):
+            continue
+        identity, revision, latest = row.get('id'), row.get('revision'), row.get('last_log_at')
+        if (not isinstance(identity, str) or not identity or not isinstance(row.get('input_key'), str)
+                or not isinstance(row.get('thread_id'), str) or not row['thread_id']
+                or isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0):
+            continue
+        if latest is not None and (isinstance(latest, bool) or not isinstance(latest, (int, float))
+                                  or not 0 <= latest <= now + 30):
+            continue
+        if identity in result or identity in duplicates:
+            duplicates.add(identity)
+            result.pop(identity, None)
+            continue
+        decision = row.get('decision')
+        result[identity] = {'state': OWNER_STATES.get(decision, 'unknown') if isinstance(decision, str) else 'unknown',
+                            'checked_at': at, 'last_activity': latest or None, 'input_key': row['input_key'],
+                            'revision': revision, 'thread_id': row['thread_id']}
+    return result
 
 
 def work(db, job, events, now, edition, guard=None):
@@ -75,7 +100,8 @@ def work(db, job, events, now, edition, guard=None):
     payload = job['payload']
     assessment = (payload.get('latest_assessment') or payload).get('assessment') or payload.get('assessment') or {}
     owner = (guard or {}).get(job['id'])
-    if owner and (owner['input_key'] != job['input_key'] or owner['revision'] != job['revision']):
+    if owner and (owner['input_key'] != job['input_key'] or owner['revision'] != job['revision']
+                  or owner['thread_id'] != job['thread_id'] or job['dispatch_state'] != 'acknowledged'):
         owner = None  # the guard looked at an earlier dispatch of this job
     out = {'edition': edition, 'since': job['updated'], 'last_activity': activity, 'stage': report.get('stage'),
            'progress': {'done': report['done'], 'total': report['total']} if report.get('total') else None,

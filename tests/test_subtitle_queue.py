@@ -1,5 +1,6 @@
 """The viewer queue projection reads scheduler state only; it writes nothing and leaks nothing private."""
 import json
+import pytest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -135,7 +136,7 @@ def guard_status(db, job, decision, at, last_log_at, revision=None):
     path = db.path.parent.parent / 'data/diagnostics/codex-subtitle-owner-guard/status.json'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({'at': at, 'apply': True, 'error': None, 'threads': [{
-        'id': job['id'], 'thread_id': 'guarded-responsible-chat', 'input_key': job['input_key'],
+        'id': job['id'], 'thread_id': job['thread_id'], 'input_key': job['input_key'],
         'revision': job['revision'] if revision is None else revision, 'turn_id': 'turn-9',
         'last_log_at': last_log_at, 'decision': decision}]}), encoding='utf-8')
 
@@ -163,8 +164,48 @@ def test_owner_guard_signal_overrides_the_silence_heuristic(delivery):
     guard_status(db, job, 'recent_progress', now[0] - 60, now[0] - 60, revision=job['revision'] - 1)  # an earlier dispatch's look is ignored too
     assert item(production_queue(db, now=now[0]), 42, 1)['owner_state'] is None
     text = json.dumps(production_queue(db, now=now[0]))
-    for private in ('guarded-responsible-chat', 'turn-9', 'turn_id', 'thread_id'):
+    for private in ('actual-fixture-chat', 'turn-9', 'turn_id', 'thread_id'):
         assert private not in text
+
+
+@pytest.mark.parametrize('invalid', ['not_object', 'error', 'future', 'nan', 'bad_time', 'bad_threads',
+                                    'bad_row', 'bad_last_log', 'future_last_log', 'wrong_owner',
+                                    'duplicate', 'oversized', 'invalid_utf8'])
+def test_invalid_owner_guard_never_hides_silence_or_breaks_the_queue(delivery, invalid):
+    db, scheduler, ready, now = delivery
+    identity, intent = begin(scheduler)
+    scheduler.reconcile_dispatch(identity, intent['dispatch_token'], thread_id='actual-fixture-chat')
+    now[0] += 2 * 3600
+    job = scheduler.get(identity)
+    guard_status(db, job, 'recent_progress', now[0] - 60, now[0] - 90)
+    path = db.path.parent.parent / 'data/diagnostics/codex-subtitle-owner-guard/status.json'
+    value = json.loads(path.read_text(encoding='utf-8'))
+    if invalid == 'not_object': value = []
+    elif invalid == 'error': value['error'] = 'synthetic partial read failure'
+    elif invalid == 'future': value['at'] = now[0] + 3600
+    elif invalid == 'nan': value['at'] = float('nan')
+    elif invalid == 'bad_time': value['at'] = 'bad'
+    elif invalid == 'bad_threads': value['threads'] = 'bad'
+    elif invalid == 'bad_row': value['threads'] = [None]
+    elif invalid == 'bad_last_log': value['threads'][0]['last_log_at'] = 'bad'
+    elif invalid == 'future_last_log': value['threads'][0]['last_log_at'] = now[0] + 3600
+    elif invalid == 'wrong_owner': value['threads'][0]['thread_id'] = 'another-synthetic-owner'
+    elif invalid == 'duplicate': value['threads'].append(dict(value['threads'][0]))
+    path.write_text(json.dumps(value), encoding='utf-8')
+    if invalid == 'oversized': path.write_bytes(b' ' * (256 * 1024 + 1))
+    if invalid == 'invalid_utf8': path.write_bytes(b'\xff')
+    row = item(production_queue(db, now=now[0]), 42, 1)
+    assert row['owner_state'] is None and row['stalled']
+
+
+def test_changed_before_control_is_not_a_stuck_owner_verdict(delivery):
+    db, scheduler, ready, now = delivery
+    identity, intent = begin(scheduler)
+    scheduler.reconcile_dispatch(identity, intent['dispatch_token'], thread_id='actual-fixture-chat')
+    now[0] += 60
+    guard_status(db, scheduler.get(identity), 'changed_before_control', now[0], now[0])
+    row = item(production_queue(db, now=now[0]), 42, 1)
+    assert row['owner_state'] == 'unknown' and not row['stalled']
 
 
 def test_ready_v1_refinement_waits_in_the_same_line(delivery):
