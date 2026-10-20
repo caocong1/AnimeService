@@ -198,6 +198,11 @@ def main():
     evidence.add_argument('--kind', required=True, choices=KINDS)
     evidence.add_argument('--report', required=True, help='JSON report inside the private subtitle archive')
     evidence.add_argument('--dry-run', action='store_true', help='validate the binding without recording it')
+    target = sub.add_parser('bind-target', help='record a reconciled completed file as an unfrozen episode\'s provisional production target')
+    target.add_argument('show_id', type=int)
+    target.add_argument('episode', type=int)
+    target.add_argument('--path', required=True, help='the selected completed media file of a reconciled task for this episode')
+    target.add_argument('--dry-run', action='store_true', help='validate the binding without recording it')
     plan = sub.add_parser('reconcile-plan', help='read-only owner review; does not reconcile or issue a new ticket')
     plan.add_argument('job_id')
     plan.add_argument('--ticket', required=True)
@@ -229,7 +234,7 @@ def main():
     if any(v is not None for v in reconciliation):
         if not all(v is not None for v in reconciliation) or not args.ticket or args.host_ref:
             raise ValueError('Reconciliation requires original --ticket, --reconcile-receipt, --expected-revision and --host-evidence; no replacement host-ref')
-    reading = args.command in ('status', 'receipts', 'reconcile-plan') or (args.command == 'register-evidence' and args.dry_run)
+    reading = args.command in ('status', 'receipts', 'reconcile-plan') or (args.command in ('register-evidence', 'bind-target') and args.dry_run)
     db = ReadStore(args.db) if reading else ControlStore(args.db)
     delivery = SubtitleDelivery(db, initialize=not reading)
     try:
@@ -253,6 +258,16 @@ def main():
                 return 2
             except (OSError, sqlite3.Error, KeyError, TypeError):
                 print(json.dumps({'ok': False, 'reason': 'Evidence validation unavailable'}, ensure_ascii=False))
+                return 2
+        elif args.command == 'bind-target':
+            from anime.subtitle_evidence import bind_target
+            try:
+                result = bind_target(delivery, args.show_id, args.episode, args.path, dry_run=args.dry_run)
+            except ValueError as error:
+                print(json.dumps({'ok': False, 'reason': str(error)}, ensure_ascii=False))
+                return 2
+            except (OSError, sqlite3.Error, KeyError, TypeError):
+                print(json.dumps({'ok': False, 'reason': 'Target validation unavailable'}, ensure_ascii=False))
                 return 2
         elif args.command == 'progress':
             from anime.subtitle_delivery_view import report_progress

@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 
 from .subtitle_delivery import SubtitleDelivery, _exists, _finished, _scope, _scope_transaction, _delivered
+from .fidelity import fidelity_blocker
 from .read_projection import read_projection
 from .db import Store
 from .subtitle_delivery_materials import sampled_frames_valid
@@ -242,4 +243,119 @@ def register_evidence(delivery, sid, ep, kind, path, dry_run=False):
         else:
             state = job['state']
     return {**result, 'registered': True, 'replayed': unchanged, 'state': state,
+            'assessment': {k: assessment.get(k) for k in ('ready', 'material_ready', 'clean_review_ready', 'capability_ready', 'reasons')}}
+
+
+class _Live(_Overlay):
+    """The same read view over the open write transaction, for the pre-commit compare."""
+    def __init__(self, base, con):
+        super().__init__(base, '', {})
+        self.con = con
+
+    def rows(self, sql, args=()):
+        return [dict(row) for row in self.con.execute(sql, args)]
+
+    def get(self, key, default=None):
+        row = self.con.execute('SELECT value FROM kv WHERE key=?', (key,)).fetchone()
+        return json.loads(row['value']) if row else default
+
+
+def completed_selection(db, sid, ep, file):
+    """The reconciled completed task whose selected file for this episode is exactly this file, else (None, None).
+
+    Mirrors the readiness adapter's ownership rules: project task purpose, fidelity, no live
+    downloader lease/committing and no unconfirmed dialog hold.
+    """
+    for task in db.rows("SELECT * FROM tasks WHERE show_id=? AND status IN ('complete','linked')", (sid,)):
+        try:
+            selected = json.loads(task['selection']).get('selected', {}).get(str(ep))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if not isinstance(selected, dict) or not selected.get('name'):
+            continue
+        base = Path(task['save_path']).resolve()
+        expected = (base / selected['name']).resolve()
+        if expected != file or not expected.is_relative_to(base):
+            continue
+        if fidelity_blocker(db, task['title'], task['selection']):
+            continue
+        if task.get('purpose') not in ('episode', 'source_sample', 'subtitle_sample'):
+            continue
+        queue = db.one('SELECT lease,committing,state FROM thunder_queue WHERE hash=?', (task['hash'],)) if _exists(db, 'thunder_queue') else None
+        if queue and (queue['lease'] or queue['committing'] or queue['state'] in ('claimed', 'review')):
+            continue
+        if (db.get('thunder_dialog_hold_' + task['hash'], {}) or {}).get('unconfirmed'):
+            continue
+        return task, selected
+    return None, None
+
+
+def bind_target(delivery, sid, ep, path, dry_run=False):
+    """Record a reconciled completed file as an unfrozen episode's provisional production target.
+
+    The readiness adapter already prefers such a record over the studio job's stale target;
+    this is the controlled way to write it. Freeze/publish still own the formal target, and
+    nothing here claims the media is clean or that any check passed.
+    """
+    db = delivery.db
+    if type(sid) is not int or type(ep) is not int or sid < 1 or ep < 1:
+        raise ValueError('Invalid episode identity')
+    identity = delivery.episode_id(sid, ep)
+    key = f'subtitle_delivery_readiness_{sid}_{ep}'
+    file = Path(path).resolve()
+    with read_projection(db.path) as view:
+        facts = _facts(view, sid, ep)
+        job = view.one('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,))
+        _guard(view, sid, ep, job)
+        if head(view, sid, ep):
+            raise ValueError('The production target is already frozen; freeze and publish own it')
+        if not file.is_file():
+            raise ValueError('Target must be an existing file')
+        task, selected = completed_selection(view, sid, ep, file)
+        if not task:
+            raise ValueError('Target must be the selected completed file of a reconciled task for this episode')
+        size = file.stat().st_size
+        if size != selected.get('size'):
+            raise ValueError('Target size differs from the completed task selection')
+        facts['task'] = view.rows('SELECT hash,status,selection,save_path,title,purpose FROM tasks WHERE hash=?', (task['hash'],))
+        from .subtitle_studio import lab_core
+        fingerprint = lab_core().fingerprint(file)
+        target = {'path': str(file), 'size': size, 'fingerprint': fingerprint, 'task_hash': task['hash'], 'bound_at': delivery.clock()}
+        previous = facts['record'].get('target') or {}
+        unchanged = all(previous.get(k) == target[k] for k in ('path', 'size', 'fingerprint'))
+        result = {'show_id': sid, 'episode': ep, 'fingerprint': fingerprint, 'size': size, 'dry_run': dry_run}
+        if dry_run:
+            return {**result, 'would_bind': True, 'replay': unchanged}
+        record = {**facts['record'], 'target': previous if unchanged else target}
+        assessor = SubtitleDelivery(_Overlay(view, key, record), readiness=delivery.readiness, clock=delivery.clock, initialize=False)
+        source = view.one('SELECT payload FROM subtitle_studio_jobs WHERE show_id=? AND episode=?', (sid, ep))
+        assessment = assessor._assessment(sid, ep, json.loads(source['payload']) if source else {})
+    with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        live = _Live(db, c)
+        current = _facts(live, sid, ep)
+        current['task'] = live.rows('SELECT hash,status,selection,save_path,title,purpose FROM tasks WHERE hash=?', (task['hash'],))
+        if current != facts or _scope_transaction(c, sid, ep):
+            raise ValueError('Preparation identity or scope changed; re-read before retrying')
+        _guard(live, sid, ep, live.one('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)))
+        if head(live, sid, ep):
+            raise ValueError('The production target is already frozen; freeze and publish own it')
+        try:
+            if not file.is_file() or file.stat().st_size != size:
+                raise ValueError()
+        except (OSError, ValueError):
+            raise ValueError('Target changed during validation') from None
+        if not unchanged:
+            c.execute('INSERT INTO kv(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                      (key, json.dumps(record, ensure_ascii=False)))
+            payload = json.loads(job['payload'])
+            payload['assessment'] = assessment
+            state = ('ready' if assessment['ready'] else 'preparing' if not
+                     (assessment.get('material_ready') and assessment.get('clean_review_ready')) else 'blocked')
+            c.execute('UPDATE subtitle_delivery_jobs SET payload=?,state=?,input_key=?,revision=revision+1,updated=? WHERE id=?',
+                      (json.dumps(payload, ensure_ascii=False), state, assessment['input_signature'], delivery.clock(), identity))
+            delivery._event(c, identity, 'target-bound', {'fingerprint': fingerprint, 'size': size, 'task_hash': task['hash']})
+        else:
+            state = job['state']
+    return {**result, 'bound': True, 'replayed': unchanged, 'state': state,
             'assessment': {k: assessment.get(k) for k in ('ready', 'material_ready', 'clean_review_ready', 'capability_ready', 'reasons')}}

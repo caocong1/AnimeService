@@ -146,3 +146,5 @@ begin 在同一事务的 dispatch-ticket-issued 事件保存完整票据摘要�
 - 它不生产证据、不冻结目标、不派发、不改 accepted/default/观看；登记后是否 ready 仍由适配器决定。验证：`tests/test_subtitle_evidence.py`。
 
 Owner review: `--dry-run` opens a query-only connection without schema initialization or view export. Registration requires an existing undispatched, unowned, unleased, unwatched and unfinished episode job. Proof merge, this job reassessment and the evidence event commit atomically after scope/input CAS; no broad refresh/enrollment is invoked. Re-registering the same reference is idempotent. Rejections are sanitized JSON with exit status 2. Reports are limited to 1 MiB; expiry must be finite. A report reference never manufactures visual/audio observations or changes a frozen target.
+
+同日补充 `bind-target SHOW_ID EPISODE --path FILE [--dry-run]`：第 48 轮 dry-run 显示已有报告全部因"目标不同/无当前目标"被拒，根因是未冻结集没有受控方式写入"临时目标"（文档已允许"尚未冻结时可另存已核 completed 候选的 target"）。该命令只接受本集已对账完成任务的选中文件（purpose 为 episode/source_sample/subtitle_sample、未被保真/黑名单排除、无下载器租约/committing/未确认弹窗，大小与任务选择一致），用字幕核心算指纹，写入同一 readiness 记录的 `target`，记 `target-bound` 事件并重评；目标已冻结、已看、已交付或派发/owner 在途时拒绝；同一文件重复绑定只回放。它不冻结、不派发、不证明洁净。验证：`tests/test_subtitle_bind_target.py`。
