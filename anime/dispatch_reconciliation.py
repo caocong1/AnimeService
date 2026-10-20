@@ -7,8 +7,10 @@ remote attestation. The ordinary receipt path and its immutable ticket stay inta
 import datetime
 import hashlib
 import json
+import ntpath
+import os
 import re
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from .subtitle_delivery import (
     RECEIPT_SCHEMA, _canonical, _digest, _json, _scope_transaction, validate_ticket,
@@ -19,6 +21,38 @@ HOST_SCHEMA = 'dispatch-created-host-observation/v1'
 HOST_MAX_BYTES = 2 * 1024 * 1024
 HOST_MAX_AGE = 300
 _JSON_ESCAPE = re.compile(r'\\(?:u[0-9a-fA-F]{4}|["\\/bfnrt])')
+
+
+def _absolute_cwd(value, *, windows):
+    """Normalize host spelling without borrowing the caller's directory."""
+    if not isinstance(value, str) or not value.strip() or '\x00' in value:
+        raise ValueError('Explicit absolute host project directory required')
+    if windows:
+        value = value.replace('/', '\\')
+        if value[:8].lower() == '\\\\?\\unc\\':
+            value = '\\\\' + value[8:]
+        elif value.startswith('\\\\?\\'):
+            value = value[4:]
+        absolute = PureWindowsPath(value).is_absolute()
+        if value.startswith('\\\\'):
+            # A host without a share is not a fully qualified UNC directory,
+            # even on Python versions that classify that spelling as absolute.
+            parts = value[2:].split('\\')
+            absolute = absolute and len(parts) >= 2 and all(p and p not in ('.', '..') for p in parts[:2])
+    else:
+        absolute = Path(value).is_absolute()
+    if not absolute:
+        raise ValueError('Explicit absolute host project directory required')
+    return value
+
+
+def _project_directory(value):
+    value = _absolute_cwd(value, windows=os.name == 'nt')
+    try:
+        resolved = str(Path(value).resolve())
+    except (OSError, ValueError):
+        raise ValueError('Host project directory is invalid') from None
+    return ntpath.normcase(resolved) if os.name == 'nt' else resolved
 
 
 def _reject_authority(value, ticket):
@@ -100,13 +134,7 @@ def _host_observation(path, ticket, source_id, revision, thread_id, project_root
             or thread.get('id') != thread_id or thread.get('hostId') != 'local'
             or thread.get('kind') != 'codex' or len(polls) != 1 or waited.get('errors')):
         raise ValueError('Exact existing local Codex thread evidence required')
-    cwd = thread.get('cwd')
-    if not isinstance(cwd, str) or not cwd.strip() or not Path(cwd).is_absolute():
-        raise ValueError('Explicit absolute host project directory required')
-    try:
-        same_project = Path(cwd).resolve() == Path(project_root).resolve()
-    except (OSError, ValueError):
-        raise ValueError('Host project directory is invalid') from None
+    same_project = _project_directory(thread.get('cwd')) == _project_directory(str(project_root))
     if not same_project:
         raise ValueError('Host thread belongs to another project')
     preview = thread.get('preview') or ''

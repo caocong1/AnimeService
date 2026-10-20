@@ -3,6 +3,7 @@ import copy
 import datetime
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import time
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from anime.dispatch_reconciliation import HOST_SCHEMA, reconcile_created
+from anime.dispatch_reconciliation import HOST_SCHEMA, reconcile_created, _absolute_cwd
 from anime.subtitle_delivery import SubtitleDelivery
 from test_subtitle_delivery import delivery, begin  # noqa: F401
 
@@ -260,6 +261,61 @@ def test_project_binding_never_uses_the_callers_directory(pending, monkeypatch, 
     monkeypatch.chdir(scheduler.db.path.parent.parent)
     before = tables(scheduler.db)
     with pytest.raises(ValueError, match='Explicit absolute'):
+        apply(pending)
+    assert tables(scheduler.db) == before
+
+
+@pytest.mark.parametrize('spelling', ['extended', 'mixed_case', 'forward_slashes', 'extended_forward_slashes'])
+@pytest.mark.skipif(os.name != 'nt', reason='Native Windows path identity')
+def test_absolute_windows_project_spellings_preserve_original_host_response(pending, spelling):
+    scheduler, ticket, source, revision, path, value, now = pending
+    original = str(scheduler.db.path.parent.parent)
+    cwd = {'extended': '\\\\?\\' + original,
+           'mixed_case': original.swapcase(),
+           'forward_slashes': original.replace('\\', '/'),
+           'extended_forward_slashes': '//?/' + original.replace('\\', '/')}[spelling]
+    read = json.loads(value['read_thread_result']['content'][0]['text'])
+    read['thread']['cwd'] = cwd
+    value['read_thread_result'] = tool(read)
+    path.write_text(json.dumps(value), encoding='utf-8')
+    archived = path.read_bytes()
+    assert apply(pending)['state_changed'] == 1
+    assert path.read_bytes() == archived
+
+
+@pytest.mark.parametrize('value,expected', [
+    ('\\\\?\\UNC\\synthetic-host\\synthetic-share\\project', '\\\\synthetic-host\\synthetic-share\\project'),
+    ('//?/unc/synthetic-host/synthetic-share/project', '\\\\synthetic-host\\synthetic-share\\project'),
+    ('\\\\?\\C:\\synthetic\\project', 'C:\\synthetic\\project'),
+    ('C:/synthetic/project', 'C:\\synthetic\\project'),
+])
+def test_windows_prefix_normalization_is_lexical_without_network_access(value, expected):
+    assert _absolute_cwd(value, windows=True) == expected
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Native Windows path identity')
+def test_extended_unc_and_case_share_the_same_resolved_comparison_without_network(monkeypatch):
+    from anime.dispatch_reconciliation import _project_directory
+    monkeypatch.setattr(Path, 'resolve', lambda self: self)
+    assert _project_directory('\\\\?\\UNC\\Synthetic-Host\\Share\\Project') == _project_directory('\\\\synthetic-host\\share\\project')
+
+
+@pytest.mark.parametrize('value', [None, '', ' ', '.', './project', 'project', 'C:project', '\\project',
+                                  '\\\\?\\C:project', '\\\\?\\UNC\\host', True])
+def test_windows_absolute_validation_rejects_implicit_or_incomplete_roots(value):
+    with pytest.raises(ValueError, match='Explicit absolute'):
+        _absolute_cwd(value, windows=True)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Native Windows path identity')
+def test_extended_absolute_other_project_still_rejected_without_any_writes(pending):
+    scheduler, ticket, source, revision, path, value, now = pending
+    read = json.loads(value['read_thread_result']['content'][0]['text'])
+    read['thread']['cwd'] = '\\\\?\\' + str(scheduler.db.path.parent.parent / 'another-project')
+    value['read_thread_result'] = tool(read)
+    path.write_text(json.dumps(value), encoding='utf-8')
+    before = tables(scheduler.db)
+    with pytest.raises(ValueError, match='another project'):
         apply(pending)
     assert tables(scheduler.db) == before
 
