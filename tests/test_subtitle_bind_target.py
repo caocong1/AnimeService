@@ -11,6 +11,7 @@ import anime.subtitle_studio as studio
 from anime.subtitle_evidence import bind_target, register_evidence, current_target
 from test_subtitle_delivery import delivery  # noqa: F401  (fixture)
 from test_subtitle_evidence import archive, write, capability
+from test_subtitle_evidence import rows_snapshot
 
 spec = importlib.util.spec_from_file_location('subtitle_delivery_queue', Path(__file__).resolve().parents[1] / 'scripts/subtitle_delivery_queue.py')
 queue_cli = importlib.util.module_from_spec(spec)
@@ -103,3 +104,71 @@ def test_cli_binds_and_dry_runs_read_only(completed, monkeypatch, capsys):
     printed = json.loads(capsys.readouterr().out)
     assert printed['bound'] and db.get('subtitle_delivery_readiness_42_1')['target']['fingerprint'] == 'fp-Example S01E01.mkv'
     assert 'lease_token' not in json.dumps(printed) and 'dispatch_token' not in json.dumps(printed)
+
+
+@pytest.mark.parametrize('protection', ['lease', 'committing', 'claimed', 'review', 'dialog', 'blacklist'])
+def test_downloader_and_source_protections_are_rechecked_atomically(completed, protection):
+    db, scheduler, media = completed
+    original = scheduler.readiness
+    def race(*args):
+        if protection == 'dialog':
+            db.set('thunder_dialog_hold_task-42-1', {'unconfirmed': True})
+        elif protection == 'blacklist':
+            db.set('source_publisher_blacklist', [{'publisher': 'Group', 'aliases': ['Group'], 'reason': 'fixture'}])
+        else:
+            db.execute("INSERT INTO thunder_queue(hash,state,lease,committing) VALUES('task-42-1',?,?,?)",
+                       (protection if protection in ('claimed', 'review') else 'pending',
+                        9999999999 if protection == 'lease' else 0, 1 if protection == 'committing' else 0))
+        return original(*args)
+    scheduler.readiness = race
+    before_jobs = db.rows('SELECT * FROM subtitle_delivery_jobs')
+    before_events = db.rows('SELECT * FROM subtitle_delivery_events')
+    with pytest.raises(ValueError, match='protection changed'):
+        bind_target(scheduler, 42, 1, media)
+    assert db.rows('SELECT * FROM subtitle_delivery_jobs') == before_jobs
+    assert db.rows('SELECT * FROM subtitle_delivery_events') == before_events
+    assert 'target' not in (db.get('subtitle_delivery_readiness_42_1') or {})
+
+
+def test_same_size_file_change_during_assessment_is_rejected(completed):
+    db, scheduler, media = completed
+    original = scheduler.readiness
+    def race(*args):
+        media.write_bytes(b'X' * media.stat().st_size)
+        return original(*args)
+    scheduler.readiness = race
+    before = rows_snapshot(db)
+    with pytest.raises(ValueError, match='Target changed'):
+        bind_target(scheduler, 42, 1, media)
+    assert rows_snapshot(db) == before
+
+
+def test_failure_rolls_back_target_job_and_event_and_replay_is_inert(completed, monkeypatch):
+    db, scheduler, media = completed
+    original = scheduler._event
+    def fail(*args):
+        raise RuntimeError('synthetic event failure')
+    monkeypatch.setattr(scheduler, '_event', fail)
+    before = rows_snapshot(db)
+    with pytest.raises(RuntimeError, match='synthetic event'):
+        bind_target(scheduler, 42, 1, media)
+    assert rows_snapshot(db) == before
+    monkeypatch.setattr(scheduler, '_event', original)
+    bind_target(scheduler, 42, 1, media)
+    before = rows_snapshot(db)
+    assert bind_target(scheduler, 42, 1, media)['replayed']
+    assert rows_snapshot(db) == before
+
+
+def test_cli_bind_dry_run_never_creates_tables(tmp_path):
+    import sqlite3, subprocess
+    path = tmp_path / 'existing.db'
+    with sqlite3.connect(path) as c:
+        c.execute('CREATE TABLE kv(key TEXT PRIMARY KEY,value TEXT)')
+    result = subprocess.run([sys.executable, str(Path(queue_cli.__file__)), '--db', str(path),
+                             'bind-target', '42', '1', '--path', str(tmp_path / 'absent.mkv'), '--dry-run'],
+                            capture_output=True, text=True)
+    assert result.returncode == 2 and 'Traceback' not in result.stderr
+    assert str(tmp_path) not in result.stdout
+    with sqlite3.connect(path) as c:
+        assert c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [('kv',)]

@@ -212,13 +212,7 @@ def register_evidence(delivery, sid, ep, kind, path, dry_run=False):
     # never file paths, report content or token-bearing names.
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
-        class Current(_Overlay):
-            def rows(self, sql, args=()):
-                return [dict(row) for row in c.execute(sql, args)]
-            def get(self, key, default=None):
-                row = c.execute('SELECT value FROM kv WHERE key=?', (key,)).fetchone()
-                return json.loads(row['value']) if row else default
-        current = Current(db, '', {})
+        current = _Live(db, c)
         if _facts(current, sid, ep) != facts or _scope_transaction(c, sid, ep):
             raise ValueError('Preparation identity or scope changed; re-read before retrying')
         _guard(current, sid, ep, current.one('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)))
@@ -290,6 +284,11 @@ def completed_selection(db, sid, ep, file):
     return None, None
 
 
+def _file_stamp(file):
+    stat = file.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
 def bind_target(delivery, sid, ep, path, dry_run=False):
     """Record a reconciled completed file as an unfrozen episode's provisional production target.
 
@@ -314,15 +313,21 @@ def bind_target(delivery, sid, ep, path, dry_run=False):
         task, selected = completed_selection(view, sid, ep, file)
         if not task:
             raise ValueError('Target must be the selected completed file of a reconciled task for this episode')
-        size = file.stat().st_size
-        if size != selected.get('size'):
+        stamp = _file_stamp(file)
+        size = stamp[2]
+        if type(selected.get('size')) is not int or size <= 0 or size != selected['size']:
             raise ValueError('Target size differs from the completed task selection')
         facts['task'] = view.rows('SELECT hash,status,selection,save_path,title,purpose FROM tasks WHERE hash=?', (task['hash'],))
         from .subtitle_studio import lab_core
-        fingerprint = lab_core().fingerprint(file)
+        try:
+            fingerprint = lab_core().fingerprint(file)
+        except (OSError, ValueError):
+            raise ValueError('Target fingerprint unavailable') from None
+        if not isinstance(fingerprint, str) or not fingerprint or _file_stamp(file) != stamp:
+            raise ValueError('Target changed during validation')
         target = {'path': str(file), 'size': size, 'fingerprint': fingerprint, 'task_hash': task['hash'], 'bound_at': delivery.clock()}
         previous = facts['record'].get('target') or {}
-        unchanged = all(previous.get(k) == target[k] for k in ('path', 'size', 'fingerprint'))
+        unchanged = all(previous.get(k) == target[k] for k in ('path', 'size', 'fingerprint', 'task_hash'))
         result = {'show_id': sid, 'episode': ep, 'fingerprint': fingerprint, 'size': size, 'dry_run': dry_run}
         if dry_run:
             return {**result, 'would_bind': True, 'replay': unchanged}
@@ -340,8 +345,13 @@ def bind_target(delivery, sid, ep, path, dry_run=False):
         _guard(live, sid, ep, live.one('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)))
         if head(live, sid, ep):
             raise ValueError('The production target is already frozen; freeze and publish own it')
+        # Queue leases, dialog holds and source policy may change independently
+        # of the task row. Re-run selection on this same write transaction.
+        live_task, live_selected = completed_selection(live, sid, ep, file)
+        if not live_task or live_task['hash'] != task['hash'] or live_selected != selected:
+            raise ValueError('Completed task ownership or source protection changed')
         try:
-            if not file.is_file() or file.stat().st_size != size:
+            if not file.is_file() or _file_stamp(file) != stamp:
                 raise ValueError()
         except (OSError, ValueError):
             raise ValueError('Target changed during validation') from None
