@@ -59,7 +59,8 @@ def owner_guard(root, now):
     if not status.get('at') or now - float(status['at']) > 1800:
         return {}  # a stale guard record says nothing about the chat now
     return {row['id']: {'state': OWNER_STATES.get(row.get('decision'), 'unknown'), 'checked_at': status['at'],
-                        'last_activity': float(row.get('last_log_at') or 0) or None}
+                        'last_activity': float(row.get('last_log_at') or 0) or None,
+                        'input_key': row.get('input_key'), 'revision': row.get('revision')}
             for row in status.get('threads') or [] if row.get('id')}
 
 
@@ -74,6 +75,8 @@ def work(db, job, events, now, edition, guard=None):
     payload = job['payload']
     assessment = (payload.get('latest_assessment') or payload).get('assessment') or payload.get('assessment') or {}
     owner = (guard or {}).get(job['id'])
+    if owner and (owner['input_key'] != job['input_key'] or owner['revision'] != job['revision']):
+        owner = None  # the guard looked at an earlier dispatch of this job
     out = {'edition': edition, 'since': job['updated'], 'last_activity': activity, 'stage': report.get('stage'),
            'progress': {'done': report['done'], 'total': report['total']} if report.get('total') else None,
            'reasons': [], 'gates': {k: assessment.get(key) is True for k, key in
