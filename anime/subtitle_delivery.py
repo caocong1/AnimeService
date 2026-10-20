@@ -443,6 +443,7 @@ class SubtitleDelivery:
         if not _exists(self.db, 'subtitle_delivery_jobs'):
             return {'jobs': [], 'summary': {state: 0 for state in sorted(STATES)}}
         policy = delivery_policy(self.db)
+        lane = {x for x in policy.get('priority_show_ids') or [] if isinstance(x, int)}
         jobs = []
         for row in self.db.rows('SELECT * FROM subtitle_delivery_jobs ORDER BY created,id'):
             value = {**row, 'payload': json.loads(row['payload'])}
@@ -464,6 +465,8 @@ class SubtitleDelivery:
             if (row['kind'] == 'refinement' or value['payload'].get('refinement_pending')) and not value['finished']:
                 # Opt-in: first versions of other shows come before any v1 polish.
                 value['priority'] = 10 if policy.get('v0_first_across_shows') is True else -10
+            if row['show_id'] in lane and value['priority'] < 100:
+                value['priority'] = -20  # the viewer's priority lane: this show's unfinished work goes before everything
             jobs.append(value)
         served = last_served(self.db) if policy.get('queue_order') == 'longest_unserved' else {}
         # Opt-in fairness: among first versions, the show that waited longest since its last release goes first.

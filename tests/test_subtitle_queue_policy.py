@@ -129,3 +129,16 @@ def test_longest_unserved_show_goes_first_only_when_enabled(staged):
     assert order(scheduler) == ['episode:43:1', 'episode:43:2', 'episode:42:1', 'episode:42:2']
     db.execute("INSERT INTO subtitle_delivery_events(job_id,kind,payload,recorded) VALUES('episode:43:2','finished-observed','{}',?)", (now[0] + 10,))
     assert order(scheduler) == ['episode:42:1', 'episode:42:2', 'episode:43:1', 'episode:43:2']
+
+
+def test_priority_lane_show_goes_before_everything_unfinished(staged):
+    db, scheduler, ready, now = staged
+    from anime.subtitle_queue import production_queue
+    db.set('subtitle_delivery_policy', {**STAGED, 'queue_order': 'longest_unserved', 'priority_show_ids': [43]})
+    db.execute("INSERT INTO subtitle_delivery_events(job_id,kind,payload,recorded) VALUES('episode:43:2','finished-observed','{}',?)", (now[0],))
+    assert order(scheduler) == ['episode:43:1', 'episode:43:2', 'episode:42:1', 'episode:42:2']  # served recently, still first
+    queue = production_queue(db, now=now[0])
+    lane = [(i['show_id'], i['episode'], i['position'], i['priority_lane']) for i in queue['items'] if i['status'] == 'queued']
+    assert lane == [(43, 1, 1, True), (43, 2, 2, True), (42, 1, 3, False), (42, 2, 4, False)]
+    db.set('subtitle_delivery_policy', {**STAGED, 'priority_show_ids': ['43']})  # only integer ids count
+    assert order(scheduler) == ['episode:42:1', 'episode:43:1', 'episode:42:2', 'episode:43:2']

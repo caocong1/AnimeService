@@ -57,4 +57,6 @@ finish_subtitle_episode.py在编码前检查报告，随包保存refinement-revi
 - `v0_first_across_shows: true`：原负责人调用 finished 交付 v0 时，若另一部作品有就绪、未交付、未看的首版在等，返回 `continue_refinement=false` 与 `yielded_to`（作品/集），工作项记 finished/completed 释放唯一槽；下一轮 refresh 按既有 `enqueue_refinement` 路径为本集生成 v1 精校工作项（沿原负责线程，begin 返回 resume），其在队列中排在其它作品首版之后、迟稿修订之前。没有其它作品在等时仍由同一负责人立即继续 v1。
 - `queue_order: longest_unserved`：首版工作项之间按"该作品最近一次 finished-observed 的时间"升序，从未交付过的作品最先，再按集号；修订/迟稿/已看优先级不变。
 
+- `priority_show_ids: [作品ID, …]`：绿色通道。这些作品所有未完成的工作项（首版与修订）排在其它一切之前，作品内仍按集号；队列页与作品页标“优先通道”。全季一次放出的作品可用它逐集连续出 v1。
+
 打开 `v0_first_across_shows` 前须同步修改 automation-2 提示词中"同集 v1 优先开下一集"的表述为"按 status 队列顺序领取第一个 ready 项"，否则调度会按旧规则跳过队列顺序。验证：`tests/test_subtitle_queue_policy.py`。

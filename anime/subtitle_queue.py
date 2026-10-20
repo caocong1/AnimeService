@@ -9,7 +9,7 @@ import re
 import time
 from pathlib import Path
 
-from .subtitle_delivery import SubtitleDelivery, PROTECTED_DISPATCH, _exists
+from .subtitle_delivery import SubtitleDelivery, PROTECTED_DISPATCH, _exists, delivery_policy
 from .subtitle_delivery_view import STAGES
 from .viewing_workflow import queue_snapshot
 
@@ -142,12 +142,13 @@ def work(db, job, events, now, edition, guard=None):
     return out
 
 
-def episode_item(db, sid, ep, season, title, jobs, episode, gap, events, now, guard=None, order=None):
+def episode_item(db, sid, ep, season, title, jobs, episode, gap, events, now, guard=None, order=None, lane=frozenset()):
     item = {'show_id': sid, 'episode': ep, 'season': season, 'title': title, 'status': 'waiting_video',
             'edition': 'v0', 'stage': None, 'progress': None, 'since': None, 'last_activity': None,
             'stalled': False, 'stalled_seconds': 0, 'position': None, 'ahead': None, 'reasons': [],
             'gates': None, 'gap': None, 'download_progress': None, 'release_id': None, 'refinement': None,
             'video_ready_at': None, 'waiting_seconds': None, 'owner_state': None, 'owner_last_activity': None,
+            'priority_lane': sid in lane,
             'order': min([(order or {}).get(j['id'], len(order or {})) for j in jobs.values()] or [len(order or {})])}
     if episode and episode['status'] == 'complete' and episode['first_completed']:
         # How long a playable file has waited for its own subtitles; the first completion is recorded once.
@@ -207,6 +208,7 @@ def production_queue(db, now=None, show=None):
     items, shows = [], []
     order = {job['id']: index for index, job in enumerate(jobs)}  # the scheduler's own claim order
     guard = owner_guard(db.path.parent.parent, now)
+    lane = {x for x in delivery_policy(db).get('priority_show_ids') or [] if isinstance(x, int)}
     for row in snapshot['queues']['watching']:
         sid = row['id']
         season = db.mapping(sid).get('season', 1)
@@ -223,7 +225,7 @@ def production_queue(db, now=None, show=None):
         entries = []
         for ep in sorted(ep for ep in candidates if ep > 0 and ep not in watched):
             entries.append(episode_item(db, sid, ep, season, row['title'], by_episode.get(ep, {}),
-                                        episodes.get(ep), show_gaps.get(str(ep)), events, now, guard, order))
+                                        episodes.get(ep), show_gaps.get(str(ep)), events, now, guard, order, lane))
         items.extend(entries)
         shows.append({'show_id': sid, 'title': row['title'], 'season': season,
                       'next_unwatched': row.get('next_unwatched'), 'items': entries})

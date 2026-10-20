@@ -34,6 +34,8 @@ test('every status has a readable label and next step', () => {
   assert.match(m.describe({...base, status: 'producing', stalled: true, stalled_seconds: 1500, owner_state: 'stuck'}, now).detail, /守卫记录需核验/);
   assert.equal(m.describe({...base, status: 'v0_ready', refinement: {...base, status: 'producing', stalled: true, stalled_seconds: 7200}}, now).tone, 'warn');
   assert.equal(m.describe({...base, status: 'done'}, now).tone, 'ok');
+  assert.equal(m.describe({...base, position: 1, ahead: 0, priority_lane: true}, now).label, '优先通道 · 排队第 1 位');
+  assert.equal(m.line({...base, status: 'producing', stage: 'layout', priority_lane: true}, now).startsWith('字幕 · 优先通道 · 制作中 · v0'), true);
 });
 
 test('sections put attention first and watchable last', () => {

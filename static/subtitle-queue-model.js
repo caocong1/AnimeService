@@ -25,6 +25,11 @@
   const reasons = item => (item.reasons || []).map(r => REASON[r] || r).join('；');
 
   function describe(item, now = Date.now() / 1000) {
+    const d = describeStatus(item, now);
+    return item.priority_lane ? {...d, label: `优先通道 · ${d.label}`} : d;
+  }
+
+  function describeStatus(item, now) {
     switch (item.status) {
       case 'producing': {
         if (item.stalled) {
