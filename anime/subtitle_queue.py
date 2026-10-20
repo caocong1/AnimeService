@@ -15,7 +15,12 @@ from .viewing_workflow import queue_snapshot
 
 # Recorded activity is the owner's stage report, a scheduler event or a job change.
 STALL_SECONDS = {'producing': 90 * 60, 'starting': 30 * 60}
+IDLE_SECONDS = 15 * 60  # an owner chat whose latest turn ended this long ago, with nothing finished, is waiting on someone
 GUARD_STATUS = 'data/diagnostics/codex-dispatch-guard/status.json'
+OWNER_GUARD_STATUS = 'data/diagnostics/codex-subtitle-owner-guard/status.json'
+# The owner guard's decisions, folded to what a viewer needs to know about the responsible chat.
+OWNER_STATES = {'recent_progress': 'working', 'tool_in_progress': 'working', 'terminal_or_idle': 'idle',
+                'interrupt_stale_owner_wait': 'stuck', 'already_attempted': 'stuck', 'changed_before_control': 'stuck'}
 RANK = {'producing': 0, 'starting': 0, 'queued': 1, 'preparing': 2, 'downloading': 3,
         'waiting_video': 4, 'blocked': 5, 'v0_ready': 6, 'done': 7}
 DOWNLOADING = ('held', 'cleaned', 'file_missing', 'error', 'complete')
@@ -45,7 +50,20 @@ def last_events(db):
             db.rows("SELECT job_id,kind,MAX(recorded) recorded FROM subtitle_delivery_events WHERE kind NOT IN ('readiness','readiness-observed') GROUP BY job_id")}
 
 
-def work(db, job, events, now, edition):
+def owner_guard(root, now):
+    """What the owner guard last saw of the responsible chat, keyed by job; no chat or turn identifiers."""
+    try:
+        status = json.loads((Path(root) / OWNER_GUARD_STATUS).read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return {}
+    if not status.get('at') or now - float(status['at']) > 1800:
+        return {}  # a stale guard record says nothing about the chat now
+    return {row['id']: {'state': OWNER_STATES.get(row.get('decision'), 'unknown'), 'checked_at': status['at'],
+                        'last_activity': float(row.get('last_log_at') or 0) or None}
+            for row in status.get('threads') or [] if row.get('id')}
+
+
+def work(db, job, events, now, edition, guard=None):
     """Status of one scheduler job from its dispatch state and recorded activity."""
     report = db.get('subtitle_delivery_progress_' + job['id'], {}) or {}
     if (report.get('input_key') != job['input_key'] or report.get('thread_id') != job['thread_id']
@@ -55,10 +73,13 @@ def work(db, job, events, now, edition):
     activity = max(job['updated'], event[1] if event else 0, report.get('updated') or 0)
     payload = job['payload']
     assessment = (payload.get('latest_assessment') or payload).get('assessment') or payload.get('assessment') or {}
+    owner = (guard or {}).get(job['id'])
     out = {'edition': edition, 'since': job['updated'], 'last_activity': activity, 'stage': report.get('stage'),
            'progress': {'done': report['done'], 'total': report['total']} if report.get('total') else None,
            'reasons': [], 'gates': {k: assessment.get(key) is True for k, key in
-                                    (('material', 'material_ready'), ('clean', 'clean_review_ready'), ('capability', 'capability_ready'))}}
+                                    (('material', 'material_ready'), ('clean', 'clean_review_ready'), ('capability', 'capability_ready'))},
+           'owner_state': owner['state'] if owner else None,
+           'owner_last_activity': owner['last_activity'] if owner else None}
     dispatch, state = job['dispatch_state'], job['state']
     if dispatch in ('committing', 'unknown'):
         status = 'starting'
@@ -76,18 +97,29 @@ def work(db, job, events, now, edition):
         status = 'preparing'
         out['reasons'] = public_reasons(assessment.get('reasons'))
     limit = STALL_SECONDS.get(status)
-    out['stalled'] = bool(limit and now - activity > limit)
-    out['stalled_seconds'] = int(now - activity) if out['stalled'] else 0
+    silent = bool(limit and now - activity > limit)
+    if owner and status == 'producing':
+        # The guard watched the chat itself: a working chat is not stalled however quiet the
+        # ledger is; an idle or stuck one is stalled as soon as the idleness is established.
+        seen = max(activity, owner['last_activity'] or 0)
+        stalled = owner['state'] == 'stuck' or (owner['state'] == 'idle' and now - seen > IDLE_SECONDS) \
+            or (owner['state'] not in ('working', 'idle', 'stuck') and silent)
+        out['stalled'] = stalled
+        out['stalled_seconds'] = int(now - seen) if stalled else 0
+    else:
+        out['stalled'] = silent
+        out['stalled_seconds'] = int(now - activity) if silent else 0
     out['status'] = status
     return out
 
 
-def episode_item(db, sid, ep, season, title, jobs, episode, gap, events, now):
+def episode_item(db, sid, ep, season, title, jobs, episode, gap, events, now, guard=None, order=None):
     item = {'show_id': sid, 'episode': ep, 'season': season, 'title': title, 'status': 'waiting_video',
             'edition': 'v0', 'stage': None, 'progress': None, 'since': None, 'last_activity': None,
             'stalled': False, 'stalled_seconds': 0, 'position': None, 'ahead': None, 'reasons': [],
             'gates': None, 'gap': None, 'download_progress': None, 'release_id': None, 'refinement': None,
-            'video_ready_at': None, 'waiting_seconds': None}
+            'video_ready_at': None, 'waiting_seconds': None, 'owner_state': None, 'owner_last_activity': None,
+            'order': min([(order or {}).get(j['id'], len(order or {})) for j in jobs.values()] or [len(order or {})])}
     if episode and episode['status'] == 'complete' and episode['first_completed']:
         # How long a playable file has waited for its own subtitles; the first completion is recorded once.
         item['video_ready_at'] = episode['first_completed']
@@ -104,10 +136,11 @@ def episode_item(db, sid, ep, season, title, jobs, episode, gap, events, now):
         item.update(status='v0_ready', edition='v0')
         follow = refinement or (job if job and job['payload'].get('refinement_pending') else None)
         if follow:
-            item['refinement'] = work(db, follow, events, now, 'v1')
+            item['refinement'] = work(db, follow, events, now, 'v1', guard)
+            item['refinement']['position'] = item['refinement']['ahead'] = None
         return item
     if job:
-        item.update(work(db, job, events, now, job['payload'].get('edition', 'v0')))
+        item.update(work(db, job, events, now, job['payload'].get('edition', 'v0'), guard))
         return item
     if episode and episode['status'] == 'complete':
         item.update(status='preparing', reasons=['pending_inventory'])
@@ -143,6 +176,8 @@ def production_queue(db, now=None, show=None):
     events = last_events(db)
     gaps = (db.get('download_gaps', {}) or {}).get('shows', {})
     items, shows = [], []
+    order = {job['id']: index for index, job in enumerate(jobs)}  # the scheduler's own claim order
+    guard = owner_guard(db.path.parent.parent, now)
     for row in snapshot['queues']['watching']:
         sid = row['id']
         season = db.mapping(sid).get('season', 1)
@@ -159,18 +194,21 @@ def production_queue(db, now=None, show=None):
         entries = []
         for ep in sorted(ep for ep in candidates if ep > 0 and ep not in watched):
             entries.append(episode_item(db, sid, ep, season, row['title'], by_episode.get(ep, {}),
-                                        episodes.get(ep), show_gaps.get(str(ep)), events, now))
+                                        episodes.get(ep), show_gaps.get(str(ep)), events, now, guard, order))
         items.extend(entries)
         shows.append({'show_id': sid, 'title': row['title'], 'season': season,
                       'next_unwatched': row.get('next_unwatched'), 'items': entries})
-    order = {job['id']: index for index, job in enumerate(jobs)}
     occupied = any(job['dispatch_state'] in PROTECTED_DISPATCH or job['lease_expires'] > now for job in jobs)
-    queued = sorted((i for i in items if i['status'] == 'queued'),
-                    key=lambda i: order.get(SubtitleDelivery.episode_id(i['show_id'], i['episode']), len(order)))
+    # A delivered v0 whose v1 refinement is ready waits in the same line as first versions.
+    queued = sorted((i for i in items if i['status'] == 'queued' or (i['refinement'] or {}).get('status') == 'queued'),
+                    key=lambda i: i['order'])
     for position, item in enumerate(queued, 1):
-        item['position'] = position
-        item['ahead'] = position - 1 + (1 if occupied else 0)
+        target = item['refinement'] if item['status'] == 'v0_ready' else item
+        target['position'] = position
+        target['ahead'] = position - 1 + (1 if occupied else 0)
     items.sort(key=lambda i: (RANK[i['status']], i['position'] or 0, i['show_id'], i['episode']))
+    for item in items:
+        item.pop('order')
     active = [i for i in items if i['status'] in ('producing', 'starting')
               or (i['refinement'] or {}).get('status') in ('producing', 'starting')]
     slot = None

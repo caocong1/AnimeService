@@ -27,9 +27,16 @@
   function describe(item, now = Date.now() / 1000) {
     switch (item.status) {
       case 'producing': {
-        if (item.stalled) return {label: `可能卡住 · ${item.edition}`, detail: `${span(item.stalled_seconds)}没有进度回报；若桌面制作会话已停止，需要你授权恢复`, tone: 'warn'};
+        if (item.stalled) {
+          const seen = span(item.stalled_seconds);
+          const detail = item.owner_state === 'idle' ? `负责会话已空闲 ${seen}；等待调度按规则恢复，仍无进展就需要你处理`
+            : item.owner_state === 'stuck' ? `负责会话空挂 ${seen}，守卫已请求中断；等待调度恢复`
+            : `${seen}没有进度回报；若桌面制作会话已停止，需要你授权恢复`;
+          return {label: `可能卡住 · ${item.edition}`, detail, tone: 'warn'};
+        }
         const stage = STAGE[item.stage];
         const detail = stage ? `${stage}${item.progress ? ` ${item.progress.done}/${item.progress.total}` : ''} · ${rel(now - item.last_activity)}回报`
+          : item.owner_state === 'working' ? `负责会话工作中 · 最近活动 ${rel(now - item.owner_last_activity)}`
           : `负责人已开始 · 开始于 ${rel(now - (item.since || now))}`;
         return {label: `制作中 · ${item.edition}`, detail, tone: 'signal'};
       }
@@ -48,7 +55,7 @@
       case 'v0_ready': {
         const r = item.refinement;
         if (!r) return {label: STATUS.v0_ready, detail: 'v1 精校尚未排入', tone: 'ok'};
-        if (r.status === 'queued') return {label: STATUS.v0_ready, detail: 'v1 精校排队中', tone: 'ok'};
+        if (r.status === 'queued') return {label: STATUS.v0_ready, detail: r.position ? `v1 精校排队第 ${r.position} 位${r.ahead ? `，前面还有 ${r.ahead} 集` : ''}` : 'v1 精校排队中', tone: 'ok'};
         const d = describe(r, now);
         return {label: STATUS.v0_ready, detail: `v1 ${d.label}${d.detail ? ' · ' + d.detail : ''}`, tone: d.tone === 'warn' ? 'warn' : 'ok'};
       }

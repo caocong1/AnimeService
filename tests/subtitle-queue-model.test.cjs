@@ -28,6 +28,10 @@ test('every status has a readable label and next step', () => {
   assert.equal(v0.tone, 'ok');
   assert.match(v0.detail, /^v1 制作中 · v1 · OP \/ ED 歌词 · 10 分钟前回报$/);
   assert.equal(m.describe({...base, status: 'v0_ready', refinement: {...base, status: 'queued'}}, now).detail, 'v1 精校排队中');
+  assert.equal(m.describe({...base, status: 'v0_ready', refinement: {...base, status: 'queued', position: 2, ahead: 2}}, now).detail, 'v1 精校排队第 2 位，前面还有 2 集');
+  assert.equal(m.describe({...base, status: 'producing', owner_state: 'working', owner_last_activity: now - 120}, now).detail, '负责会话工作中 · 最近活动 2 分钟前');
+  assert.match(m.describe({...base, status: 'producing', stalled: true, stalled_seconds: 1200, owner_state: 'idle'}, now).detail, /^负责会话已空闲 20 分钟；/);
+  assert.match(m.describe({...base, status: 'producing', stalled: true, stalled_seconds: 1500, owner_state: 'stuck'}, now).detail, /守卫已请求中断/);
   assert.equal(m.describe({...base, status: 'v0_ready', refinement: {...base, status: 'producing', stalled: true, stalled_seconds: 7200}}, now).tone, 'warn');
   assert.equal(m.describe({...base, status: 'done'}, now).tone, 'ok');
 });

@@ -130,6 +130,54 @@ def test_api_route_filters_by_show_and_exposes_nothing_private(delivery):
     assert client.get('/api/subtitle-queue?show=abc').status_code == 422
 
 
+def guard_status(db, job, decision, at, last_log_at):
+    """The owner guard's status file as the production task writes it, with the chat identifiers it keeps."""
+    path = db.path.parent.parent / 'data/diagnostics/codex-subtitle-owner-guard/status.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({'at': at, 'apply': True, 'error': None, 'threads': [{
+        'id': job, 'thread_id': 'guarded-responsible-chat', 'input_key': 'k', 'revision': 3, 'turn_id': 'turn-9',
+        'last_log_at': last_log_at, 'decision': decision}]}), encoding='utf-8')
+
+
+def test_owner_guard_signal_overrides_the_silence_heuristic(delivery):
+    db, scheduler, ready, now = delivery
+    identity, intent = begin(scheduler)
+    scheduler.reconcile_dispatch(identity, intent['dispatch_token'], thread_id='actual-fixture-chat')
+    now[0] += 2 * 3600  # nothing recorded in the ledger since the dispatch
+    guard_status(db, identity, 'recent_progress', now[0] - 60, now[0] - 90)
+    working = item(production_queue(db, now=now[0]), 42, 1)
+    assert working['owner_state'] == 'working' and working['owner_last_activity'] == now[0] - 90 and not working['stalled']
+    guard_status(db, identity, 'terminal_or_idle', now[0] - 60, now[0] - 20 * 60)
+    idle = item(production_queue(db, now=now[0]), 42, 1)
+    assert idle['owner_state'] == 'idle' and idle['stalled'] and idle['stalled_seconds'] == 20 * 60
+    guard_status(db, identity, 'terminal_or_idle', now[0] - 60, now[0] - 5 * 60)
+    assert not item(production_queue(db, now=now[0]), 42, 1)['stalled']  # just finished a turn; the dispatcher's next round may continue it
+    guard_status(db, identity, 'interrupt_stale_owner_wait', now[0] - 60, now[0] - 30)
+    stuck = item(production_queue(db, now=now[0]), 42, 1)
+    assert stuck['owner_state'] == 'stuck' and stuck['stalled']
+    guard_status(db, identity, 'recent_progress', now[0] - 3600, now[0] - 3600)  # a stale guard record is ignored
+    stale = item(production_queue(db, now=now[0]), 42, 1)
+    assert stale['owner_state'] is None and stale['stalled'] and stale['stalled_seconds'] == 2 * 3600
+    text = json.dumps(production_queue(db, now=now[0]))
+    for private in ('guarded-responsible-chat', 'turn-9', 'turn_id', 'thread_id'):
+        assert private not in text
+
+
+def test_ready_v1_refinement_waits_in_the_same_line(delivery):
+    db, scheduler, ready, now = delivery
+    db.set('subtitle_delivery_finished_42_1', {'release_id': 'example-s01e01-v0', 'edition': 'v0', 'delivery_status': 'finished',
+                                               'manifest_sha256': 'f' * 64, 'accepted': False})
+    db.execute('''INSERT INTO subtitle_delivery_jobs(id,show_id,episode,kind,state,input_key,payload,created,updated)
+                  VALUES(?,42,1,'refinement','ready','refinement-input',?,?,?)''',
+               ('refinement:42:1:fixture', json.dumps({'assessment': {}, 'edition': 'v1'}), now[0], now[0]))
+    queue = production_queue(db, now=now[0])
+    v0 = item(queue, 42, 1)
+    assert v0['status'] == 'v0_ready' and v0['refinement']['status'] == 'queued'
+    assert (v0['refinement']['position'], v0['refinement']['ahead']) == (1, 0)  # refinements are claimed first today
+    assert queued(queue) == [(43, 1, 2, 1), (42, 2, 3, 2), (43, 2, 4, 3)]
+    assert 'order' not in v0 and all('order' not in i for i in queue['items'])
+
+
 def test_public_text_hides_local_paths_but_keeps_times():
     assert public_text('encoder missing at C:\\synthetic\\tools\\ffmpeg.exe and /opt/synthetic/core.py') == 'encoder missing at [路径] and [路径]'
     assert public_text('retry 2026-10-19 12:00 after 3/4 attempts') == 'retry 2026-10-19 12:00 after 3/4 attempts'

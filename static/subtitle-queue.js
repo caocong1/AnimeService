@@ -17,7 +17,7 @@
   function render() {
     const t = now(), s = queue.summary;
     $('#summary').textContent = `${s.producing + s.starting} 集制作中 · ${s.queued} 集排队 · ${s.preparing + s.downloading} 集准备中 · ${s.waiting_video} 集等视频${s.stalled ? ` · ${s.stalled} 集可能卡住` : ''}`;
-    $('#health').textContent = SubtitleQueueModel.health(queue, t);
+    $('#queue-health').textContent = SubtitleQueueModel.health(queue, t);  // the shell's own #health is the service dot
     $('#queue').innerHTML = SubtitleQueueModel.sections(queue, t).map(sec =>
       `<section class="queue-section" data-key="${sec.key}"><h2 class="group-head"><b>${sec.title}</b><span class="count">${sec.items.length}</span></h2>${sec.items.map(row).join('')}</section>`).join('')
       || '<p class="empty">在追的作品没有待制作的集。</p>';
