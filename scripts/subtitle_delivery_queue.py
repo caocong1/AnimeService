@@ -191,6 +191,13 @@ def main():
         p.add_argument('--note', default='', help='short bounded note kept as evidence')
     receipts = sub.add_parser('receipts', help='read-only receipt ledger of one job')
     receipts.add_argument('job_id')
+    from anime.subtitle_evidence import KINDS
+    evidence = sub.add_parser('register-evidence', help='bind one validated preparation report to an episode\'s readiness record and re-assess')
+    evidence.add_argument('show_id', type=int)
+    evidence.add_argument('episode', type=int)
+    evidence.add_argument('--kind', required=True, choices=KINDS)
+    evidence.add_argument('--report', required=True, help='JSON report inside the private subtitle archive')
+    evidence.add_argument('--dry-run', action='store_true', help='validate the binding without recording it')
     plan = sub.add_parser('reconcile-plan', help='read-only owner review; does not reconcile or issue a new ticket')
     plan.add_argument('job_id')
     plan.add_argument('--ticket', required=True)
@@ -237,6 +244,9 @@ def main():
             result = delivery.reconciliation_plan(ticket, args.receipt_id)
         elif args.command == 'refresh':
             result = delivery.refresh()
+        elif args.command == 'register-evidence':
+            from anime.subtitle_evidence import register_evidence
+            result = register_evidence(delivery, args.show_id, args.episode, args.kind, args.report, dry_run=args.dry_run)
         elif args.command == 'progress':
             from anime.subtitle_delivery_view import report_progress
             result = report_progress(db, args.job_id, args.thread_id, args.stage, args.done, args.total)

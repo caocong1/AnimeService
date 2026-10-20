@@ -134,3 +134,13 @@ begin 在同一事务的 dispatch-ticket-issued 事件保存完整票据摘要�
 证据结构有效不等于宿主操作确定未创建。生产当前没有获准的终态核验适配器，因此 v1 not-created 返回 receipt_accepted=0, state_changed=0, reason=evidence_invalid 并保留 committing；单次空列表、method/checked_by、文件 hash 或 JSON 中自报 terminal=true 均不能解除保护。以后可信只读 absence_verifier(ticket, evidence, host_ref) 必须在服务事务内核验绑定的宿主 operation/request 的不可再完成终态、证据原文/hash及检查身份；适配器不得产生外部副作用或阻塞等待。未配置、异常或返回非 True 均拒绝。合成测试适配器只存在于隔离测试。
 
 票据归档文件含原始凭据，文件名使用 job 摘要且独占创建，避免路径穿越与覆盖。POSIX 使用 0600；Windows 在写入前用受保护 DACL 将票据目录限制为当前用户和 SYSTEM，子文件仅继承这两条规则；设定或核验失败即停止且不写 token。现有 DB/父目录 ACL 不变。0600 本身不提供 Windows ACL 隔离。不要把票据放入共享目录或输出其内容。回执台账只存摘要；证据中夹带原始派发/租约 token 会被拒绝。
+
+
+## 2026-10-20 准备证据登记：`register-evidence`
+
+第 47 轮诊断：18 个在追未看集长期停在 preparing，不是缺制作槽，而是准备证据（输出工具能力报告、候选洁净抽样、日文对白核验）没有受控入口绑定到 readiness 记录，调度轮转而反复做语义预研究。新增 `scripts/subtitle_delivery_queue.py register-evidence SHOW_ID EPISODE --kind KIND --report PRIVATE_JSON [--dry-run]`（服务层 `anime/subtitle_evidence.py`）：
+
+- KIND 取 `delivery_capability_report`、`capability_report`、`base_review`、`japanese_dialogue_report`，对应 readiness 适配器读取的 `subtitle_delivery_readiness_<sid>_<ep>` 记录键；报告文件必须在私有字幕档案目录内，工具自算 sha256。
+- 登记前按适配器同样的规则核绑定：目标指纹必须等于当前目标（冻结 head → 记录中的临时目标 → 工作稿目标，同一优先序）、角色/作品/集、全部实际检查项为 True、未过期、reviewer 与 evidence 存在；抽样候选审阅须有至少 3 张真实 PNG 样帧。不满足即拒绝，不写任何记录。
+- 保护：只对 watching 作品、范围有效、未看的集；派发在途（committing/unknown）时拒绝改输入。合并写入该记录的对应键（保留 dispatch_standard 等其它键），若已有工作项则记 `evidence-registered` 事件，然后走 `record_preparation` 由适配器重评并返回三门与原因码。`--dry-run` 只核验不写。
+- 它不生产证据、不冻结目标、不派发、不改 accepted/default/观看；登记后是否 ready 仍由适配器决定。验证：`tests/test_subtitle_evidence.py`。
