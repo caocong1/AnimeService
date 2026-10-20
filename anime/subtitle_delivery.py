@@ -121,6 +121,20 @@ def validate_absence_evidence(evidence, job_id, dispatch_token, issued_at, now):
     return bound
 
 
+def delivery_policy(db):
+    """The owner-maintained `subtitle_delivery_policy` record; missing keys mean the historical behaviour."""
+    return db.get('subtitle_delivery_policy', {}) or {}
+
+
+def last_served(db):
+    """When each show last had a release observed, from the scheduler's own ledger."""
+    if not _exists(db, 'subtitle_delivery_events'):
+        return {}
+    return {row['show_id']: row['served'] for row in db.rows('''SELECT j.show_id show_id, MAX(e.recorded) served
+        FROM subtitle_delivery_events e JOIN subtitle_delivery_jobs j ON j.id=e.job_id
+        WHERE e.kind='finished-observed' GROUP BY j.show_id''')}
+
+
 def _exists(db, table):
     return bool(db.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)))
 
@@ -428,6 +442,7 @@ class SubtitleDelivery:
                 return SubtitleDelivery(db, clock=self.clock, initialize=False).snapshot()
         if not _exists(self.db, 'subtitle_delivery_jobs'):
             return {'jobs': [], 'summary': {state: 0 for state in sorted(STATES)}}
+        policy = delivery_policy(self.db)
         jobs = []
         for row in self.db.rows('SELECT * FROM subtitle_delivery_jobs ORDER BY created,id'):
             value = {**row, 'payload': json.loads(row['payload'])}
@@ -447,9 +462,13 @@ class SubtitleDelivery:
             if row['kind'] == 'late':
                 value['priority'] += 50
             if (row['kind'] == 'refinement' or value['payload'].get('refinement_pending')) and not value['finished']:
-                value['priority'] = -10
+                # Opt-in: first versions of other shows come before any v1 polish.
+                value['priority'] = 10 if policy.get('v0_first_across_shows') is True else -10
             jobs.append(value)
-        jobs.sort(key=lambda job: (job['priority'], job['episode'], job['created'], job['id']))
+        served = last_served(self.db) if policy.get('queue_order') == 'longest_unserved' else {}
+        # Opt-in fairness: among first versions, the show that waited longest since its last release goes first.
+        jobs.sort(key=lambda job: (job['priority'], served.get(job['show_id'], 0) if job['priority'] == 0 else 0,
+                                   job['episode'], job['created'], job['id']))
         from .subtitle_enrollment import coverage
         from .subtitle_preparation import preparation_plan
         return {'jobs': jobs, 'summary': {state: sum(job['state'] == state for job in jobs) for state in sorted(STATES)},
@@ -864,6 +883,11 @@ class SubtitleDelivery:
         from .subtitle_refinement import two_pass
         staged = two_pass(self.db)
         continuing = staged and job['kind'] == 'episode' and observation.get('edition', 'v0') == 'v0'
+        # Opt-in: a finished v0 hands the single slot to another show's waiting first version; this
+        # owner's v1 is queued behind them as a refinement task that resumes the same chat later.
+        yielded_to = (self._first_version_waiting(job['show_id'])
+                      if continuing and delivery_policy(self.db).get('v0_first_across_shows') is True else None)
+        holding = continuing and not yielded_to
         if staged and observation.get('edition') == 'v1':
             baseline = job['payload'].get('baseline_release_id') or job['payload'].get('v0_observation', {}).get('release_id')
             if observation.get('baseline_release_id') != baseline:
@@ -883,24 +907,34 @@ class SubtitleDelivery:
             if staged and watched and watched['finished']:
                 raise ValueError('Episode was watched; stop refinement and preserve existing subtitles')
             if row['state'] == 'finished' and value.get('finished_observation') == observation:
-                return {**self.get(identity), 'duplicate': True}
-            if continuing and value.get('v0_observation') == observation:
-                return {**self.get(identity), 'duplicate': True, 'continue_refinement': True}
+                return {**self.get(identity), 'duplicate': True, 'yielded_to': None}
+            if holding and value.get('v0_observation') == observation:
+                return {**self.get(identity), 'duplicate': True, 'continue_refinement': True, 'yielded_to': None}
             value['finished_observation'] = observation
-            value['owner_stopped_writing'] = not continuing
-            value['refinement_pending'] = continuing
+            value['owner_stopped_writing'] = not holding
+            value['refinement_pending'] = holding
             if continuing:
                 value['v0_observation'] = observation
-                value['edition'] = 'v1'
                 c.execute('INSERT OR REPLACE INTO kv VALUES(?,?)',
                           (f"subtitle_delivery_v0_{row['show_id']}_{row['episode']}", _json(observation)))
+            if holding:
+                value['edition'] = 'v1'
             c.execute("UPDATE subtitle_delivery_jobs SET state=?,dispatch_state=?,lease_expires=0,payload=?,revision=revision+1,updated=? WHERE id=?",
-                      ('production' if continuing else 'finished', 'acknowledged' if continuing else 'completed',
+                      ('production' if holding else 'finished', 'acknowledged' if holding else 'completed',
                        _json(value), self.clock(), identity))
             c.execute('INSERT OR REPLACE INTO kv VALUES(?,?)',
                       (f"subtitle_delivery_finished_{row['show_id']}_{row['episode']}", _json(observation)))
-            self._event(c, identity, 'finished-observed', observation)
-        return {**self.get(identity), 'continue_refinement': continuing}
+            self._event(c, identity, 'finished-observed', {**observation, 'yielded_to': yielded_to})
+        return {**self.get(identity), 'continue_refinement': holding, 'yielded_to': yielded_to}
+
+    def _first_version_waiting(self, show_id):
+        """Another show's ready, undelivered, unwatched first version, if any; this show never counts."""
+        for row in self.db.rows("""SELECT show_id,episode FROM subtitle_delivery_jobs WHERE kind='episode' AND state='ready'
+                                   AND dispatch_state='' AND show_id!=? ORDER BY episode,created""", (show_id,)):
+            if not (_delivered(self.db, row['show_id'], row['episode']) or _finished(self.db, row['show_id'], row['episode'])
+                    or _scope(self.db, row['show_id'], row['episode'])):
+                return {'show_id': row['show_id'], 'episode': row['episode']}
+        return None
 
     def record_accepted(self, identity, thread_id, build_id):
         """Observe host acceptance, never create a quality certificate/selection."""

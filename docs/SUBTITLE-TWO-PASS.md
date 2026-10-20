@@ -48,3 +48,13 @@ finish_subtitle_episode.py在编码前检查报告，随包保存refinement-revi
 每一集v0/v1都必须通过`publish_finished_episode.py`登记统一成品清单，自动接入字幕库、追番首页/全部追番和作品分集播放入口。仅编码完成或只挂字幕库不能报告观看交付完成。单集负责人须只读核本集首页/分集状态不再错误缺集、按钮实际可打开；v1优先且v0保留，不能伪造accepted或修改原片/default/已看来凑状态。
 
 已打开观看列表在可见时每60秒及重新显示/聚焦时自动检查清单与文件，仅有变化才更新观看区域；分集页未保存表单保持，活动播放器不切换。新页面直接读取最新成品，无需服务重启或逐作品手工配置。暂时网络/5xx故障保留当前显示并重试，文件实际404则不能新增播放入口。具体实现与核验见`static/finished-releases.js`、`scripts/verify_finished_auto_delivery.cjs`与`data/finished-viewing-repair-20261015/auto-delivery-proof.json`。
+
+
+## 2026-10-20 可选队列策略（默认关闭，须用户决定后由 owner 打开）
+
+两项都是 kv `subtitle_delivery_policy` 的键，缺省时调度行为与此前完全一致：
+
+- `v0_first_across_shows: true`：原负责人调用 finished 交付 v0 时，若另一部作品有就绪、未交付、未看的首版在等，返回 `continue_refinement=false` 与 `yielded_to`（作品/集），工作项记 finished/completed 释放唯一槽；下一轮 refresh 按既有 `enqueue_refinement` 路径为本集生成 v1 精校工作项（沿原负责线程，begin 返回 resume），其在队列中排在其它作品首版之后、迟稿修订之前。没有其它作品在等时仍由同一负责人立即继续 v1。
+- `queue_order: longest_unserved`：首版工作项之间按"该作品最近一次 finished-observed 的时间"升序，从未交付过的作品最先，再按集号；修订/迟稿/已看优先级不变。
+
+打开 `v0_first_across_shows` 前须同步修改 automation-2 提示词中"同集 v1 优先开下一集"的表述为"按 status 队列顺序领取第一个 ready 项"，否则调度会按旧规则跳过队列顺序。验证：`tests/test_subtitle_queue_policy.py`。
