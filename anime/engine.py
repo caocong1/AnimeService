@@ -9,7 +9,7 @@ from .qbit import Qbit
 from .download_policy import require_submission_ready,fallback_receipt,Refusal
 from .fidelity import fidelity_blocker
 from .research_tasks import is_sample,sample_episode,sample_table,sample_allowed
-from .sources import Sources,Catalog,EVENT_FAILURE_MARKS
+from .sources import Sources,Catalog,EVENT_FAILURE_MARKS,site_backoff_seconds
 from .native_indexes import candidate_mapping
 from .releases import Rejected,validate_title,bdecode,select_files,norm,episodes_of,season_of
 
@@ -506,12 +506,7 @@ class Engine:
             for sid in refreshed:  # a show's pending candidates once per cycle, however many of its sources refreshed
                 if self.stop_event.is_set():break
                 self.ingest_show(sid)
-            # Air dates for every tracked show, not just downloading ones, so the board can tell aired from future.
-            for show in self.db.rows("SELECT id FROM shows WHERE selected=1 AND state IN ('trial','watching','wish','paused')"):
-                if self.stop_event.is_set():break
-                if time.time()-self.db.get('details_'+str(show['id']),0)>21600:
-                    try:self.catalog.details(show['id'])
-                    except Exception as e:self.db.event('airings',safe_error(e),'warning')
+            self.refresh_airings()
             if hasattr(self,'auto_tick'):self.step('season.auto_tick',lambda:self.auto_tick(force=force))
             self.step('source_review.tick',self.source_review.tick)
             self.step('source_review.publish_available',self.source_review.publish_available)
@@ -521,6 +516,36 @@ class Engine:
             self.db.set('check_completed',requested)
             self.db.set('check_finished_at',time.time())
         finally:self.cycle_lock.release()
+    def refresh_airings(self):
+        """Air dates for every tracked show, not just downloading ones, so the board can tell aired from future.
+        A Bangumi-wide failure pauses the pass with one shared backoff and is reported sparsely per outage;
+        one show's own failure backs off only that show."""
+        shows=[r['id'] for r in self.db.rows("SELECT id FROM shows WHERE selected=1 AND state IN ('trial','watching','wish','paused')")]
+        fresh={sid:self.db.get('details_'+str(sid),0) for sid in shows}
+        shared=self.db.get('airings_backoff',{})
+        if shared.get('at',0)<max(fresh.values(),default=0):shared={}  # a later success (e.g. a manual refresh) ended it
+        if shared.get('next',0)>time.time():return
+        for sid in shows:
+            if self.stop_event.is_set():break
+            if time.time()-fresh[sid]<=21600:continue
+            key='details_retry_'+str(sid);own=self.db.get(key,{})
+            if own.get('at',0)<fresh[sid]:own={}
+            if own.get('next',0)>time.time():continue
+            self.db.set('heartbeat',{'time':time.time(),'phase':'airings','show_id':sid})
+            try:self.catalog.details(sid)
+            except Exception as e:
+                message=safe_error(e);now=time.time();site_wide=isinstance(e,NetworkError) and e.site_wide
+                prior=shared if site_wide else own;failures=prior.get('failures',0)+1
+                wait=site_backoff_seconds(failures) if site_wide else min(3600,300*2**min(failures-1,4))
+                self.db.set('airings_backoff' if site_wide else key,{'failures':failures,'error':message,'at':now,
+                    'since':prior.get('since',now),'next':now+max(wait,getattr(e,'retry_after',0) or 0)})
+                if message!=prior.get('error') or failures in EVENT_FAILURE_MARKS or failures%100==0:
+                    self.db.event('airings',message,'warning')
+                if site_wide:break  # the other shows share the endpoint and would fail the same way
+            else:
+                for done in (key,'airings_backoff'):
+                    if self.db.get(done) is not None:self.db.execute('DELETE FROM kv WHERE key=?',(done,))
+                shared={}
     def ingest_show(self,sid):
         if self.db.review_wanted(sid) and self.source_review.policy(sid).get('mode')=='sampling':
             try:self.source_review.start(sid)

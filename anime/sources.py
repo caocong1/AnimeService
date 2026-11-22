@@ -200,14 +200,14 @@ class Catalog:
             r=self.web.fetch('https://api.bgm.tv/v0/episodes?'+urlencode({'subject_id':sid,'type':0,'limit':100,'offset':offset})).json()
             rows=r.get('data');total=r.get('total')
             if not isinstance(rows,list) or type(total) is not int or total<0 or r.get('offset',offset)!=offset:
-                raise NetworkError('Bangumi章节分页响应无效，保留原分集资料')
+                raise NetworkError('Bangumi章节分页响应无效，保留原分集资料',site_wide=False)
             expected=max(expected,total)
             ids=[e.get('id') for e in rows]
             if any(type(i) is not int or i<=0 for i in ids) or len(set(ids))!=len(ids) or set(ids)&seen:
-                raise NetworkError('Bangumi章节分页重复或缺少ID，保留原分集资料')
+                raise NetworkError('Bangumi章节分页重复或缺少ID，保留原分集资料',site_wide=False)
             seen.update(ids);items+=rows;offset+=len(rows)
             if offset>=expected:break
-            if not rows or offset>10000:raise NetworkError('Bangumi章节分页不完整，保留原分集资料')
+            if not rows or offset>10000:raise NetworkError('Bangumi章节分页不完整，保留原分集资料',site_wide=False)
         self.db.set('bangumi_episodes_'+str(sid),{'time':time.time(),'items':items})
         with self.db.connect() as c:
             for e in items:
