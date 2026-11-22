@@ -3,19 +3,25 @@
 (() => {
   shell('home');
   const sid = Number(location.pathname.split('/').pop());
-  let d = null, epOpen = false, stopObserving;
+  let d = null, epOpen = false, stopObserving, loadRevision = 0;
+  let savingState = false, stateTimer;
 
   const RES = [['1080', '1080p'], ['720', '720p'], ['2160', '2160p'], ['', '不限']];
   const SUB = [['any_zh', '简繁均可'], ['chs', '简体'], ['cht', '繁体']];
   const opts = (list, v) => list.map(([k, n]) => `<option value="${k}"${k === v ? ' selected' : ''}>${n}</option>`).join('');
   const label = (list, v) => (list.find(([k]) => k === v) || [, v])[1];
 
+  function downloadStatus(task) {
+    const labels = {download_ready:'正在准备下载', downloader_unavailable:'下载暂时中断', download_retry:'等待重试下载',
+      quality_required:'等待符合画质要求的片源', primary_window:'等待订阅片源更新', sources_disabled:'订阅源已关闭'};
+    return labels[task.code] || '正在查找本集片源';
+  }
   function epInfo(e, raw) {
     if (e.release) return '自制字幕 · ' + FinishedReleases.label(e.release) + (e.s === 'resume' ? ` · 看到 ${clock(e.position)}` : '');
     if (e.s === 'resume') return `<span class="track" style="--p:${Math.round(e.position / e.duration * 100)}%"><i></i></span><span class="num">${clock(e.position)} / ${clock(e.duration)}</span>`;
-    if (e.s === 'downloading') return `<span class="track" style="--p:${e.progress}%"><i></i></span><span class="num">${e.progress}%</span>${e.download ? '<span>' + esc(e.download.reason) + '</span>' : ''}`;
+    if (e.s === 'downloading') return `<span class="track" style="--p:${e.progress}%"><i></i></span><span class="num">${e.progress}%</span>${e.download ? '<span>' + downloadStatus(e.download) + '</span>' : ''}`;
     if (e.s === 'future') return e.date ? `${airDate(e.date)} 播出` : '';
-    if (e.s === 'missing') return e.download ? esc(e.download.reason) + (e.download.source_error ? '；部分查源失败：' + esc(e.download.source_error) : '') + (e.download.retry_at ? ' · ' + new Date(e.download.retry_at * 1000).toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}) + ' 自动重试' : '') : raw && TASKS[raw.status] ? TASKS[raw.status] : '后台正在检查本集资源';
+    if (e.s === 'missing') return e.download ? downloadStatus(e.download) + (e.download.retry_at ? ' · ' + new Date(e.download.retry_at * 1000).toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}) + ' 自动重试' : '') : raw && TASKS[raw.status] ? TASKS[raw.status] : '后台正在检查本集资源';
     if (e.s === 'aired') return '已播出';
     if (raw?.watch_method) return raw.watch_method === 'manual' ? '手动标记' : '播放器同步';
     return '';
@@ -28,15 +34,15 @@
     const tick = e.s === 'future' ? '' : e.s === 'watched'
       ? `<button class="btn small quiet" type="button" data-watch="${e.n}" data-finished="false" aria-label="第 ${e.n} 集改为未看">${icon('check')}<span class="lbl">已看</span></button>`
       : `<button class="btn small" type="button" data-watch="${e.n}" data-finished="true" aria-label="第 ${e.n} 集标记看完">${icon('check')}<span class="lbl">看完</span></button>`;
-    return `<div class="ep-row" data-s="${e.s}"${isNext ? ' data-next' : ''}><span class="no"><span>${e.n}</span></span><span class="st">${EP_LABEL[e.s]}</span><span class="info">${epInfo(e, raw)}</span><span class="acts">${play}${tick}</span></div>${subtitleLine(e)}`;
+    return `<div class="ep-row" data-episode="${e.n}" data-s="${e.s}"${isNext ? ' data-next' : ''}><span class="no"><span>${e.n}</span></span><span class="st">${EP_LABEL[e.s]}</span><span class="info">${epInfo(e, raw)}</span><span class="acts">${play}${tick}</span></div>${subtitleLine(e)}`;
   }
 
   /* One line under an unwatched episode: where its own subtitles are in the production queue. */
   function subtitleLine(e) {
     const q = d.queue?.[e.n];
-    if (!q || e.s === 'watched' || q.status === 'done') return '';
+    if (!q || e.s === 'watched' || ['done','v0_ready'].includes(q.status)) return '';
     const tone = SubtitleQueueModel.describe(q).tone;
-    return `<div class="ep-sub" data-tone="${tone}">${esc(SubtitleQueueModel.line(q))}${q.status === 'queued' || q.stalled || q.refinement?.stalled ? ` <a class="link" href="/subtitle-queue">看队列</a>` : ''}</div>`;
+    return `<div class="ep-sub" data-tone="${tone}">${esc(SubtitleQueueModel.line(q))}${q.status === 'queued' ? ` <a class="link" href="/subtitle-queue">看队列</a>` : ''}</div>`;
   }
 
   function episodes() {
@@ -157,7 +163,7 @@
     const watched = b.eps.filter(e => e.s === 'watched').length, ready = b.eps.filter(e => e.s === 'ready' || e.s === 'resume').length;
     $('#main').innerHTML = `
       <section class="show-hero">
-        ${cover(s.image, s.title)}
+        ${cover(s.image, s.title, '', '', {priority: true})}
         <div>
           <a class="crumb" href="/">${icon('back')}追番</a>
           <h1>${esc(s.title)}</h1>
@@ -166,7 +172,7 @@
           <div class="tags">${(s.tags || []).slice(0, 6).map(t => `<span class="chip">${esc(t.name || t)}</span>`).join('')}</div>
         </div>
         <div class="aside"><div id="next-availability">${nextState(b)}</div>${autoDl(s, m)}</div>
-        <div class="states"><div class="seg" role="group" aria-label="追番状态">${Object.entries(STATES).map(([k, v]) => `<button type="button" data-state="${k}" aria-pressed="${!!(s.selected && s.state === k)}">${v}</button>`).join('')}</div></div>
+        <div class="states"><div class="seg" role="group" aria-label="追番状态">${Object.entries(STATES).map(([k, v]) => `<button type="button" data-state="${k}" aria-pressed="${!!(s.selected && s.state === k)}">${v}</button>`).join('')}</div><span id="state-save" role="status">${s.pending_state ? '已登记，等待切换到' + esc(STATES[s.pending_state]) : ''}</span></div>
       </section>
       <div class="show-grid">
         <section id="episode-availability" aria-labelledby="eps-title">
@@ -180,7 +186,7 @@
               <div class="rating" role="group" aria-label="评分 1 到 10">${Array.from({ length: 10 }, (_, i) => `<button type="button" data-rate="${i + 1}" aria-pressed="${s.rating === i + 1}" class="${s.rating >= i + 1 ? 'on' : ''}">${i + 1}</button>`).join('')}</div>
               <input type="hidden" name="rating" value="${s.rating || ''}">
               <label class="field"><span class="sr">感想</span><textarea name="feedback" rows="3" placeholder="感想">${esc(s.feedback)}</textarea></label>
-              ${s.state === 'dropped' || s.state === 'paused' || s.drop_reason ? `<label class="field"><span>${s.state === 'paused' ? '暂搁原因' : '弃番原因'}</span><input name="drop_reason" value="${esc(s.drop_reason)}"></label>` : `<input type="hidden" name="drop_reason" value="">`}
+              <label class="field" id="reason-field" ${s.state === 'dropped' || s.state === 'paused' || s.drop_reason ? '' : 'hidden'}><span>${s.state === 'paused' ? '暂搁原因' : '弃番原因'}</span><input name="drop_reason" value="${esc(s.drop_reason)}"></label>
               <div><button class="btn small" type="submit">保存</button></div>
             </form>
           </section>
@@ -200,17 +206,19 @@
   }
 
   async function load() {
+    const revision = ++loadRevision;
     try {
-      await boot();
-      const [detail, releases, queue] = await Promise.all([api('/shows/' + sid),
-        FinishedReleases.load({verifyMedia: true}).catch(e => { toast(e.message); return []; }),
-        api('/subtitle-queue?show=' + sid).catch(() => null)]);  // the queue line is optional; the page never waits on it failing
+      const [detail, releases] = await Promise.all([api('/shows/' + sid),
+        FinishedReleases.load({verifyMedia: true, showId: sid}).catch(e => { toast(e.message); return []; }), boot()]);
+      if (revision !== loadRevision) return;
       d = detail;
-      d.queue = Object.fromEntries((queue?.items || []).map(i => [i.episode, i]));
+      d.queue = {};
       applyAiringSchedule(d);
       const baseline = d.board;
       d.board = FinishedReleases.applyBoard(d.show, baseline, releases);
       render();
+      if (stateTimer) clearTimeout(stateTimer);
+      if (d.show.pending_state) followPendingState();
       stopObserving?.();
       stopObserving = FinishedReleases.observe(next => {
         epOpen = !!$('.ep-fold')?.open;
@@ -219,16 +227,71 @@
         const ready = d.board.eps.filter(e => e.s === 'ready' || e.s === 'resume').length;
         $('#episode-availability').innerHTML = `<h2 class="group-head" id="eps-title"><b>分集</b><span class="count">已看 ${watched}/${d.show.total || d.board.eps.length}${ready ? ' · 待看 ' + ready : ''}</span></h2>${episodes()}`;
         $('#next-availability').innerHTML = nextState(d.board);
-      }, {initial: releases});
+      }, {initial: releases, showId: sid});
+      // Queue diagnostics enrich the existing rows after the viewing page is
+      // usable. Keep forms, focus and episode folds intact when they arrive.
+      api('/subtitle-queue?show=' + sid).then(queue => {
+        if (revision !== loadRevision) return;
+        d.queue = Object.fromEntries((queue?.items || []).map(i => [i.episode, i]));
+        const container = $('#episode-availability');
+        $$('.ep-sub', container).forEach(line => line.remove());
+        const episodesByNumber = new Map(d.board.eps.map(e => [e.n, e]));
+        $$('.ep-row[data-episode]', container).forEach(row => {
+          const episode = episodesByNumber.get(Number(row.dataset.episode));
+          if (episode) row.insertAdjacentHTML('afterend', subtitleLine(episode));
+        });
+      }).catch(() => {});
     } catch (e) {
+      if (revision !== loadRevision) return;
       $('#main').innerHTML = `<div class="empty"><h2>${/404|没有此条目/.test(e.message) ? '没有这部作品' : '读取失败'}</h2><p>${esc(e.message)}</p><a class="btn" href="/">回到追番</a></div>`;
     }
   }
 
+  function reflectState(saved, selected = 1) {
+    Object.assign(d.show, {selected, state: saved, pending_state: null});
+    for (const button of $$('.states button')) button.setAttribute('aria-pressed', String(!!selected && button.dataset.state === saved));
+    const field = $('#reason-field');
+    field.hidden = !['paused','dropped'].includes(saved) && !field.querySelector('input').value;
+    field.querySelector('span').textContent = saved === 'paused' ? '暂搁原因' : '弃番原因';
+    if ($('#sample-sources')) $('#sample-sources').disabled = !safelyEligible();
+  }
+
+  function followPendingState() {
+    clearTimeout(stateTimer);
+    stateTimer = setTimeout(async () => {
+      if (savingState || document.hidden) { followPendingState(); return; }
+      const revision = loadRevision;
+      try {
+        const result = await api('/shows/' + sid + '/state');
+        if (revision !== loadRevision || savingState || !$('#state-save')) return;
+        if (result.pending) { followPendingState(); return; }
+        reflectState(result.state, result.selected);
+        $('#state-save').textContent = '当前状态已同步';
+      } catch { followPendingState(); }
+    }, 2000);
+  }
+
   async function setState(state, previous) {
-    await api(`/shows/${sid}/state`, { state });
-    await load();
-    toast('已设为' + STATES[state], previous && previous !== state ? { label: '撤销', run: () => act(null, () => setState(previous)) } : null);
+    if (savingState) return;
+    savingState = true;
+    clearTimeout(stateTimer);
+    const buttons = $$('.states button');
+    const report = message => { $('#state-save').textContent = message; };
+    for (const button of buttons) button.disabled = true;
+    report('正在保存' + STATES[state] + '…');
+    try {
+      const saved = await saveTrackingState(sid, state, pending => report('已登记，等待切换到' + STATES[pending]));
+      reflectState(saved);
+      report('已保存');
+      toast('已设为' + STATES[saved], previous && previous !== saved ? { label: '撤销', run: () => act(null, () => setState(previous)) } : null);
+    } catch (error) {
+      report(error.message || '保存结果未知，正在核对当前状态');
+      followPendingState();
+      throw error;
+    } finally {
+      savingState = false;
+      for (const button of buttons) button.disabled = false;
+    }
   }
 
   document.addEventListener('click', e => {

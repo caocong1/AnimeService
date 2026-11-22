@@ -1,4 +1,7 @@
+import contextlib
 import json
+import math
+import sqlite3
 from unittest.mock import Mock
 import pytest
 from fastapi.testclient import TestClient
@@ -124,3 +127,83 @@ def test_delivery_uses_normal_player_media_without_replacing_original_episode(fi
     assert engine.subtitle_studio.production_targets.lease.call_args.args[0]['episode'] == 2
     assert db.rows('SELECT * FROM episodes') == before
     assert client.get('/api/web/media/finished:missing').status_code == 404
+
+
+@pytest.mark.parametrize('count', [133, 405])
+def test_catalog_reads_large_library_in_one_connection(finished, monkeypatch, count):
+    client, db, _, catalog = finished
+    releases = []
+    for i in range(count):
+        identity = f'bulk-{i}'
+        folder = catalog / identity
+        folder.mkdir()
+        (folder / 'episode.mp4').write_bytes(b'media')
+        releases.append(dict(id=identity, show_id=42, season=2, episode=2,
+                             status='finished', video_sha256='a'*64))
+    (catalog / 'index.json').write_text(json.dumps({'releases': releases}), encoding='utf-8')
+    opened, queries = [], []
+    original = db.connect
+
+    @contextlib.contextmanager
+    def counted():
+        opened.append(1)
+        with original() as connection:
+            connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+            connection.execute('PRAGMA query_only=ON')
+            connection.set_trace_callback(queries.append)
+            yield connection
+
+    monkeypatch.setattr(db, 'connect', counted)
+    response = client.get('/api/finished-viewing')
+    assert response.status_code == 200
+    rows = response.json()['releases']
+    assert [r['id'] for r in rows] == [r['id'] for r in releases]
+    assert all(r['progress'] is None and r['finished'] is False for r in rows)
+    assert len(opened) == 1
+    assert sum(q.lstrip().startswith('WITH requested') for q in queries) == math.ceil(count / 200)
+
+
+def test_item_does_not_inspect_unrelated_media(finished, monkeypatch):
+    client, _, _, catalog = finished
+    path_type = type(catalog)
+    original = path_type.stat
+    checked = []
+
+    def stat(path, *args, **kwargs):
+        if path.name == 'episode.mp4': checked.append(path.parent.name)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, 'stat', stat)
+    assert client.get('/api/finished-viewing/test-v1').status_code == 200
+    assert checked == ['test-v1']
+
+
+def test_catalog_rechecks_live_progress_watches_state_and_files(finished):
+    client, db, _, catalog = finished
+    assert len(client.get('/api/finished-viewing').json()['releases']) == 2
+    client.post('/api/finished-viewing/test-v0/progress', json=packet())
+    client.post('/api/finished-viewing/test-v0/watch', json={'finished': True})
+    # The fixture's engine.state is a mock; apply its normal state change.
+    db.execute("UPDATE shows SET state='completed' WHERE id=42")
+    rows = client.get('/api/finished-viewing').json()['releases']
+    assert rows[0]['progress']['position'] == 123 and rows[1]['progress'] is None
+    assert all(r['finished'] is True and r['show_state'] == 'completed' for r in rows)
+    (catalog / 'test-v0/episode.mp4').unlink()
+    (catalog / 'test-v1/episode.mp4').write_bytes(b'')
+    assert client.get('/api/finished-viewing').json()['releases'] == []
+
+
+def test_catalog_excludes_invalid_or_unmapped_releases(finished):
+    client, _, _, catalog = finished
+    path = catalog / 'index.json'
+    data = json.loads(path.read_text(encoding='utf-8'))
+    template = data['releases'][0]
+    data['releases'] = [
+        {**template, **invalid} for invalid in (
+            {'id': '../secret'}, {'episode': True}, {'episode': 0}, {'season': 3},
+            {'show_id': 999}, {'video_sha256': 'invalid'}, {'status': 'rendering'},
+        )
+    ] + data['releases']
+    path.write_text(json.dumps(data), encoding='utf-8')
+    rows = client.get('/api/finished-viewing').json()['releases']
+    assert [r['id'] for r in rows] == ['test-v0', 'test-v1']

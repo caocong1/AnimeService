@@ -23,16 +23,28 @@ def draft_job(setup):
 
 
 @pytest.mark.requires_lab
-def test_library_draft_progress_and_history_are_read_only(setup):
+def test_library_draft_progress_and_history_are_read_only(setup,monkeypatch):
     db,q,engine,video,target=draft_job(setup)
     payload=json.loads(db.one('SELECT payload FROM subtitle_studio_jobs')['payload'])
     path=Path(payload['workbook']);book=json.loads(path.read_text(encoding='utf-8'))
     book['cues'][0]['status']='translation_reviewed';path.write_text(json.dumps(book),encoding='utf-8')
     before=(db.show(42),db.rows('SELECT * FROM episodes'),path.read_bytes())
+    from anime import read_projection
+    original=read_projection.ProjectionStore.__init__
+    connections=[]
+    def counted(self,path):
+        connections.append(path)
+        original(self,path)
+    monkeypatch.setattr(read_projection.ProjectionStore,'__init__',counted)
     result=engine.subtitle_studio.library();row=result['entries'][0]
+    assert len(connections)==1
     assert row['progress']=={'total':1,'reviewed':1} and not row['build_id']
     assert row['target_matches_current']
     assert row['video_file']=='original.mkv' and row['versions']==[]
+    shelf=engine.subtitle_studio.library(compact=True)['entries'][0]
+    assert (shelf['show_id'],shelf['episode'],shelf['base_count'],shelf['build_id'])==(
+        row['show_id'],row['episode'],row['base_count'],row['build_id'])
+    assert shelf['progress'] is None
     assert str(db.path.parent) not in json.dumps(result)
     db.execute("UPDATE shows SET state='dropped' WHERE id=42")
     assert engine.subtitle_studio.overview()['jobs']==[]

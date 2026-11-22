@@ -104,6 +104,43 @@ def test_ambiguous_submission_is_reconciled_instead_of_duplicated(setup):
     assert q.adds==1 and len(db.rows('SELECT * FROM tasks'))==1
 
 
+def test_offline_dependency_does_not_penalize_candidate_and_recovers_promptly(setup):
+    db,q,e,c,title=configured(setup);candidate=c(title)
+    db.execute("UPDATE candidates SET status='retry',reason='qBittorrent请求超时或连接不可达'")
+    record={'reason':'qBittorrent请求超时或连接不可达','attempts':8,'next':time.time()+21600}
+    db.set('candidate_retry_'+str(candidate['id']),record)
+    db.set('qbit_health',{'ok':False,'time':time.time(),'error':'qBittorrent本机接口未监听'})
+    reconcile_missing(e)
+    report=db.get('download_gaps')['shows']['42']['2']
+    assert report['code']=='downloader_unavailable' and 'retry_at' not in report
+    assert db.get('candidate_retry_'+str(candidate['id']))==record and q.adds==0
+    db.set('qbit_health',{'ok':True,'time':time.time()})
+    reconcile_missing(e);reconcile_missing(e)
+    assert q.adds==1 and len(db.rows('SELECT * FROM tasks'))==1
+
+
+@pytest.mark.parametrize('health', [{'ok':True,'time':0}, {'ok':True,'time':time.time()}])
+def test_downloader_recovery_does_not_bypass_other_source_backoff(setup,health):
+    db,q,e,c,title=configured(setup);candidate=c(title)
+    db.execute("UPDATE candidates SET status='retry',reason='HTTP 429'")
+    db.set('candidate_retry_'+str(candidate['id']),{'reason':'HTTP 429','next':time.time()+21600})
+    db.set('qbit_health',health)
+    reconcile_missing(e)
+    assert q.adds==0
+
+
+def test_long_reconciliation_refreshes_stale_health_once_before_recovery(setup):
+    from unittest.mock import Mock
+    db,q,e,c,title=configured(setup);candidate=c(title)
+    db.execute("UPDATE candidates SET status='retry'")
+    db.set('candidate_retry_'+str(candidate['id']),{'dependency':'qbit_unavailable','next':time.time()+21600})
+    db.set('qbit_health',{'ok':False,'time':time.time()-120,'error':'old offline'})
+    q.info=Mock(wraps=q.info)
+    reconcile_missing(e)
+    assert q.adds==1 and db.get('qbit_health')['ok'] is True
+    assert sum(call.args==() for call in q.info.call_args_list)==1
+
+
 def test_reserved_task_failure_reason_is_visible_without_resubmission(setup):
     db,q,e,c,title=configured(setup);c(title);reconcile_missing(e)
     db.execute("UPDATE tasks SET status='review',error='提交回执未知；先按 hash 对账'")

@@ -1,3 +1,5 @@
+2026-10-22 无人工制作：执行 [中文字幕来源与无人工作业](SUBTITLE-CHINESE-SOURCES.md)。Codex 自动检索并核对同集熟肉软字幕/硬字幕 OCR；已有全片 OCR 直接校对与跨版对轴，不能因独立稿搜索失败而停止。字幕缺稿、待转写或待校对不转人工/用户介入；来源候选与实际可用主稿、ready/finished/accepted 分开，中文防漏及唯一 owner 等保护不变。本条覆盖下文旧人工前置。
+
 # 逐集日文对白来源核查
 
 2026-10-16 后续扩展：已核 [补充字幕站点清单](SUBTITLE-SOURCE-CATALOG.md)。日文优先按本地档案/用户指定源→Jimaku→AJATT/Kitsunekko定向补查，必要时查Anime Tosho字幕附件及SubDL日文分类；中文对照可查ASSRT/SubHD。来源齐全不要求全站重复搜索，镜像同文不算独立见证。站点可达、发现本集、下载成功、真实正文/目标匹配分别记录，访问受限不绕过。
@@ -22,7 +24,7 @@ ABEMA/Netflix/Judas与现用母片不是同一时轴的保证。核开头/中段
 
 已归档的跨媒体候选可用 `python -m anime.subtitle_alignment` 生成私有时轴提案，具体参数、提取和核心接口见 [对齐提案接入说明](SUBTITLE-ALIGNMENT-HANDOFF.md)。先核当前未看状态、原 owner、固定母片 fingerprint、中文基稿及候选原文 SHA 和真实 draft id；研究包的旧输入不能仅凭同集名称套用。准备者可另存提案和复核清单，不改当前工作簿、固定输入或生产正文。
 
-工具结果始终为 `proposed`。段偏移、时间覆盖率和人工锚点一致都不能代替实际声画核验；逐段核首中尾锚点、漂移、缺句及拆合句，剪辑处审看完整 `candidate_range_ms` 和 `target_review_range_ms`，不把代表点当精确剪辑位置。未核范围留待办，不填写虚假 reviewer/evidence 或修改 accepted 来解除门禁。
+工具结果始终为 `proposed`。段偏移、时间覆盖率和已核锚点一致都不能代替实际声画核验；逐段核首中尾锚点、漂移、缺句及拆合句，剪辑处审看完整 `candidate_range_ms` 和 `target_review_range_ms`，不把代表点当精确剪辑位置。未核范围留待办，不填写虚假 reviewer/evidence 或修改 accepted 来解除门禁。
 
 只有原负责人完成相应声画核验、确认目标绑定和逐段证据后，才按接入说明另存审核映射、由原机核心刷新候选并增量制作不可变版本；完整结果 JSON 不能直接作为 `--alignments`。已完成 v1 的未看集先登记新增材料，沿现有受控修订流程等待制作槽，不直接重开 completed 或唤醒已停止 owner；已看集保持旧成品。提案准备不延迟 v0→v1，也不改变 default、正式字幕验收或观看记录。
 

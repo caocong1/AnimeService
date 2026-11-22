@@ -233,10 +233,39 @@ def test_unreadable_or_short_source_never_retries(tmp_path,monkeypatch,formats,d
     job=s.jobs[s.start(item,URL,'stable')['job_id']];job['deadline']=time.monotonic()+2
     fake=Mock();fake.extract_info.return_value={'formats':formats,'duration':duration}
     import yt_dlp
-    monkeypatch.setattr(yt_dlp,'YoutubeDL',lambda _:nullcontext(fake))
+    monkeypatch.setattr(yt_dlp,'YoutubeDL',lambda *_args, **_kwargs:nullcontext(fake))
     monkeypatch.setattr(a,'validate_cdn',lambda _:None)
     with pytest.raises(a.Unavailable) as error:s._source_audio(job)
     assert error.value.reason==reason and not a.failure(reason)['retryable']
+
+
+def test_rejected_primary_audio_uses_same_track_backup(tmp_path, monkeypatch):
+    import yt_dlp
+    from yt_dlp.extractor.bilibili import BiliBiliIE
+
+    s, item = service(tmp_path, monkeypatch)
+    monkeypatch.setattr(s, '_work', lambda: None)
+    job = s.jobs[s.start(item, URL, 'stable')['job_id']]
+    job['deadline'] = time.monotonic() + 2
+    primary = 'https://invalid.example/audio'
+    backup = 'https://upos.bilivideo.com/audio'
+    fake = Mock()
+    monkeypatch.setattr(yt_dlp, 'YoutubeDL', lambda *_args, **_kwargs: nullcontext(fake))
+    monkeypatch.setattr(BiliBiliIE, '_check_missing_formats', lambda *_: None)
+
+    def extract(*_args, **_kwargs):
+        ie = fake.add_info_extractor.call_args.args[0]
+        return {'formats': ie.extract_formats({'dash': {'audio': [
+            {'baseUrl': primary, 'backupUrl': [backup], 'codecs': 'aac', 'bandwidth': 64000}
+        ]}}), 'duration': 500}
+
+    def validate(url):
+        if url != backup:
+            raise a.Unavailable()
+
+    fake.extract_info.side_effect = extract
+    monkeypatch.setattr(a, 'validate_cdn', validate)
+    assert s._source_audio(job)[0] == backup
 
 
 def test_local_probe_missing_audio_reports_local_error(tmp_path,monkeypatch):

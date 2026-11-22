@@ -365,9 +365,9 @@ def test_stopped_blocker_releases_global_slot_but_resume_reuses_original_chat(de
     other_lease = scheduler.reserve(row['id'], 'other-owner', row['revision'], lease_seconds=30)
     old = scheduler.get(identity)
     with pytest.raises(ValueError, match='single production owner'):
-        scheduler.resume(identity, 'original-episode-chat', 'same-owner', old['revision'])
+        scheduler.resume(identity, 'original-episode-chat', 'same-owner', old['revision'], manual_recovery=True)
     now[0] += 31
-    resumed = scheduler.resume(identity, 'original-episode-chat', 'same-owner', old['revision'])
+    resumed = scheduler.resume(identity, 'original-episode-chat', 'same-owner', old['revision'], manual_recovery=True)
     followup = scheduler.begin_dispatch(identity, 'same-owner', resumed['lease_token'], resumed['revision'])
     assert followup['action'] == 'reuse-thread' and followup['thread_id'] == 'original-episode-chat'
     scheduler.reconcile_dispatch(identity, followup['dispatch_token'], thread_id='original-episode-chat')
@@ -467,3 +467,112 @@ def test_old_pending_v2_cannot_start_after_baseline_advanced(delivery):
     row = scheduler.get(late['job_id'])
     with pytest.raises(ValueError, match='baseline changed'):
         scheduler.reserve(row['id'], 'v2-owner', row['revision'])
+
+
+def test_automatic_same_owner_recovery_is_counted_before_host_and_limited(delivery):
+    db, scheduler, _, _ = delivery
+    identity, initial = begin(scheduler)
+    scheduler.reconcile_dispatch(identity, initial['dispatch_token'], thread_id='actual-fixture-chat')
+
+    def incident(turn):
+        scheduler.record_blocked(identity, 'actual-fixture-chat', ['synthetic system stop'],
+                                 owner_stopped=True, recovery_class='system', recovery_turn=turn)
+        row = scheduler.get(identity)
+        lease = scheduler.resume(identity, 'actual-fixture-chat', 'test-owner', row['revision'],
+                                 auto_recovery_turn=turn)
+        intent = scheduler.begin_dispatch(identity, 'test-owner', lease['lease_token'], lease['revision'])
+        marked = scheduler.mark_auto_recovery(identity, 'test-owner', intent['revision'], turn, intent['ticket'])
+        assert marked['automatic_recovery_recorded']
+        scheduler.reconcile_dispatch(identity, intent['dispatch_token'], thread_id='actual-fixture-chat')
+
+    incident('origin-turn-1')
+    incident('origin-turn-2')
+    scheduler.record_blocked(identity, 'actual-fixture-chat', ['third synthetic stop'],
+                             owner_stopped=True, recovery_class='system', recovery_turn='origin-turn-3')
+    row = scheduler.get(identity)
+    with pytest.raises(ValueError, match='limit reached'):
+        scheduler.resume(identity, 'actual-fixture-chat', 'test-owner', row['revision'],
+                         auto_recovery_turn='origin-turn-3')
+    # A fresh explicit manual restoration does not erase or increment the automatic ledger.
+    manual = scheduler.resume(identity, 'actual-fixture-chat', 'test-owner', row['revision'], manual_recovery=True)
+    assert manual['state'] == 'production'
+    events = db.rows("SELECT * FROM subtitle_delivery_events WHERE kind='owner-auto-recovery'")
+    assert len(events) == 2
+
+
+def test_unknown_host_result_consumes_attempt_and_duplicate_does_not_extend_it(delivery):
+    db, scheduler, _, now = delivery
+    from anime.subtitle_recovery import auto_recovery_usage
+    identity, initial = begin(scheduler)
+    scheduler.reconcile_dispatch(identity, initial['dispatch_token'], thread_id='actual-fixture-chat')
+    scheduler.record_blocked(identity, 'actual-fixture-chat', ['synthetic system stop'],
+                             owner_stopped=True, recovery_class='system', recovery_turn='origin-turn-unknown')
+    row = scheduler.get(identity)
+    lease = scheduler.resume(identity, 'actual-fixture-chat', 'test-owner', row['revision'],
+                             auto_recovery_turn='origin-turn-unknown')
+    intent = scheduler.begin_dispatch(identity, 'test-owner', lease['lease_token'], lease['revision'])
+    scheduler.mark_auto_recovery(identity, 'test-owner', intent['revision'], 'origin-turn-unknown', intent['ticket'])
+    with pytest.raises(ValueError, match='already has an automatic recovery intent'):
+        scheduler.mark_auto_recovery(identity, 'test-owner', intent['revision'], 'origin-turn-unknown', intent['ticket'])
+    scheduler.reconcile_dispatch(identity, intent['dispatch_token'])  # lost host response
+    assert auto_recovery_usage(db, 'actual-fixture-chat', now[0])['count'] == 1
+    assert len(db.rows("SELECT * FROM subtitle_delivery_events WHERE kind='owner-auto-recovery'")) == 1
+
+
+def test_every_stopped_resume_requires_an_explicit_mode(delivery):
+    db, scheduler, _, _ = delivery
+    identity, initial = begin(scheduler)
+    scheduler.reconcile_dispatch(identity, initial['dispatch_token'], thread_id='actual-fixture-chat')
+    scheduler.record_blocked(identity, 'actual-fixture-chat', ['legacy stopped state'], owner_stopped=True)
+    row = scheduler.get(identity)
+    with pytest.raises(ValueError, match='exact auto turn or explicit manual recovery'):
+        scheduler.resume(identity, 'actual-fixture-chat', 'test-owner', row['revision'])
+
+
+def test_origin_turn_replay_is_rejected_even_after_the_budget_window(delivery):
+    db, scheduler, _, now = delivery
+    from anime.subtitle_recovery import auto_recovery_usage, AUTO_RECOVERY_WINDOW
+    identity, initial = begin(scheduler)
+    scheduler.reconcile_dispatch(identity, initial['dispatch_token'], thread_id='actual-fixture-chat')
+    turn = 'origin-turn-never-replay'
+    scheduler.record_blocked(identity, 'actual-fixture-chat', ['synthetic system stop'],
+                             owner_stopped=True, recovery_class='system', recovery_turn=turn)
+    row = scheduler.get(identity)
+    lease = scheduler.resume(identity, 'actual-fixture-chat', 'test-owner', row['revision'],
+                             auto_recovery_turn=turn)
+    intent = scheduler.begin_dispatch(identity, 'test-owner', lease['lease_token'], lease['revision'])
+    scheduler.mark_auto_recovery(identity, 'test-owner', intent['revision'], turn, intent['ticket'])
+    scheduler.reconcile_dispatch(identity, intent['dispatch_token'], thread_id='actual-fixture-chat')
+    now[0] += AUTO_RECOVERY_WINDOW + 60
+    assert auto_recovery_usage(db, 'actual-fixture-chat', now[0])['count'] == 0
+    scheduler.record_blocked(identity, 'actual-fixture-chat', ['same origin must not replay'],
+                             owner_stopped=True, recovery_class='system', recovery_turn=turn)
+    row = scheduler.get(identity)
+    with pytest.raises(ValueError, match='already has an automatic recovery intent'):
+        scheduler.resume(identity, 'actual-fixture-chat', 'test-owner', row['revision'],
+                         auto_recovery_turn=turn)
+
+
+def test_explicit_user_stop_cannot_use_automatic_recovery(delivery):
+    db, scheduler, _, _ = delivery
+    identity, initial = begin(scheduler)
+    scheduler.reconcile_dispatch(identity, initial['dispatch_token'], thread_id='actual-fixture-chat')
+    scheduler.record_blocked(identity, 'actual-fixture-chat', ['user requested stop'], owner_stopped=True,
+                             user_stopped=True)
+    row = scheduler.get(identity)
+    with pytest.raises(ValueError, match='not authorized'):
+        scheduler.resume(identity, 'actual-fixture-chat', 'test-owner', row['revision'],
+                         auto_recovery_turn='origin-turn-user')
+    with pytest.raises(ValueError, match='explicit manual recovery'):
+        scheduler.resume(identity, 'actual-fixture-chat', 'test-owner', row['revision'])
+    manual = scheduler.resume(identity, 'actual-fixture-chat', 'test-owner', row['revision'], manual_recovery=True)
+    assert manual['payload']['user_stopped'] is True  # reservation must not erase the stop
+    rolled_back = scheduler.release(identity, 'test-owner', manual['revision'], manual['lease_token'])
+    assert rolled_back['state'] == 'blocked' and rolled_back['payload']['user_stopped'] is True
+    row = scheduler.get(identity)
+    lease = scheduler.resume(identity, 'actual-fixture-chat', 'test-owner', row['revision'], manual_recovery=True)
+    intent = scheduler.begin_dispatch(identity, 'test-owner', lease['lease_token'], lease['revision'])
+    confirmed = scheduler.reconcile_dispatch(identity, intent['dispatch_token'], thread_id='actual-fixture-chat')
+    assert confirmed['payload']['user_stopped'] is False
+    assert confirmed['payload']['owner_stopped_writing'] is False
+    assert not db.rows("SELECT * FROM subtitle_delivery_events WHERE kind='owner-auto-recovery'")

@@ -5,9 +5,11 @@ import requests
 from fastapi import FastAPI,Request,HTTPException
 from fastapi.responses import FileResponse,JSONResponse,RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from .db import Store,ROOT,DEFAULTS
 from .engine import Engine
 from .net import safe_error
+from .diagnostics import record_event
 from .download_policy import status as downloader_status
 from .sources import Catalog,parse_rss
 from .releases import episodes_of,Rejected,season_of,validate_title
@@ -26,7 +28,7 @@ def status_events(db):
     """Separate request failures and historical tasks from worker failures."""
     history=db.get('dandan_history_health',{}) or {}
     events=db.rows('''SELECT e.*,t.status task_status,t.error task_error FROM events e
-        LEFT JOIN tasks t ON e.scope='task:'||t.hash ORDER BY e.id DESC LIMIT 60''')
+        LEFT JOIN tasks t ON substr(e.scope,1,5)='task:' AND t.hash=substr(e.scope,6) ORDER BY e.id DESC LIMIT 60''')
     for event in events:
         task_status=event.pop('task_status');task_error=event.pop('task_error')
         if (event['level']=='error' and event['scope']=='dandan-history'
@@ -49,10 +51,19 @@ def status_events(db):
 
 def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
     db=db or Store();engine=engine or Engine(db);token=secrets.token_urlsafe(32);jobs=threading.Lock()
+    from .cover_cache import CoverCache,local_url,register_covers
+    covers=CoverCache(db.path.parent/'cache/covers')
     deployment=load_deployment()
     @contextlib.asynccontextmanager
     async def lifespan(app):
+        lifetime=contextlib.ExitStack()
         if start_worker:
+            # An idle connection keeps WAL open between short-lived requests.
+            # Finish the statement immediately so no read snapshot pins the WAL.
+            keeper=lifetime.enter_context(db.connect())
+            keeper.execute('SELECT count(*) FROM sqlite_schema').fetchone()
+            threading.Thread(target=engine.tracking_loop,daemon=True,name='tracking-inbox').start()
+            threading.Thread(target=covers.maintain,args=(db,engine.stop_event),daemon=True,name='cover-warmer').start()
             thread=threading.Thread(target=engine.run,daemon=True,name='anime-worker');thread.start()
             from .webplayer import maintain_danmu
             threading.Thread(target=maintain_danmu,args=(engine.stop_event,),daemon=True,name='danmu-supervisor').start()
@@ -62,11 +73,15 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
             threading.Thread(target=app.state.bangumi_sync.run,args=(engine.stop_event,),daemon=True,name='bangumi-sync').start()
             from .edge import maintain_https
             threading.Thread(target=maintain_https,args=(engine.stop_event,),daemon=True,name='https-edge').start()
-        yield
-        app.state.webplayer.audio.close()
-        app.state.webplayer.clips.close()
-        engine.stop_event.set();engine.wake.set()
+        try:yield
+        finally:
+            engine.stop_event.set();engine.wake.set()
+            if start_worker:engine.tracking_wake.set()
+            lifetime.close()
+            app.state.webplayer.audio.close()
+            app.state.webplayer.clips.close()
     app=FastAPI(lifespan=lifespan,docs_url=None,redoc_url=None);app.state.db=db;app.state.engine=engine
+    app.state.cover_cache=covers;register_covers(app,covers)
     from .source_review import register_source_review
     register_source_review(app,engine)
     from .subtitle_studio import register_subtitle_studio
@@ -93,7 +108,7 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
         public_asset=path in ('/login','/static/login.js','/static/tokens.css','/static/app.css','/static/theme.js','/static/icon.svg','/static/manifest.webmanifest')
         login=path=='/api/access/login'
         if lan and path=='/login':return RedirectResponse('/',status_code=303)
-        if not (local or lan) and not (public_asset or login) and not access.valid(request):
+        if not (local or lan) and not (public_asset or login) and not await run_in_threadpool(access.valid,request):
             if path.startswith('/api/'):return JSONResponse({'error':'请登录这台设备'},status_code=401)
             return RedirectResponse('/login',status_code=303)
         if not local and (path.startswith('/api/thunder/') or path.startswith('/api/player/') or path.endswith('/desktop')):
@@ -135,7 +150,8 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
     async def value_error(request,e):return JSONResponse({'error':str(e)[:400]},status_code=400)
     @app.exception_handler(Exception)
     async def unexpected(request,e):
-        db.event('api',safe_error(e),'error');return JSONResponse({'error':safe_error(e)},status_code=503)
+        await run_in_threadpool(record_event,db,'api',safe_error(e),'error',error=e)
+        return JSONResponse({'error':safe_error(e)},status_code=503)
     def show(sid):
         s=db.show(sid)
         if not s:raise HTTPException(404,'没有此条目')
@@ -155,48 +171,38 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
         if 'v' in request.query_params:return RedirectResponse('/manage',status_code=303)
         return FileResponse(ROOT/'static/manage.html')
     @app.get('/show/{sid}')
-    def show_page(sid:int):return FileResponse(ROOT/'static/show.html')
+    def show_page(sid:int):
+        image=db.one('SELECT image FROM shows WHERE id=?',(sid,))
+        cover=local_url(image['image']) if image else ''
+        return FileResponse(ROOT/'static/show.html',headers={'Link':f'<{cover}>; rel=preload; as=image'} if cover else None)
     @app.get('/season')
     def season_page():return FileResponse(ROOT/'static/season.html')
     @app.get('/library')
     def library_page():return FileResponse(ROOT/'static/library.html')
     app.mount('/static',StaticFiles(directory=ROOT/'static'),name='static')
     @app.get('/api/bootstrap')
-    def bootstrap(request:Request):return {'token':token,'settings':{k:db.get(k,v) for k,v in DEFAULTS.items()},'version':'2.0-ui','local':request.state.local,'quarters':catalog_quarters(),
-        'catalog_years':sorted({int(s['year']) for s in db.rows("SELECT DISTINCT substr(air_date,1,4) year FROM shows WHERE air_date GLOB '[0-9][0-9][0-9][0-9]-*'")}|{datetime.date.today().year},reverse=True)}
+    def bootstrap(request:Request):
+        with db.connect() as connection:
+            connection.execute('BEGIN')
+            marks=','.join('?' for _ in DEFAULTS)
+            settings={r['key']:json.loads(r['value']) for r in connection.execute(
+                f'SELECT key,value FROM kv WHERE key IN ({marks})',list(DEFAULTS))}
+            years={int(r['year']) for r in connection.execute("SELECT DISTINCT substr(air_date,1,4) year FROM shows WHERE air_date GLOB '[0-9][0-9][0-9][0-9]-*'")}
+        return {'token':token,'settings':{k:settings.get(k,v) for k,v in DEFAULTS.items()},'version':'2.0-ui','cover_cache_version':1,
+                'local':request.state.local,'quarters':catalog_quarters(),
+                'catalog_years':sorted(years|{datetime.date.today().year},reverse=True)}
     @app.get('/api/home')
     def home_summary():
-        import hashlib
-        data=db.rows("""SELECT e.show_id,e.episode,e.path,e.size,s.title,s.image,s.total,s.watched,s.state,
-            e.first_completed,e.hash FROM episodes e JOIN shows s ON s.id=e.show_id
-            WHERE e.status='complete' AND s.state NOT IN ('dropped','paused','completed')
-            AND NOT EXISTS(SELECT 1 FROM watches w WHERE w.show_id=e.show_id AND w.episode=e.episode AND w.finished=1)
-            ORDER BY e.first_completed DESC,e.show_id,e.episode""")
-        entries=[]
-        from .source_blacklist import media_filter
-        blocked=media_filter(db)
-        for row in data:
-            if blocked(row):continue
-            row.pop('hash',None)
-            p=Path(row.pop('path') or '')
-            try:
-                if not p.is_file() or p.stat().st_size!=row.pop('size'):continue
-            except OSError:continue
-            row['media_id']=hashlib.sha256(str(p).lower().encode()).hexdigest()[:32]
-            row['progress']=db.one('SELECT position,duration,last_played FROM web_progress WHERE media_id=?',(row['media_id'],))
-            entries.append(row)
-        # An actual unfinished playback comes before new unwatched episodes.
-        resume=[x for x in entries if x['progress'] and x['progress']['last_played'] and 0<x['progress']['position']<x['progress']['duration']-30]
-        resume.sort(key=lambda x:x['progress']['last_played'],reverse=True)
-        first={}
-        for x in entries:
-            if x['show_id'] not in first or x['episode']<first[x['show_id']]['episode']:first[x['show_id']]=x
-        return {'resume':resume[:8],'next':list(first.values())[:18],'unwatched':len(entries),
-                'watching':db.one("SELECT count(*) n FROM shows WHERE selected=1 AND state IN ('trial','watching')")['n']}
+        from .home_summary import home_summary as read_home_summary
+        return read_home_summary(db)
     @app.get('/api/health')
-    def health():return runtime_health(db)
+    def health():return runtime_health(db,library=engine.library)
     @app.get('/api/status')
     def status():
+        from .read_projection import read_projection
+        with read_projection(db.path) as snapshot_db:
+            return JSONResponse(status_payload(snapshot_db))
+    def status_payload(db):
         reviews=db.rows("""SELECT t.hash,t.show_id,t.title,t.status,t.error,t.updated,
             CASE WHEN t.provider='thunder' AND q.action='submit' AND q.committing=1
                 AND t.acknowledged=0 AND t.external_id IS NULL THEN 1 ELSE 0 END submission_uncertain
@@ -219,8 +225,7 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
             'schedule':{'poll_seconds':db.get('poll_seconds',180),'requested':db.get('check_requested',0),
                         'completed':db.get('check_completed',0),'started':db.get('check_started_at'),
                         'finished':db.get('check_finished_at')}}
-    @app.get('/api/shows')
-    def shows(quarter:str='',scope:str='catalog',q:str='',kind:str='series',year:int=0,include_unknown:bool=False):
+    def shows(quarter:str='',scope:str='catalog',q:str='',kind:str='series',year:int=0,include_unknown:bool=False,sid=None,*,viewing=False):
         from .discovery import KINDS,visible,platform_of
         if kind not in KINDS:raise ValueError('无效作品类型')
         if year and not 1900<=year<=2100:raise ValueError('无效年份')
@@ -234,8 +239,9 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
             clause+=' AND id IN (SELECT show_id FROM quarter_members WHERE kind=\'continuing\''+(' AND quarter=?' if quarter else '')+')'
             if quarter:args.append(quarter)
         if q:clause+=' AND (title LIKE ? OR original LIKE ?)';args+=['%'+q+'%','%'+q+'%']
+        if sid is not None:clause+=' AND id=?';args.append(sid)
         from .show_list import ShowListSnapshot
-        snapshot=ShowListSnapshot(db,clause,args,quarter,scope in ('home','history'))
+        snapshot=ShowListSnapshot(db,clause,args,quarter,scope in ('home','history'),viewing=viewing)
         data=snapshot.data
         if scope=='catalog':
             # Positive non-Japanese tags are excluded; uncertain entries remain visible and labelled.
@@ -251,7 +257,9 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
         for s in data:
             s['quarter_kind']=snapshot.memberships.get(s['id'],'new')
             s['quarters']=sorted(set(filter(None,[s['quarter'],*snapshot.quarters[s['id']]])))
-            s['tags']=json.loads(s['tags']);s['mapping']=json.loads(s['mapping']);s.pop('metadata')
+            s['mapping']=json.loads(s['mapping'])
+            if not viewing:
+                s['tags']=json.loads(s['tags']);s.pop('metadata')
             eps=snapshot.episodes[s['id']]
             s['downloaded']=sum(e['status']=='complete' for e in eps);s['downloading']=sum(e['status'] not in ('complete','held') for e in eps)
             times=[]
@@ -269,6 +277,21 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
                 s['airing_schedule_version']=1
         data.sort(key=lambda s:(0 if s['downloaded'] else 1,-s['download_updated'] if s['downloaded'] else 0,s['air_date'] or '9999',s['id']))
         return data
+    @app.get('/api/shows')
+    def shows_response(quarter:str='',scope:str='catalog',q:str='',kind:str='series',year:int=0,
+                       include_unknown:bool=False,viewing:bool=False):
+        started=time.perf_counter()
+        data=shows(quarter,scope,q,kind,year,include_unknown,viewing=viewing and scope in ('home','history'))
+        if viewing and scope in ('home','history'):
+            fields=('id','title','original','image','air_date','total','watched','state','selected','authorized',
+                    'quarter','quarters','mapping','eps','next','download_updated','downloaded',
+                    'downloading','unwatched','airing_schedule_version')
+            data=[{key:s[key] for key in fields} for s in data]
+        # These snapshots already contain JSON primitives. Encode once, keeping
+        # the internal list helper available to season discovery and enrollment.
+        response=JSONResponse(data)
+        response.headers['Server-Timing']=f'shows;dur={(time.perf_counter()-started)*1000:.1f}'
+        return response
     @app.get('/api/catalog/discover')
     def discover(q:str='',kind:str='all',year:int=0,offset:int=0,include_unknown:bool=False):
         from .discovery import discover as search_catalog
@@ -284,11 +307,11 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
         if sid not in snapshot.shows:raise HTTPException(404,'没有此条目')
         s=dict(snapshot.shows[sid]);s['mapping']=json.loads(s['mapping']);s['tags']=json.loads(s['tags']);s['metadata']=json.loads(s['metadata'])
         gaps=engine.gaps(sid,snapshot=snapshot)
-        return {'show':s,'episodes':snapshot.episodes[sid],
+        return JSONResponse({'show':s,'episodes':snapshot.episodes[sid],
             'watches':snapshot.watches,'sources':snapshot.sources,
             'candidates':snapshot.candidates[sid][:100],
             'gaps':gaps,'board':episode_board(db,engine,s,snapshot=snapshot,gaps=gaps),'airings':snapshot.airings[sid],
-            'source_review':engine.source_review.status(sid)}
+            'source_review':engine.source_review.status(sid)})
     @app.post('/api/catalog/sync')
     def sync(payload:dict):
         quarters=payload.get('quarters',catalog_quarters())
@@ -302,7 +325,11 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
     @app.post('/api/shows/{sid}/refresh')
     def refresh(sid:int):show(sid);return background(lambda:engine.catalog.details(sid))
     @app.post('/api/shows/{sid}/state')
-    def set_state(sid:int,payload:dict):engine.state(sid,payload['state']);return {'ok':True}
+    def set_state(sid:int,payload:dict):
+        result=engine.request_state(sid,payload.get('state'))
+        return JSONResponse({'ok':True,**result},status_code=202 if result['pending'] else 200)
+    @app.get('/api/shows/{sid}/state')
+    def tracking_state(sid:int):return engine.tracking_status(sid)
     @app.post('/api/shows/{sid}/unselect')
     def unselect(sid:int):
         # Undo for a fresh "想看": only a wish with no downloads, sources or authorization leaves the list.
@@ -310,7 +337,9 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
             s=show(sid)
             if s['state']!='wish' or s['authorized'] or db.one('SELECT 1 FROM tasks WHERE show_id=?',(sid,)) or db.one('SELECT 1 FROM watches WHERE show_id=?',(sid,)):
                 raise ValueError('这部作品已有记录，只能改状态')
-            db.execute('UPDATE shows SET selected=0 WHERE id=?',(sid,))
+            with db.connect() as c:
+                c.execute('UPDATE shows SET selected=0 WHERE id=?',(sid,))
+                c.execute('DELETE FROM tracking_requests WHERE show_id=?',(sid,))
         return {'ok':True}
     @app.post('/api/shows/{sid}/feedback')
     def feedback(sid:int,payload:dict):
@@ -459,6 +488,49 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
             db.event('show:'+str(sid),'用户'+('开启' if enable else '关闭')+'自动下载')
             engine.wake.set()
         return {'ok':True}
+    @app.post('/api/shows/{sid}/acquire-material')
+    def acquire_material(sid:int,p:dict):
+        # Explicit, authenticated material request. Automatic discovery keeps its
+        # normal Chinese-label and single-episode research rules.
+        from .native_indexes import candidate_mapping
+        candidate=db.one('''SELECT c.* FROM candidates c JOIN sources s ON s.id=c.source_id
+            WHERE c.id=? AND c.show_id=? AND s.enabled=1''',(p.get('candidate_id'),sid))
+        if not candidate:raise ValueError('不存在已登记的有效候选')
+        from .subtitle_reference_intake import reference_only
+        if reference_only(candidate,db):raise ValueError('该候选仅允许原逐集subtitle_reference入口取料')
+        episodes=validate_title(candidate['title'],candidate_mapping(db.mapping(sid),candidate),{},False)
+        if p.get('episodes')!=episodes:raise ValueError('须明确确认候选的完整季集范围')
+        from .viewing_workflow import production_wanted
+        if not production_wanted(db,sid) or any(not db.allowed(sid,ep) for ep in episodes):
+            raise ValueError('当前个人在追/季集授权无效')
+        if any(db.one('SELECT 1 FROM watches WHERE show_id=? AND episode=? AND finished=1',(sid,ep)) for ep in episodes):
+            raise ValueError('已看集保持，不新增原片获取')
+        expected=p.get('expected_hash')
+        if not isinstance(expected,str) or len(expected)!=40 or any(x not in '0123456789abcdef' for x in expected):
+            raise ValueError('须提供已核验种子hash')
+        existing=db.one('SELECT * FROM tasks WHERE hash=?',(expected,))
+        if existing:
+            if (existing['show_id']!=sid or candidate['hash']!=expected or
+                    sorted(int(ep) for ep in json.loads(existing['selection'])['selected'])!=episodes):
+                raise ValueError('已有hash归属或选集不同，保留原任务')
+            # Reconcile this exact existing request, including lost add replies;
+            # dispatch never re-adds an uncertain/acknowledged absent torrent.
+            if existing['status'] in ('intent','uncertain','downloading','held'):
+                engine.dispatch(existing)
+            return {'task':db.one('SELECT hash,status,error,acknowledged FROM tasks WHERE hash=?',(expected,)),
+                    'candidate':db.one('SELECT status,reason FROM candidates WHERE id=?',(candidate['id'],))}
+        from .releases import bdecode
+        data=engine.sources.torrent(candidate)
+        if bdecode(data)[0]!=expected:raise ValueError('候选种子发生变化')
+        # Reuse the exact verified bytes; a second fetch is neither needed nor a
+        # reason to create a second downloader/Engine.
+        from .native_indexes import clean_blocker
+        if clean_blocker(db,candidate):raise ValueError(clean_blocker(db,candidate))
+        db.event('show:'+str(sid),'用户明确获取字幕制作原片：'+','.join(map(str,episodes)))
+        engine.ingest(candidate,explicit_material=True,verified_torrent=data)
+        task=db.one('SELECT hash,status,error,acknowledged FROM tasks WHERE hash=? AND show_id=?',(expected,sid))
+        latest=db.one('SELECT status,reason FROM candidates WHERE id=?',(candidate['id'],))
+        return {'task':task,'candidate':latest}
     @app.post('/api/shows/{sid}/link-local')
     def link_local(sid:int,p:dict):
         show(sid);ep=int(p['episode']);path=str(p['path'])
@@ -523,8 +595,10 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
             elif k=='subtitle' and v in ('any_zh','chs','cht'):db.set(k,v)
             elif k=='groups' and isinstance(v,list) and len(v)<=30 and all(isinstance(x,str) and len(x)<=80 for x in v):db.set(k,v)
             elif k=='dandan_port' and isinstance(v,int) and 1<=v<=65535:db.set(k,v)
+            elif k=='qbit_auto_restore_enabled' and type(v) is bool:db.set(k,v)
             else:raise ValueError('设置值无效：'+k)
-        db.execute("UPDATE candidates SET status='discovered' WHERE status='rejected'")
+        if any(k!='qbit_auto_restore_enabled' for k in p):
+            db.execute("UPDATE candidates SET status='discovered' WHERE status='rejected'")
         engine.wake.set();return {'ok':True}
     from .season import install_season
     install_season(app,db,engine,shows,prepare,mapping)

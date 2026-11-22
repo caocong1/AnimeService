@@ -172,3 +172,97 @@ def test_cli_bind_dry_run_never_creates_tables(tmp_path):
     assert str(tmp_path) not in result.stdout
     with sqlite3.connect(path) as c:
         assert c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [('kv',)]
+
+
+def test_original_thunder_done_receipt_allows_binding_without_erasing_click_history(completed):
+    db, scheduler, media = completed
+    db.execute("UPDATE tasks SET provider='thunder',acknowledged=1,external_id=81 WHERE hash='task-42-1'")
+    db.execute("INSERT INTO thunder_queue(hash,action,state,committing,lease) VALUES('task-42-1','submit','done',1,'')")
+    assert bind_target(scheduler, 42, 1, media, dry_run=True)['would_bind']
+    assert db.one("SELECT committing FROM thunder_queue WHERE hash='task-42-1'")['committing'] == 1
+    db.set('thunder_dialog_hold_task-42-1', {'unconfirmed': True})
+    with pytest.raises(ValueError, match='reconciled task'):
+        bind_target(scheduler, 42, 1, media, dry_run=True)
+
+
+def owner_correction_fixture(completed):
+    from test_subtitle_delivery import begin
+    db, scheduler, media = completed
+    identity, intent = begin(scheduler)
+    scheduler.reconcile_dispatch(identity, intent['dispatch_token'], thread_id='episode-writer')
+    original = scheduler.readiness
+    def reassess(view, sid, ep, payload):
+        value = original(view, sid, ep, payload)
+        target = current_target(view, sid, ep)
+        return {**value, 'input_signature': 'corrected-' + target['fingerprint'],
+                'target_fingerprint': target['fingerprint'], 'clean_review_ready': False,
+                'reasons': ['needs_new_target_review']}
+    scheduler.readiness = reassess
+    return db, scheduler, media, scheduler.get(identity)
+
+
+def test_owner_correction_preserves_writer_and_history_without_claiming_new_qa(completed):
+    db, scheduler, media, before = owner_correction_fixture(completed)
+    protected = {t: db.rows('SELECT * FROM ' + t) for t in ('episodes','watches','tasks','subtitle_studio_jobs')}
+    kwargs = {'thread_id': 'episode-writer', 'expected_input': before['input_key']}
+    snapshot = rows_snapshot(db)
+    assert bind_target(scheduler,42,1,media,dry_run=True,**kwargs)['would_bind']
+    assert rows_snapshot(db) == snapshot
+    result = bind_target(scheduler,42,1,media,**kwargs)
+    after = scheduler.get(before['id'])
+    for field in ('thread_id','dispatch_state','dispatch_token','lease_owner','lease_token','lease_expires','accepted_build_id','state'):
+        assert after[field] == before[field]
+    assert result['input_key'] == after['input_key'] != before['input_key']
+    assert after['state'] == 'production' and not result['assessment']['ready']
+    assert after['payload']['target_corrections'][0]['previous_assessment'] == before['payload']['assessment']
+    assert all(db.rows('SELECT * FROM ' + t) == rows for t,rows in protected.items())
+    snapshot = rows_snapshot(db)
+    assert bind_target(scheduler,42,1,media,thread_id='episode-writer',expected_input=after['input_key'])['replayed']
+    assert rows_snapshot(db) == snapshot
+    with pytest.raises(ValueError,match='exact input'):
+        bind_target(scheduler,42,1,media,**kwargs)
+    assert len(db.rows("SELECT 1 FROM subtitle_delivery_events WHERE kind='owner-target-corrected'")) == 1
+
+
+@pytest.mark.parametrize('change', ['other_owner','old_input','unknown','committing','stopped','watched','lease','delivered','frozen','download_unknown'])
+def test_owner_correction_keeps_all_protections(completed, change):
+    db,scheduler,media,before = owner_correction_fixture(completed)
+    kwargs = {'thread_id':'episode-writer','expected_input':before['input_key']}
+    if change == 'other_owner': kwargs['thread_id'] = 'different-writer'
+    elif change == 'old_input': kwargs['expected_input'] = 'stale-input'
+    elif change in ('unknown','committing'):
+        db.execute('UPDATE subtitle_delivery_jobs SET dispatch_state=? WHERE id=?',(change,before['id']))
+    elif change == 'stopped':
+        scheduler.record_blocked(before['id'],'episode-writer',['fixture'],owner_stopped=True)
+    elif change == 'watched': db.execute('INSERT INTO watches(show_id,episode,finished) VALUES(42,1,1)')
+    elif change == 'lease': db.execute('UPDATE subtitle_delivery_jobs SET lease_expires=9999999999 WHERE id=?',(before['id'],))
+    elif change == 'delivered': db.set('subtitle_delivery_finished_42_1', {'release_id':'fixture-v0'})
+    elif change == 'frozen':
+        db.execute('CREATE TABLE subtitle_targets(id TEXT PRIMARY KEY,show_id INTEGER,episode INTEGER,season INTEGER,payload TEXT NOT NULL,created REAL)')
+        db.execute('CREATE TABLE subtitle_target_heads(show_id INTEGER,episode INTEGER,target_id TEXT NOT NULL,PRIMARY KEY(show_id,episode))')
+        db.execute("INSERT INTO subtitle_targets VALUES('t1',42,1,1,?,0)",(json.dumps({'target':{'fingerprint':'frozen'}}),))
+        db.execute("INSERT INTO subtitle_target_heads VALUES(42,1,'t1')")
+    elif change == 'download_unknown': db.execute("INSERT INTO thunder_queue(hash,state,lease,committing) VALUES('task-42-1','pending',0,1)")
+    snapshot = rows_snapshot(db)
+    with pytest.raises(ValueError): bind_target(scheduler,42,1,media,**kwargs)
+    assert rows_snapshot(db) == snapshot
+
+
+def test_owner_correction_rolls_back_event_failure_and_rechecks_owner_race(completed,monkeypatch):
+    db,scheduler,media,before = owner_correction_fixture(completed)
+    kwargs={'thread_id':'episode-writer','expected_input':before['input_key']}
+    original = scheduler._event
+    def fail(*args): raise RuntimeError('synthetic event failure')
+    monkeypatch.setattr(scheduler,'_event',fail)
+    snapshot = rows_snapshot(db)
+    with pytest.raises(RuntimeError): bind_target(scheduler,42,1,media,**kwargs)
+    assert rows_snapshot(db)==snapshot
+    monkeypatch.setattr(scheduler,'_event',original)
+    assess=scheduler.readiness
+    def race(*args):
+        db.execute('UPDATE subtitle_delivery_jobs SET thread_id=? WHERE id=?',('changed',before['id']))
+        return assess(*args)
+    scheduler.readiness=race
+    with pytest.raises(ValueError,match='scope changed'): bind_target(scheduler,42,1,media,**kwargs)
+    assert 'target' not in (db.get('subtitle_delivery_readiness_42_1') or {})
+    assert not db.rows("SELECT 1 FROM subtitle_delivery_events WHERE kind='owner-target-corrected'")

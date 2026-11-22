@@ -1,4 +1,4 @@
-"""Local audio-model observations; never subtitle acceptance or human listening.
+"""Local audio-model observations; not automatic subtitle acceptance.
 
 Only an isolated loopback Ollama instance and already installed Gemma audio
 models are permitted. No downloader, credentials, database or playback writes.
@@ -87,7 +87,7 @@ class LocalAudioReviewer:
         content=choices[0].get('message',{}).get('content')
         if not isinstance(content,str) or not content.strip():raise ValueError('Local audio model returned no review content')
         return {'schema_version':1,'status':'proposal_only','scope':'local_audio_model_observation_unaccepted',
-                'current_codex_listened':False,'human_listened':False,'subtitle_acceptance':False,
+                'current_codex_listened':False,'subtitle_acceptance':False,
                 'capability':capability,'audio':audio,'question':prompt,'observation':content,
                 'usage':response.get('usage',{}),'started_at_unix':started,'completed_at_unix':time.time(),
                 'elapsed_seconds':round(time.perf_counter()-clock,3),'input_protocol':'input_audio/wav',

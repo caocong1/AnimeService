@@ -38,12 +38,12 @@
     if (!unknown && s.region_confidence === '地区待核实') return false;
     return kind === 'all' || (kind === 'continuing' ? s.quarter_kind === 'continuing' : (kind === 'series' ? ['TV', 'WEB'] : { tv: ['TV'], web: ['WEB'], movie: ['剧场版'], ova: ['OVA'] }[kind] || []).includes(s.platform));
   }
-  function card(s) {
+  function card(s, index) {
     const local = source === 'local' || s.in_catalog;
     const link = local ? 'href="/show/' + s.id + '"' : 'href="https://bgm.tv/subject/' + s.id + '" data-detail="' + s.id + '"';
     const pick = s.selected ? '<span class="chip" data-state="' + esc(s.state) + '">' + icon('check') + esc(STATES[s.state] || s.state) + '</span>' : '<button class="btn" type="button" data-wish="' + s.id + '" aria-label="想看 ' + esc(s.title) + '">' + icon('plus') + '想看</button>';
     const facts = [s.platform || '类型待核实', s.air_date || '日期未定', s.total ? s.total + ' 集' : '', s.score ? '★ ' + s.score : '', s.quarter_kind === 'continuing' ? '跨季续播' : s.quarter_kind === 'early' ? '提前开播' : '', s.region_confidence === '地区待核实' ? '地区待核实' : ''].filter(Boolean).map(x => '<span>' + esc(x) + '</span>').join('');
-    return '<article class="poster"><a ' + link + '>' + cover(s.image, s.title) + '<span class="name">' + esc(s.title) + '</span></a><div class="facts">' + facts + '</div><div class="pick">' + pick + '</div></article>';
+    return '<article class="poster"><a ' + link + '>' + cover(s.image, s.title, '', '', {eager: index < 8}) + '<span class="name">' + esc(s.title) + '</span></a><div class="facts">' + facts + '</div><div class="pick">' + pick + '</div></article>';
   }
   function render() {
     controls(); const q = query.trim().toLowerCase();
@@ -97,7 +97,12 @@
     if (b.dataset.wish) return act(b, async () => {
       const sid = Number(b.dataset.wish), s = rows.find(x => x.id === sid);
       if (source === 'online' && !s.in_catalog) { await api('/catalog/import/' + sid, {}); s.in_catalog = true; }
-      await api('/shows/' + sid + '/state', { state: 'wish' }); Object.assign(s, { selected: 1, state: 'wish' }); render();
+      b.textContent = '正在保存…';
+      let saved;
+      try { saved = await saveTrackingState(sid, 'wish', () => { b.textContent = '等待后台确认…'; }); }
+      finally { b.textContent = '想看'; }
+      Object.assign(s, { selected: 1, state: saved }); render();
+      if (saved !== 'wish') { toast('当前状态为' + STATES[saved]); return; }
       toast('已加入想看：' + s.title + '；符合新番规则后会自动核验找源', { label: '撤销', run: () => act(null, async () => { await api('/shows/' + sid + '/unselect', {}); s.selected = 0; render(); }) });
     });
   });

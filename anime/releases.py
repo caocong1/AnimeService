@@ -19,7 +19,10 @@ def season_of(title):
     m=re.search(r'(?i)\b(\d)(?:st|nd|rd|th)\s+season',title)
     return int(m[1]) if m else None
 def episodes_of(title,offset=0):
-    if re.search(r'(?i)(?:\s-\s*|E|EP|第|\[)\d{1,3}\.\d',title):raise Rejected('小数集号需人工核对')
+    # A scene separator followed by a complete resolution token is not a
+    # fractional episode: S01E04.1080p must still identify episode 4. Keep
+    # rejecting numeric titles and real fractions (including .1080 without p).
+    if re.search(r'(?i)(?:\s-\s*|E|EP|第|\[)\d{1,3}\.(?!(?:360|480|576|720|1080|1440|2160|4320)[pi](?=[\W_]|$))\d',title):raise Rejected('小数集号需人工核对')
     if re.search(r'(?i)(?:\b(?:OVA|OAD|SP|NCOP|NCED|PV|Trailer)\b|特别篇|特別篇|总集篇|總集篇|剧场版|劇場版)',title):raise Rejected('特别篇/总集篇需单独核对')
     patterns=[r'(?i)S\d{1,2}E(\d{1,3})(?:\s*[-~]\s*(?:S\d{1,2})?E?(\d{1,3}))?',
               r'[\[【]\s*(\d{1,3})\s*\(\d{1,3}\)\s*[\]】]()',
@@ -116,7 +119,7 @@ def bdecode(data,include_padding=False):
         if isinstance(e,Rejected):raise
         raise Rejected('种子结构或编码不可核验') from None
 
-def select_files(files,mapping,wanted,title_eps):
+def select_files(files,mapping,wanted,title_eps,*,episode_titles=None):
     selected={};video_count=sum(PurePosixPath(f['name']).suffix.lower() in VIDEO for f in files)
     for f in files:
         if PurePosixPath(f['name']).suffix.lower() not in VIDEO:continue
@@ -130,7 +133,16 @@ def select_files(files,mapping,wanted,title_eps):
         if re.search(r'(?i)\b(?:OVA|OAD|SP|NCOP|NCED|PV|Trailer)\b|特别篇|特別篇',basename):raise Rejected('合集含特别篇或宣传视频，需单独核对')
         try:eps=mapped_episodes(basename,mapping)
         except Rejected as ex:
-            if str(ex)=='无法确定正片集号' and video_count==1 and len(title_eps)==1:eps=title_eps
+            # A numeric episode title can look like a fractional episode in scene
+            # filenames (S02E03.021.1080p). Only a separately supplied catalogue
+            # title and an explicit matching season/episode can disambiguate it.
+            match=re.fullmatch(r'(?i)(.+?S(\d{1,2})E(\d{1,3}))\.(\d+)\.(?:720|1080|2160)p\..+',basename)
+            titles=(episode_titles or {}).get(int(match[3]),[]) if match else []
+            if (str(ex)=='小数集号需人工核对' and match and
+                    int(match[2])==mapping.get('season',1) and
+                    any(norm(t)==match[4] for t in titles if isinstance(t,str))):
+                eps=mapped_episodes(match[1],mapping)
+            elif str(ex)=='无法确定正片集号' and video_count==1 and len(title_eps)==1:eps=title_eps
             else:raise Rejected('合集内有无法确定集号的视频')
         if len(eps)!=1:raise Rejected('一文件多集需人工核对')
         ep=eps[0]

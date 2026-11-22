@@ -1,6 +1,10 @@
+2026-10-22 无人工制作：执行 [中文字幕来源与无人工作业](SUBTITLE-CHINESE-SOURCES.md)。Codex 自动检索并核对同集熟肉软字幕/硬字幕 OCR；已有全片 OCR 直接校对与跨版对轴，不能因独立稿搜索失败而停止。字幕缺稿、待转写或待校对不转人工/用户介入；来源候选与实际可用主稿、ready/finished/accepted 分开，中文防漏及唯一 owner 等保护不变。本条覆盖下文旧人工前置。
+
 2026-10-15 用户最新更正：执行 [每集v0→v1双版本流程](SUBTITLE-TWO-PASS.md)。先上架v0观看版，紧接着由同一负责人完成v1精校细调；画面字、主动查找并制作OP/ED歌词、位置避让、必要动效及改写语义/时轴回查是每集v1必做项，不能为快整项省略。具体无解项留实际尝试和证据后归档，不卡几天。已看集保持原字幕，不自动回修。v0交付后不释放唯一writer，v1处理及输出完成才结束；保留两个观看入口。此条覆盖下文旧“首版即停止、只等新材料修订”安排，旧内容留作历史。
 
 # 字幕库：观看交付与实际制作进度（2026-10-14）
+
+2026-11-04当前契约：[整体一致性](PROJECT-CONSISTENCY.md)。制作进度来自只读`/api/subtitle-progress`，与字幕队列/详情共享工作状态及恢复解释；`work_summary`计入可看v0后的v1工作。用户/旧停止保护、缺料等待、工程受阻与实际制作分开。尚未播出的事实可展示，不放宽制作授权。
 
 用户明确要求由系统按新流程设计，而非沿用材料档案标签。页面主对象是“本集观看交付”，主列表仅有效在追范围的未看未交付集，以及真实已上架成品。其它个人状态和已看旧工作稿留在折叠历史档案，不删除、不重新授权。
 
@@ -10,7 +14,7 @@
 
 素材资源按当前同集实际task manifest/文件尺寸核完成、下载中、待提交/核查，跨hash去重并过滤黑名单/保真：原片候选（明确生肉/可关软字幕标注）与熟肉参考分开，标签不足显示类型待核。候选数量不证明全片洁净或正式冻结；真实中文字幕档案另列，简繁/同文不凑独立译者。
 
-`anime/subtitle_delivery_view.py`生成不含路径、令牌、owner ID的公开投影。CLI refresh/控制写入后更新static/subtitle-delivery-status.json；页面每分钟/重新显示时GET刷新，不重启现有服务。该文件按现有本机静态访问保护提供，Git忽略。负责人用`progress JOB --thread-id THREAD --stage writing|layout|rendering|checking|publishing [--done N --total M]`如实更新；当前确认owner、输入和生产状态守卫，未知/异owner不能改。输出配置可附delivery_job_id/delivery_thread_id自动回报encoding和checking。报阶段不改正文/default/观看/下载。
+`anime/subtitle_delivery_view.py`生成不含路径、令牌、owner ID的公开实时投影，单请求批量读取task manifest并重新核文件。CLI仍导出static/subtitle-delivery-status.json供旧服务器兼容，明确live=false；只有新API返回404时页面使用该历史快照，运行异常保留最近显示并提示，不把旧快照当实时。页面每分钟/重新显示/聚焦时刷新，成品、制作进度、折叠历史独立渲染；默认用服务器批量验证成品ID/SHA/季集及文件可用性，不逐条HEAD。负责人用`progress JOB --thread-id THREAD --stage writing|layout|rendering|checking|publishing [--done N --total M]`如实更新；当前确认owner、输入和生产状态守卫，未知/异owner不能改。输出配置可附delivery_job_id/delivery_thread_id自动回报encoding和checking。报阶段不改正文/default/观看/下载。
 
 进度失联/过期显示提示，不把档案推测成新生产；成品索引独立读取，制作视图不可用时仍可播放旧成品。筛选/展开保持，全部操作为只读浏览。验证：.design/subtitle-library/delivery-first/contract.md、verification.json；Python临时DB/FakeQbit与JS模型、实际headless桌面/390px三主题深浅均覆盖，不使用Computer Use。
 
@@ -37,7 +41,7 @@
 
 成品上架后，追番首页、全部追番和作品分集页也必须读取 `static/finished-media/index.json`，不能只凭 `episodes` 下载表把已交付集显示为缺集。`FinishedReleases.applyBoard/applyList`按作品ID、当前季号及本地集号合并只读观看投影，保留已看，更新可播放/待看/下一集；v1精校细调优先，v0首版可单独选择。入口统一使用普通追番放映室 /watch?release=不可变ID，不回填或覆盖原视频/下载/default/正式accepted。
 
-页面读取清单后用最多4路并发HEAD核验MP4存在、非空、类型正确；索引与核验共用8秒上限。失效版本不能新增播放按钮；v1失效且v0实存时可播放v0。独立成品不继承原片的续播位置。已有页面刷新加载，新成品在下一次读取时自动出现，无需重启服务。失败读取提示并保留原下载观看入口。
+页面读取清单时并发取得服务端批量核验结果，按不可变ID、视频SHA、作品、季号和本地集号匹配真实文件可用性；仅旧服务器接口404时兼容最多4路并发HEAD，不把逐成品探测放回正常打开流程。索引与核验共用8秒上限。失效版本不能新增播放按钮；v1失效且v0实存时可播放v0。独立成品不继承原片的续播位置。已有页面刷新加载，新成品在下一次读取时自动出现，无需重启服务。失败读取提示并保留原下载观看入口。
 
 验证：`node --test tests/finished-releases.test.cjs tests/airing-schedule.test.cjs tests/following-pagination.test.cjs`；真实只读浏览器检查 `scripts/verify_finished_viewing.cjs`，证据 `data/finished-viewing-repair-20261015/`。
 

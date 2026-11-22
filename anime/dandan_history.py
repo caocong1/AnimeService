@@ -29,9 +29,13 @@ def number(value):
 class DandanHistory:
     def __init__(self,db):
         self.db=db;self.player=WebPlayer(db);self.lock=threading.Lock();self._source_signature=None;self._source_data=None
-        db.execute('''CREATE TABLE IF NOT EXISTS dandan_history(
-            media_id TEXT PRIMARY KEY,show_id INTEGER,episode INTEGER,name TEXT,title TEXT,
-            last_played REAL,position REAL,duration REAL,source_watched REAL,updated REAL)''')
+        with db.connect() as c:
+            c.executescript('''CREATE TABLE IF NOT EXISTS dandan_history(
+                media_id TEXT PRIMARY KEY,show_id INTEGER,episode INTEGER,name TEXT,title TEXT,
+                last_played REAL,position REAL,duration REAL,source_watched REAL,updated REAL);
+            CREATE TABLE IF NOT EXISTS dandan_history_links(
+                media_id TEXT PRIMARY KEY,show_id INTEGER NOT NULL,episode INTEGER NOT NULL,
+                source_watched REAL NOT NULL,created REAL NOT NULL)''')
 
     def extract(self):
         root=Path(self.db.get('dandan_exe')).parent
@@ -114,6 +118,14 @@ class DandanHistory:
                 if watched and m.get('show_id') and m.get('episode'):
                     key=(m['show_id'],m['episode'])
                     watch_records[key]=max(watched,watch_records.get(key,0))
+            for link in c.execute('SELECT * FROM dandan_history_links').fetchall():
+                mid = link['media_id']
+                if not link['source_watched']:
+                    continue  # A manual association never manufactures a watched flag.
+                c.execute('UPDATE dandan_history SET show_id=?,episode=?,source_watched=? WHERE media_id=?',
+                          (link['show_id'], link['episode'], link['source_watched'], mid))
+                key = (link['show_id'], link['episode'])
+                watch_records[key] = max(link['source_watched'], watch_records.get(key, 0))
             for (sid,ep),watched in watch_records.items():
                 c.execute('''INSERT INTO watches(show_id,episode,finished,method,updated)
                     VALUES(?,?,1,'dandan',?) ON CONFLICT(show_id,episode) DO UPDATE SET
@@ -156,6 +168,56 @@ class DandanHistory:
     def run(self,stop):
         while not stop.is_set():self.sync();stop.wait(60)
 
+    def link(self, media_id, sid, episode, data=None):
+        """Persist an exact watched-history association, including unlisted files.
+
+        This links history only; it never grants download/subtitle authorization.
+        LastPlay alone is insufficient: an explicit player watched flag is required.
+        """
+        if not isinstance(media_id, str) or not media_id.strip():
+            raise ValueError('需要准确的播放器历史记录')
+        show = self.db.show(sid)
+        if not show or not show['selected']:
+            raise ValueError('历史关联的作品未选入个人列表')
+        if type(episode) is not int or not 1 <= episode <= 999:
+            raise ValueError('历史关联集数超界')
+        airings = self.db.local_airings(sid)
+        if airings and episode not in {r['episode'] for r in airings}:
+            raise ValueError('历史关联与当前季集映射不符')
+        row = self.db.one('SELECT * FROM dandan_history WHERE media_id=?', (media_id,))
+        watched = row['source_watched'] if row else None
+        name = row['name'] if row else ''
+        title = row['title'] if row else show['title']
+        if watched is None:
+            data = data or self._source_data
+            if not isinstance(data, dict):
+                raise ValueError('播放器历史尚无明确已看标记')
+            seen = {}
+            for item in data.get('seen', []):
+                seen[str(item.get('episode_id', ''))] = timestamp(item.get('watched'))
+            for item in data.get('files', []):
+                path = item.get('path') or ''
+                key = hashlib.sha256(path.lower().encode()).hexdigest()[:32]
+                if key != media_id:
+                    continue
+                watched = seen.get(str(item.get('episode_id', '')))
+                name = Path(path).name
+                title = show['title']
+                break
+        if not watched:
+            raise ValueError('播放器历史尚无明确已看标记')
+        with self.db.gate, self.db.connect() as c:
+            existing = c.execute('SELECT show_id,episode FROM dandan_history_links WHERE media_id=?', (media_id,)).fetchone()
+            if existing and (existing['show_id'], existing['episode']) != (sid, episode):
+                raise ValueError('该历史已关联其它作品或集数，先人工核对')
+            c.execute('INSERT INTO dandan_history_links(media_id,show_id,episode,source_watched,created) VALUES(?,?,?,?,?)',
+                      (media_id, sid, episode, watched, time.time()))
+            c.execute('''INSERT INTO dandan_history(media_id,show_id,episode,name,title,source_watched,updated)
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT(media_id) DO UPDATE SET show_id=excluded.show_id,
+                episode=excluded.episode,source_watched=excluded.source_watched,updated=excluded.updated''',
+                      (media_id, sid, episode, name, title, watched, time.time()))
+        return {'ok': True, 'media_id': media_id, 'show_id': sid, 'episode': episode, 'source_watched': watched}
+
     def confirm(self,ids):
         if not isinstance(ids,list) or not 1<=len(ids)<=500 or any(not isinstance(i,str) for i in ids):
             raise ValueError('请选择1–500条已经看完的记录')
@@ -195,5 +257,10 @@ def register_history(app,db):
         return {'status':db.get('dandan_history_health'),'total':total,'items':rows}
     @app.post('/api/history/dandan/sync')
     def sync():return history.sync()
+    @app.post('/api/history/dandan/link')
+    def link(p:dict):
+        linked = history.link(p.get('media_id'), p.get('show_id'), p.get('episode'))
+        result = history.sync()
+        return {'ok': True, 'link': linked, 'sync': result}
     @app.post('/api/history/dandan/confirm')
     def confirm(p:dict):return history.confirm(p.get('media_ids'))

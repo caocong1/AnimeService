@@ -1,26 +1,22 @@
-import json,threading,subprocess,time
+import json,threading,socket
 from pathlib import Path
 import requests
 from .net import NetworkError
 
 CATEGORY='AnimeService'; TAG='AnimeService-v1'
+class QbitUnavailable(NetworkError):
+    """Local dependency failure; never evidence that a torrent is absent."""
+    code='qbit_unavailable'
+
 class Qbit:
     def __init__(self,credential='D:/MediaService/config/downloader-account.json'):
         self.credential=Path(credential);self.session=requests.Session();self.base='http://127.0.0.1:4870/api/v2/'
+        # The fixed loopback API must never inherit outbound proxy/netrc settings.
+        self.session.trust_env=False
         self.session.headers['Referer']='http://127.0.0.1:4870';self.lock=threading.RLock()
-        self.last_launch=0
     def ensure_running(self):
-        import psutil
-        if time.time()-self.last_launch<60:return
-        for p in psutil.process_iter(['name','cmdline']):
-            if (p.info['name'] or '').lower()=='qbittorrent.exe':
-                cmd=' '.join(p.info['cmdline'] or []).replace('\\','/').lower()
-                if '--profile=d:/mediaservice/qbit-profile' in cmd:return
-        exe=Path('C:/Program Files/qBittorrent/qbittorrent.exe')
-        if not exe.is_file():raise NetworkError('现有qBittorrent未安装在预期路径')
-        si=subprocess.STARTUPINFO();si.dwFlags|=subprocess.STARTF_USESHOWWINDOW;si.wShowWindow=0
-        subprocess.Popen([str(exe),'--profile=D:\\MediaService\\qbit-profile','--webui-port=4870'],startupinfo=si)
-        self.last_launch=time.time()
+        from .qbit_recovery import restore_original
+        return restore_original(Path(__file__).resolve().parents[1]/'data')
     def call(self,endpoint,method='GET',**kwargs):
         with self.lock:
             for attempt in range(2):
@@ -34,21 +30,41 @@ class Qbit:
                     if not r.ok:raise NetworkError(f'qBittorrent {endpoint} HTTP {r.status_code}')
                     try:return r.json()
                     except ValueError:return r.text
-                except requests.RequestException:raise NetworkError('qBittorrent请求超时或连接不可达') from None
+                except requests.Timeout:
+                    raise QbitUnavailable('qBittorrent本机接口响应超时；保留原任务，后台继续对账') from None
+                except requests.ConnectionError:
+                    try:
+                        with socket.create_connection(('127.0.0.1',4870),timeout=1):pass
+                    except OSError:
+                        raise QbitUnavailable('qBittorrent本机接口未监听（127.0.0.1:4870）；需恢复原下载器，任务与回执已保留') from None
+                    raise QbitUnavailable('qBittorrent本机接口连接中断；保留原任务，后台继续对账') from None
+                except requests.RequestException:
+                    raise QbitUnavailable('qBittorrent本机接口请求失败；保留原任务，后台继续对账') from None
             raise NetworkError('qBittorrent认证失败')
     def info(self,hash=None):return self.call('torrents/info',params={'hashes':hash} if hash else {})
     def files(self,h):return self.call('torrents/files',params={'hash':h})
     def owned(self,t):return t.get('category')==CATEGORY and TAG in [x.strip() for x in t.get('tags','').split(',')]
-    def check_storage(self):
+    def check_storage(self, savepath=None):
+        from .download_storage import download_roots, torrent_staging
         p=self.call('app/preferences')
+        if torrent_staging(savepath or download_roots()[0]):
+            # Explicit per-torrent paths override global preferences. The real
+            # torrent path must still match before any selected files start.
+            return
         if not p.get('temp_path_enabled') or p.get('temp_path','').replace('\\','/').rstrip('/').lower()!='d:/mediadownloads/incomplete':
             raise NetworkError('下载器未完成目录与约定不一致，未修改全局设置')
     def add(self,h,data,savepath):
-        self.check_storage()
+        self.check_storage(savepath)
         categories=self.call('torrents/categories')
-        if CATEGORY not in categories:self.call('torrents/createCategory','POST',data={'category':CATEGORY,'savePath':'D:/MediaLibrary/Anime'})
+        from .download_storage import download_roots, torrent_staging
+        stage = torrent_staging(savepath)
+        options = {}
+        if stage:
+            stage.mkdir(parents=True,exist_ok=True)
+            options = {'useDownloadPath':'true','downloadPath':str(stage)}
+        if CATEGORY not in categories:self.call('torrents/createCategory','POST',data={'category':CATEGORY,'savePath':str(download_roots()[0])})
         return self.call('torrents/add','POST',files={'torrents':(h+'.torrent',data,'application/x-bittorrent')},data={
-            'savepath':savepath,'category':CATEGORY,'tags':TAG,'stopped':'true','paused':'true','autoTMM':'false',
+            **options,'savepath':savepath,'category':CATEGORY,'tags':TAG,'stopped':'true','paused':'true','autoTMM':'false',
             'contentLayout':'Original','ratioLimit':'1','seedingTimeLimit':'60'})
     def priorities(self,h,ids,priority):
         if ids:self.call('torrents/filePrio','POST',data={'hash':h,'id':'|'.join(str(i) for i in ids),'priority':priority})

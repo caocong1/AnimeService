@@ -77,8 +77,8 @@ test('healthSummary renders the cheap /api/health answer with the same prioritie
   assert.equal(JSON.stringify(summary({ heartbeat: { age: null }, problems: {} })), JSON.stringify({ state: 'down', text: '后台未响应', title: '' }));  // objects cross the vm boundary
   assert.equal(summary({ heartbeat: { age: 300 }, problems: {} }).state, 'down');
   assert.equal(summary({ heartbeat: { age: 5 }, problems: {} }).state, 'ok');
-  assert.equal(summary({ heartbeat: { age: 5 }, problems: { reviews: 2 } }).text, '有待核查');
-  assert.equal(summary({ heartbeat: { age: 5 }, problems: { reviews: 2, error: { scope: 'task:x' } } }).text, '有错误');
+  assert.equal(summary({ heartbeat: { age: 5 }, problems: { reviews: 2 } }).text, '正在确认下载');
+  assert.equal(summary({ heartbeat: { age: 5 }, problems: { reviews: 2, error: { scope: 'task:x' } } }).text, '服务暂时异常');
   assert.equal(summary({ heartbeat: { age: 5 }, problems: { blocker: '迅雷优先', error: { scope: 'x' } } }).text, '下载受阻');
   assert.match(summary({ heartbeat: { age: 5 }, problems: {} }).title, /^心跳 /);
 });

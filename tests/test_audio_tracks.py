@@ -106,7 +106,7 @@ def test_cache_space_and_video_codec_gate_before_process(audio, monkeypatch):
         service.prepare(item, 7)
 
 
-@pytest.mark.parametrize('index,codec,bitrate', [(7, 'copy', None), (8, 'aac', '512k')])
+@pytest.mark.parametrize('index,codec,bitrate', [(7, 'copy', None), (8, 'aac', '256k')])
 def test_build_maps_only_requested_audio_and_copies_video(audio, monkeypatch, index, codec, bitrate):
     service, item, _, _ = audio
     key, data = service.identity(item, index)
@@ -126,8 +126,27 @@ def test_build_maps_only_requested_audio_and_copies_video(audio, monkeypatch, in
     assert '-tag:v' in args and 'hvc1' in args
     if bitrate:
         assert args[args.index('-b:a') + 1] == bitrate
+        assert args[args.index('-ac') + 1] == '2'
+    else:
+        assert '-ac' not in args
     assert service.file(item, index).read_bytes() == b'generated cache'
     assert Path(item['path']).read_bytes() == b'fixture'
+
+
+def test_multichannel_aac_also_uses_stereo_profile(audio, monkeypatch):
+    service, item, _, streams = audio
+    streams['streams'][4]['codec_name'] = 'aac'
+    test_build_maps_only_requested_audio_and_copies_video(audio, monkeypatch, 8, 'aac', '256k')
+
+
+def test_legacy_multichannel_cache_is_not_reused(audio):
+    service, item, _, _ = audio
+    data = service.probe(item)
+    service.cache.mkdir(parents=True)
+    old = service.cache / f'{data["fingerprint"]}-8.mp4'
+    old.write_bytes(b'legacy 5.1 cache')
+    assert service.status(item, 8)['state'] == 'idle'
+    assert old.read_bytes() == b'legacy 5.1 cache'
 
 
 def test_failure_removes_partial_and_hides_tool_error(audio, monkeypatch):

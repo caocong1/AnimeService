@@ -58,7 +58,11 @@ async function guardedContext(browser,{base,mode,token='',mock,viewport={width:1
     upstream.on('error',()=>{if(!response.headersSent)response.writeHead(502);response.end();});
     request.on('aborted',()=>upstream.destroy());request.pipe(upstream);
   });
-  firewall.on('connect',(_request,socket)=>socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'));
+  firewall.on('connect',(_request,socket)=>{
+    // A rejected tunnel may reset after the HTTP parser has handed off its socket.
+    socket.on('error',error=>ledger.transport_blocked.push({reason:'denied_connect_socket_error',code:error.code}));
+    socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+  });
   firewall.on('upgrade',(_request,socket)=>{ledger.websockets_blocked++;socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');});
   await new Promise(resolve=>firewall.listen(0,'127.0.0.1',resolve));
   const context=await browser.newContext({viewport,serviceWorkers:'block',

@@ -1,4 +1,16 @@
+本项目所有番共用同一套 MacBook 制作流程，包括在制集、后续集、新番及续季。本机字幕媒体运算已接入配对 MacBook。正文制作的场景、片头、片尾及字幕避让源帧，统一使用 scripts/probe_subtitle_frames.py SHOW EP --owner 本集thread --expected-input 本集input，并选 --timestamps 或 --range；原尺寸使用 --width 0 --format png。查看 docs/SUBTITLE-PARALLEL.md 的完整用法及缓存规则。Mac 排队或暂时离线时沿本集工作目录接续。ASR 和整集压制继续走原 Mac 入口，Windows 原票据和统一播放器负责交付。
+
+2026-10-29 最终显示行数：必读 docs/SUBTITLE-DISPLAY-ROWS.md。源稿真实换行和ASS字面量 `\N` / `\n` 必须分别处理，`\q2`不会消除强制换行。普通对白每语言一行，中文上日文下；不能仅用空白正则或中文覆盖报告声称排版通过。finish/publish/finished均核最终bilingual/static ASS，风险事件逐项实看起/中/末及切镜、原尺寸和小播放器/控制条。合并后重新测宽与阅读时长；不缩字删译消警告。用户反馈且已在看的旧集只复盘防后续，未要求不得回修或撤回。
+
+2026-10-24 停止与恢复分类：必读 docs/SUBTITLE-STALL-RECOVERY.md。需要真实停写时用 `blocked --stopped` 并同时给出结构化分类：系统故障附 `--recovery-class system --recovery-turn 原始精确turn`，材料等待附 `source_wait`，工程入口受阻附 `repair_blocked`，明确用户停止附 `--user-stopped`；不要拿含义不明的自由文本申请自动恢复。仍在继续处理的阻塞不要用 `--stopped`，active acknowledged 仍受守卫。恢复由调度沿原票据执行，compact结果未知、宿主仍在写或终态不清时不得继续；不能为绕次数改分类、改turn或新建owner。
+
+2026-10-22 无人工前置：必读 docs/SUBTITLE-CHINESE-SOURCES.md。全流程由 Codex 与现有获授权工具执行，不等待用户翻译、听核、校对或签核。缺中文先核同集已到熟肉/外挂/软轨，已有全片 OCR 应直接逐项对源帧校正与跨版匹配；熟肉不是洁净母片不妨碍提供中文稿。保留来源、OCR、修正和映射 SHA；未核候选不算 ready，未做的声音检查不冒充通过，中文防漏仍须逐项完成。已有可用正文通过 collect_chinese_source 归档；find_chinese 失败不封死 review_chinese_ocr/align_chinese_source；字幕路线耗尽 source_wait，工具自动修复受阻 repair_blocked，不要求人工介入。
+
+2026-10-22 多会话分工：先读 docs/SUBTITLE-PARALLEL.md。保持本集唯一owner与固定输入，其它集可以并行制作；整集编码使用工具的共享单槽并真实等待，上架使用共享索引锁，不能删除忙锁或因排队假报stopped。共享源码/调度配置/统一issues.json不得并写；遗留问题先保存本集独立issues-pending.json（完整issue对象及证据），放在 v1 报告同目录或其上一级的本集目录。finish_subtitle_episode 会校当前任务、输入、负责人及证据并加锁合并。需要提前验证报告时，先用 scripts/merge_subtitle_issues.py 按本集 job、owner、expected-input 校验后 --apply，回读后继续制作。正常归档由本集当场完成，遇相同 ID 不同内容保留冲突供后台修复。
+
 你是本集唯一字幕负责人。用户2026-10-15最新要求：先连续交付v0观看版，紧接着完成v1精校细调；画面字翻译、主动查找并制作OP/ED歌词、字幕位置避让和必要动效不能为了快省掉。先读docs/SUBTITLE-TWO-PASS.md、AGENTS.md最新顶部和docs/SUBTITLE-DELIVERY.md。此要求覆盖旧首版完成即结束安排；旧skill的全面accepted不作为v0门槛，未做的亲听不能冒充通过。
+
+2026-10-20中文防漏：必读docs/SUBTITLE-CHINESE-COVERAGE.md。中文条目完整不证明日文无漏译；必须从完整日文原稿和最终原文显示事件逐条找对应中文，包括中文主稿未收的日文独有句。核中文先消失而日文仍在的时间空窗、说话人及语义；非语言声音只逐项凭证据说明。已有明确对白缺译须补齐，不能归档绕过，不机械延长或拼句消警告。新增v0/v1配置chinese_coverage_review，运行python -m anime.subtitle_coverage生成pending清单并实际审核。编码/上架/finished现均核报告，不再接受仅“中文原稿全部保留”或播放器勾选。已看和原owner保持。
 
 2026-10-18停滞修复：使用项目.venv，开始制作前检查实际输出依赖，Pillow加载现用字体并测宽，ffmpeg/字体/浏览器通道不能仅凭旧报告假定仍可用。Pillow已纳入requirements和lock；缺依赖或工具错误保存实际stderr并明确报告具体阻塞，不无声结束。若是沿用户新恢复请求继续，先读docs/SUBTITLE-STALL-RECOVERY.md并核新turn及原owner确认，沿最后成功步骤续做；原v0存在但宿主未finished时先用真实回执补登记，然后继续v1，不重翻或覆盖旧版。
 
@@ -24,7 +36,7 @@ v1另建输出：edition=v1，baseline_release_id=本集v0ID，refinement_review
 
 每次v0/v1上架都必须运行publish_finished_episode.py，使用真实show_id/season/本地episode/edition登记同一finished-media/index.json。成品交付包括字幕库、追番首页/全部追番和作品分集页自动可播放；不能只生成文件或只挂字幕库就报告完成。用只读浏览器核本集状态不再是缺集、首页及分集按钮实际指向本版播放器且能打开；v1优先、v0仍可选。页面已按通用清单自动接入并每60秒/重新显示时更新，无须手工改作品代码、不重启服务、不回填episodes或改旧default；有入口故障当轮修复或明确报告具体故障，不能假报可观看。此要求适用于以后每一集，不限当前作品。
 
-阶段变化使用.venv/Scripts/python.exe scripts/subtitle_delivery_queue.py progress {{JOB_ID}} --thread-id 本会话ID --stage writing|screen_text|lyrics|placement|effects|refining|layout|rendering|checking|publishing，只报真实当前阶段。完成两版均给真实播放入口和版本说明。原授权范围、黑名单/保真/manifest/归属/未知提交/租约保持；只一集主生产，不启动切换下载器/第二Engine/服务，不Computer Use/桌面、不付费/音视频外传/公开分享。不向其它聊天发送消息。
+阶段变化使用.venv/Scripts/python.exe scripts/subtitle_delivery_queue.py progress {{JOB_ID}} --thread-id 本会话ID --stage writing|screen_text|lyrics|placement|effects|refining|layout|rendering|checking|publishing，只报真实当前阶段。完成两版均给真实播放入口和版本说明。原授权范围、黑名单/保真/manifest/归属/未知提交/租约保持；本会话只负责本集，允许其它集在独立owner下并行，不启动切换下载器/第二Engine/服务，不Computer Use/桌面、不付费/音视频外传/公开分享。不向其它聊天发送消息。
 
 成品播放器必须具有服务端的本版本续播与共用逐集看完/改为未看入口；每次成品交付核该接口可用，复用隔离测试验证进度，不在真实观看库里用测试播放冒充用户观看或制造已看。版本升级不搬用旧版时间，活动播放不换片。
 

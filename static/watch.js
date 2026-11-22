@@ -448,7 +448,7 @@
   // Dolby/DTS/FLAC can leave a native video playing silently without firing error.
   // The existing cache keeps video packets and converts these audio codecs to AAC.
   function needsCompatibleAudio(track) {
-    return !!track?.codec && !['aac', 'mp3'].includes(track.codec);
+    return !!track?.codec && (!['aac', 'mp3'].includes(track.codec) || track.channels > 2);
   }
   function showAudioControls() {
     return audioTracks.length > 1 || audioTracks.some(needsCompatibleAudio);
@@ -556,7 +556,7 @@
       screenState('');
       await changeSubtitle().catch(() => {}); await applyDanmu().catch(() => {});
       note.textContent = value && needsCompatibleAudio(audioTracks.find(t => String(t.index) === value))
-        ? '兼容音频 AAC · 画面保持原码流' : '';
+        ? '兼容音频 AAC 双声道 · 画面保持原码流' : '';
       if (!snapshot.paused) {
         try { await art.play(); } catch (_) { note.textContent = '音轨已切换，点击播放继续'; }
       }
@@ -595,7 +595,7 @@
     const value = $('#subtitle').value, note = $('#sub-note');
     if (!art || releaseId) return;
     subtitleRenderer ??= new SubtitleRenderer(art, note, `/api/web/media/${id}/subtitle-fonts`, ({status,track}) => {
-      const source = track?.origin === 'authored' ? '系统自制' : track?.origin === 'embedded' ? '视频自带 · 内嵌软字幕' : track?.origin === 'sidecar' ? '发布包外挂字幕' : '来源未核实';
+      const source = track?.origin === 'authored' ? '系统自制' : track?.origin === 'embedded' ? '视频自带 · 内嵌软字幕' : track?.origin === 'sidecar' ? '发布包外挂字幕' : track?.origin === 'selected' ? '已选中文字幕' : '来源未核实';
       const label = track?.label.replace(/^系统自制\s*·\s*/, '');
       const file = track?.origin === 'embedded' ? '轨道 ' + track.index : track?.file_name;
       $('#playing-subtitle').textContent = status === 'off' ? '可关闭字幕已关闭；画面硬字幕不受此开关影响' : `${source} · ${label}${file ? ' · ' + file : ''}${track.build_id ? ' · 版本 ' + track.build_id : ''} · ${{loading:'加载中',active:'正在使用',error:'加载失败'}[status]}`;
@@ -680,6 +680,7 @@
   /* ---------- danmu list and blocking ---------- */
 
   const ROW = 32;
+  let listQuery = '', listMatches = [], listMatch = -1;
   const isBlocked = c => !!c.user && blocked.has(c.user);
   function showDanmu(d) {
     if (isBlocked(d)) return false;
@@ -698,21 +699,72 @@
     return null;
   }
   function refreshDanmuList() {
+    const previous = listRows[listMatches[listMatch]];
     listRows = comments.filter(c => !isBlocked(c));
     $('#danmu-list-space').style.height = `${listRows.length * ROW}px`;
     $('#danmu-list-count').textContent = listRows.length || '';
+    findListMatches(previous);
+  }
+  function findListMatches(previous) {
+    listQuery = $('#danmu-list-query').value.trim().toLowerCase();
+    listMatches = [];
+    if (listQuery) listRows.forEach((c, i) => { if (c.text.toLowerCase().includes(listQuery)) listMatches.push(i); });
+    const retained = previous ? listMatches.findIndex(i => listRows[i].time === previous.time && listRows[i].text === previous.text && listRows[i].user === previous.user) : -1;
+    listMatch = listMatches.length ? Math.max(0, retained) : -1;
+    renderListSearch();
+    if (listMatch >= 0) scrollToListMatch();
+    else { renderRows(); if (!listQuery) followList(); }
+  }
+  function renderListSearch() {
+    $('#danmu-list-prev').disabled = $('#danmu-list-next').disabled = !listMatches.length;
+    $('#danmu-list-clear').disabled = !$('#danmu-list-query').value;
+    $('#danmu-list-result').textContent = !listQuery ? '输入关键词查找' : listMatches.length ? `${listMatch + 1} / ${listMatches.length} 条匹配` : '未找到匹配弹幕';
+  }
+  function scrollToListMatch() {
+    if (listMatch < 0 || $('#danmu-list').hidden) return;
+    const box = $('#danmu-list-scroll');
+    box.scrollTop = Math.max(0, listMatches[listMatch] * ROW - (box.clientHeight - ROW) / 2);
     renderRows();
+  }
+  function moveListMatch(step) {
+    if (!listMatches.length) return;
+    listMatch = (listMatch + step + listMatches.length) % listMatches.length;
+    renderListSearch(); scrollToListMatch();
+  }
+  function clearListSearch() {
+    $('#danmu-list-query').value = '';
+    followUntil = 0;
+    findListMatches();
+  }
+  function highlightListText(text) {
+    if (!listQuery) return esc(text);
+    const lower = text.toLowerCase();
+    let html = '', start = 0, at;
+    while ((at = lower.indexOf(listQuery, start)) !== -1) {
+      html += esc(text.slice(start, at)) + '<mark>' + esc(text.slice(at, at + listQuery.length)) + '</mark>';
+      start = at + listQuery.length;
+    }
+    return html + esc(text.slice(start));
+  }
+  function seekListComment(c) {
+    if (!c || !Number.isFinite(c.time)) return;
+    if (!art || switching || audioSwitching || !Number.isFinite(art.duration) || art.duration <= 0) return toast('视频尚未就绪，请稍后重试');
+    const target = Math.max(0, Math.min(c.time, art.duration));
+    lastPosition = target;
+    art.currentTime = target;
+    art.notice.show = `已跳转到 ${clock(target)}`;
+    followUntil = Date.now() + 5000;
   }
   function renderRows() {
     if ($('#danmu-list').hidden) return;
-    const box = $('#danmu-list-scroll'), first = Math.max(0, Math.floor(box.scrollTop / ROW) - 5);
+    const box = $('#danmu-list-scroll'), first = Math.max(0, Math.min(listRows.length, Math.floor(box.scrollTop / ROW)) - 5);
     const last = Math.min(listRows.length, first + Math.ceil(box.clientHeight / ROW) + 10);
     $('#danmu-list-space').innerHTML = listRows.slice(first, last).map((c, k) =>
-      `<div class="dm-row" data-row="${first + k}" style="top:${(first + k) * ROW}px"><time>${clock(c.time)}</time><span title="${esc(c.text)}">${esc(c.text)}</span></div>`).join('');
+      `<div class="dm-row${listMatch >= 0 && first + k === listMatches[listMatch] ? ' is-current-match' : ''}" data-row="${first + k}" style="top:${(first + k) * ROW}px"><time>${clock(c.time)}</time><span title="${esc(c.text)}">${highlightListText(c.text)}</span></div>`).join('');
   }
   /* Keep the latest comment at the bottom, chat-style, unless the viewer is scrolling. */
   function followList() {
-    if (!art || $('#danmu-list').hidden || Date.now() < followUntil) return;
+    if (!art || $('#danmu-list').hidden || listQuery || Date.now() < followUntil) return;
     const box = $('#danmu-list-scroll'), t = art.currentTime;
     let lo = 0, hi = listRows.length;
     while (lo < hi) { const mid = (lo + hi) >> 1; if (listRows[mid].time <= t) lo = mid + 1; else hi = mid; }
@@ -724,7 +776,7 @@
     $('#tab-playlist').setAttribute('aria-selected', String(!list)); $('#tab-playlist').tabIndex = list ? -1 : 0;
     $('#tab-danmu-list').setAttribute('aria-selected', String(list)); $('#tab-danmu-list').tabIndex = list ? 0 : -1;
     $('#playlist').hidden = list; $('#danmu-list').hidden = !list;
-    if (list) { followUntil = 0; renderRows(); followList(); }
+    if (list) { followUntil = 0; if (listMatch >= 0) scrollToListMatch(); else { renderRows(); followList(); } }
   }
   function openMenu(c, x, y) {
     const menu = $('#danmu-menu'), b = $('#danmu-block-user');
@@ -1107,6 +1159,28 @@
   $('#shot-danmu').addEventListener('change', e => saveShot({danmu: e.target.checked}));
   $('#shot-subtitle').addEventListener('change', e => saveShot({subtitle: e.target.checked}));
   const listBox = $('#danmu-list-scroll');
+  $('#danmu-list-query').addEventListener('input', e => { if (!e.isComposing) findListMatches(); });
+  $('#danmu-list-query').addEventListener('compositionend', () => findListMatches());
+  $('#danmu-list-query').addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (!e.isComposing && e.keyCode !== 229) moveListMatch(e.shiftKey ? -1 : 1);
+    }
+    if (e.key === 'Escape' && !e.isComposing) { e.preventDefault(); clearListSearch(); }
+  });
+  $('#danmu-list-search').addEventListener('submit', e => { e.preventDefault(); moveListMatch(1); });
+  $('#danmu-list-prev').addEventListener('click', () => moveListMatch(-1));
+  $('#danmu-list-clear').addEventListener('click', () => { clearListSearch(); $('#danmu-list-query').focus(); });
+  $('#danmu-list-current').addEventListener('click', () => { clearListSearch(); listBox.focus({preventScroll:true}); });
+  listBox.addEventListener('dblclick', e => {
+    const row = e.target.closest('[data-row]');
+    if (row) { e.preventDefault(); seekListComment(listRows[Number(row.dataset.row)]); }
+  });
+  listBox.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.isComposing && !e.ctrlKey && !e.altKey && !e.metaKey && listMatch >= 0) {
+      e.preventDefault(); seekListComment(listRows[listMatches[listMatch]]);
+    }
+  });
   let rowsFrame = 0;
   listBox.addEventListener('scroll', () => { cancelAnimationFrame(rowsFrame); rowsFrame = requestAnimationFrame(renderRows); });
   for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) listBox.addEventListener(type, () => { if (followUntil !== Infinity) followUntil = Date.now() + 5000; }, {passive: true});

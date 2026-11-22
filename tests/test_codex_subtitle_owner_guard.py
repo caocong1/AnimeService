@@ -41,6 +41,10 @@ def test_only_current_acknowledged_unwatched_authorized_owner(tmp_path):
         with sqlite3.connect(path) as db:
             db.execute("UPDATE subtitle_delivery_jobs SET state='production',dispatch_state='acknowledged',payload='{}'")
     with sqlite3.connect(path) as db:
+        db.execute("UPDATE subtitle_delivery_jobs SET state='blocked',dispatch_state='acknowledged',payload='{}'")
+    assert guard.owners(path)[0]['thread_id'] == 'owner'  # active-blocked must not escape the guard
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE subtitle_delivery_jobs SET state='production'")
         db.execute('INSERT INTO watches VALUES(1,3,1)')
     assert guard.owners(path) == []
 
@@ -62,6 +66,8 @@ def test_control_records_intent_and_never_repeats_unknown_result(tmp_path, monke
     assert guard.run(True, tmp_path, config, now=1300)['error']
     status = guard.run(True, tmp_path, config, now=1301)
     assert status['threads'][0]['decision'] == 'already_attempted'
+    assert status['threads'][0]['control_outcome'] == 'unknown'
+    assert status['threads'][0]['reconciliation_required'] is True
     assert len(calls) == 1
 
 
@@ -91,4 +97,24 @@ def test_exclusive_intent_prevents_racing_or_unknown_control(tmp_path, monkeypat
     monkeypatch.setattr(guard.subprocess, 'run', forbidden)
     result = guard.run(True, tmp_path, {}, now=1300)
     assert result['threads'][0]['decision'] == 'already_attempted'
+    assert result['threads'][0]['reconciliation_required'] is True
     assert not (run_dir/'actions.jsonl').exists()
+
+
+def test_failed_control_stays_visible_on_later_pass_without_replaying(tmp_path, monkeypatch):
+    monkeypatch.setattr(guard, 'ROOT', tmp_path)
+    row = {'id': 'job', 'thread_id': 'owner', 'input_key': 'input', 'revision': 1,
+           'turn_id': 'turn', 'decision': 'interrupt_stale_owner_wait'}
+    monkeypatch.setattr(guard, 'snapshot', lambda *args: [dict(row)])
+    folder = tmp_path / 'data/diagnostics/codex-subtitle-owner-guard'
+    folder.mkdir(parents=True)
+    prior = {**row, 'at': 1200, 'control_state': 'result', 'control_exit_code': 1,
+             'control_receipt': '{"error":"no-client-found"}', 'control_error': ''}
+    (folder / 'actions.jsonl').write_text(json.dumps(prior) + '\n', encoding='utf-8')
+    def forbidden(*args, **kwargs):
+        raise AssertionError('must reconcile native state, never retry control')
+    monkeypatch.setattr(guard.subprocess, 'run', forbidden)
+    current = guard.run(True, tmp_path, {}, now=1300)['threads'][0]
+    assert current['control_outcome'] == 'failed' and current['reconciliation_required']
+    assert current['control_receipt'] == prior['control_receipt']
+    assert current['control_attempt_at'] == 1200

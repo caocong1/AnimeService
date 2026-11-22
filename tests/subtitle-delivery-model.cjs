@@ -3,26 +3,55 @@ const m=require('../static/subtitle-delivery-model.js');
 const res={original:{complete:1,downloading:1,pending:0,missing:0},reference:{complete:2,downloading:0,pending:0,missing:0},unknown:{complete:0,downloading:0,pending:0,missing:0}};
 const j={job_id:'episode:1:2',show_id:1,season:1,episode:2,title:'作品',kind:'episode',scope_valid:true,watched:false,state:'preparing',resources:res,chinese_bases:2,reasons:['needs_reliable_japanese_dialogue_or_real_transcription']};
 assert.equal(m.compose([{...j,episode:1,state:'waiting_review',progress:{total:300,reviewed:299}}],[],{jobs:[j]}).rows.length,1);
-assert.equal(m.pending(j).category,'preparing');assert.deepEqual(m.gaps(j),[]);
+assert.equal(m.pending(j).category,'preparing');
 assert.equal(m.pending({...j,state:'ready',ready:true}).stage,'queued');
 assert.equal(m.pending({...j,state:'production',dispatch_state:'acknowledged',progress:{stage:'rendering'}}).stage,'rendering');
 assert.equal(m.pending({...j,state:'production',dispatch_state:'acknowledged'}).stage,'active');
-assert.equal(m.pending({...j,dispatch_state:'unknown'}).label,'制作启动回执待确认');
+assert.equal(m.pending({...j,dispatch_state:'unknown'}).label,'字幕暂未完成');
 assert.equal(m.compose([],[],{jobs:[{...j,watched:true}]}).rows.length,0);
 assert.equal(m.compose([],[],{jobs:[{...j,scope_valid:false}]}).rows.length,0);
 const release={id:'fixture-v1',show_id:1,season:1,episode:2,version:1,title:'作品',finished_at:'2026-10-14',duration_seconds:1420};
 const late={...j,job_id:'late:1:2:fixture',kind:'late',state:'production',dispatch_state:'acknowledged',progress:{stage:'layout'}};
 const v2=m.compose([], [release], {jobs:[{...j,delivery_finished:true},late]});
-assert.equal(v2.rows[0].release.id,'fixture-v1');assert.equal(v2.rows[0].revisions[0].edition,'修订版');assert.equal(v2.counts.done,1);assert.equal(v2.counts.making,1);
+assert.equal(v2.rows[0].release.id,'fixture-v1');assert.equal(v2.rows[0].revisions[0].edition,'修订版');assert.equal(v2.counts.done,1);assert.equal(v2.counts.making,0);
 assert.equal(m.compose([], [release], null).counts.done,1);
 assert.equal(m.compose([{...j,progress:{total:10,reviewed:10}}], [], null).rows.length,0);
 console.log('delivery model: scope, real stages, first/revision and old playable release passed');
 const basic={...release,edition:'v0'},refined={...release,id:'refined-v1',edition:'v1',version:0};
 const delayed=m.pending({...j,state:'preparing',dispatch_state:'',ready:false,material_ready:false,preparation_wait:{attention_required:true}});
-assert.equal(delayed.label,'视频已到 · 准备待处理');
-assert.ok(delayed.next.includes('尚未排定开工时间'));
+assert.equal(delayed.label,'正在下载视频');
+assert.equal(delayed.next,'');
 const staged=m.compose([], [basic,refined], {jobs:[]});
 assert.equal(staged.rows[0].release.id,'refined-v1');assert.equal(staged.rows[0].release_versions.length,2);
 const refining=m.compose([], [basic], {jobs:[{...j,state:'production',dispatch_state:'acknowledged',refinement_pending:true,progress:{stage:'lyrics'}}]});
-assert.equal(refining.rows[0].revisions[0].edition,'v1 精校细调');assert.equal(refining.counts.done,1);assert.equal(refining.counts.making,1);
+assert.equal(refining.rows[0].revisions[0].edition,'v1 精校细调');assert.equal(refining.counts.done,1);assert.equal(refining.counts.making,0);
 assert.equal(m.compose([], [basic], {jobs:[{...late,kind:'refinement',watched:true}]}).rows[0].revisions.length,0);
+
+const work={status:'preparing',reasons:[],recovery:{status:'source_wait'}};
+assert.equal(m.pending({...j,work}).category,'preparing');
+assert.equal(m.pending({...j,work:{...work,recovery:{status:'overdue'}}}).category,'preparing');
+assert.equal(m.pending({...j,work:{...work,status:'blocked',stop_class:'user_stopped'}}).label,'已按要求停止');
+const queuedWork={status:'queued',position:2,ahead:0,capacity_available:2};
+assert.equal(m.pending({...j,work:queuedWork}).label,'字幕排队中');
+assert.equal(m.pending({...j,work:queuedWork}).next,'排队第 2 位');
+const future={...j,scope_valid:false,work:{...work,status:'unreleased',release_date:'2999-01-01',recovery:null}};
+assert.equal(m.compose([],[],{jobs:[future]}).rows[0].category,'waiting');
+const qm=require('../static/subtitle-queue-model.js');
+for(const [work,group,category] of [
+  [{status:'protected',stop_class:'user_stopped',stalled:true,recovery:{status:'overdue'}},'stopped','waiting'],
+  [{status:'protected',stalled:true,recovery:{status:'overdue'}},'protected','waiting'],
+  [{status:'unreleased',stalled:true,recovery:{status:'overdue'}},'unreleased','waiting'],
+  [{status:'blocked',recovery:{status:'retry_wait',failed_attempts:1,next_check_at:1800000000}},'preparing','preparing'],
+  [{status:'blocked',recovery:{status:'source_wait'}},'preparing','preparing'],
+  [{status:'blocked',recovery:{status:'repair_blocked'}},'preparing','preparing'],
+  [{status:'preparing'},'preparing','preparing'],
+  [{status:'producing'},'active','making'],
+]) {
+  const state=m.pending({...j,work});
+  assert.equal(state.category,category);
+  if(['protected','unreleased'].includes(group))assert.equal(state.stage,group);
+  const row=m.compose([], [basic], {jobs:[{...j,refinement_pending:true,work}]}).rows[0];
+  assert.equal(row.category,'done');
+  assert.equal(row.revisions[0].category,category);
+  assert.deepEqual(qm.sections({items:[{status:'v0_ready',refinement:work}]}).map(s=>s.key),['ready']);
+}

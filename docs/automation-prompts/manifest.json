@@ -1,8 +1,8 @@
 {
   "schema": "automation-apply/v1",
-  "snapshot_date": "2026-10-19",
+  "snapshot_date": "2026-11-04",
   "timezone": "Asia/Shanghai",
-  "purpose": "approved prompt bundle, not applied; no live TOML edits or runtime switch changes",
+  "purpose": "Prompt bundle; applied state is recorded per task, not inferred from template edits",
   "canonical_sha256": "UTF-8 without BOM; CRLF/CR to LF; remove terminal LF characters then append one LF; do not trim spaces",
   "dispatch_caller_cli_isolation_passed": true,
   "real_desktop_host_roundtrip_tested": false,
@@ -21,7 +21,9 @@
       "source_prompt_sha256_lf": "08aeffa4eb4639300619e266372f9a36762a81a20a229daa86d366993f750666",
       "template": "automation.txt",
       "prompt_sha256_lf": "3cc627b33d2c155979a62851c88232fb71280ab3ef2e0764ebbc2f22fd0e7bac",
-      "preserve_all_other_fields": true
+      "preserve_all_other_fields": true,
+      "managed_here": false,
+      "scope_note": "External family-media project; audited read-only, runtime configuration unchanged"
     },
     {
       "id": "automation-2",
@@ -31,11 +33,15 @@
       "status": "ACTIVE",
       "target_thread_id": "保留现值；此说明不是待写入的字段值",
       "project": "保留现有AnimeService项目上下文",
-      "source_config_sha256": "24923f0aec336264f7fae61b31a1b070bc7631c7a23210d7adb94ab856ddc46d",
-      "source_prompt_sha256_lf": "eae03bcf65332fc2e7af49a4a928644fd7416ed42789fd63c2c4adcd92696d77",
+      "source_config_sha256": "71dfd43552ccbdd2374e03a0db714f10c76668ae70c752397dbd77318e50ebc4",
+      "source_prompt_sha256_lf": "b2a307679f91cc434ac7ef78b77d56435419687e0f5c5e0e5038985fa574986e",
       "template": "automation-2.txt",
-      "prompt_sha256_lf": "c0609855e52eaf0c2e4e67c326dfdf798ad927b894a3bccc1aa11997c3631426",
-      "preserve_all_other_fields": true
+      "prompt_sha256_lf": "770183ccd475625ce6d9d994fa74ec2b0cd25f32fe1339f6a9bac1ed0a16b1b4",
+      "preserve_all_other_fields": true,
+      "applied_update": "2026-11-21 native update and readback. Resume due preparation, use the paired encoder and finalize verified existing renders with the same episode owner.",
+      "managed_here": true,
+      "preserved_fields_sha256": "9df31956cd7c4ef91c093aa6c8f24a04ac2e56b1f3b5d45aed89a180624f7018",
+      "applied_config_sha256": "2b54e5e8b0fafd9436a107545f633657599527cd819ebb588a000ddf7c1a9b08"
     },
     {
       "id": "automation-3",
@@ -45,11 +51,15 @@
       "status": "ACTIVE",
       "target_thread_id": "保留现值；此说明不是待写入的字段值",
       "project": "保留现有AnimeService项目上下文",
-      "source_config_sha256": "bb3b0e7718ff4cb1040cf42778a242cd24560a42ac9a8631a18d2ce1097936ec",
-      "source_prompt_sha256_lf": "6a2d2d31d09b5f8dd07e2a374ade698cf5d11ff74f0a27f55ad7642cfc46055a",
+      "source_config_sha256": "38d963f0502d0c462be242d11f49d029a1bcd9e7acc43e7444fdf8be235c5639",
+      "source_prompt_sha256_lf": "67e621abb74852de1539ae219ac3efdd265ac16e6504d771b89c88603cd2d716",
       "template": "automation-3.txt",
-      "prompt_sha256_lf": "3fe8206ecec917d5bca1cb78ddd29d482e1f71cd1f722a2b71bd373ebd72326b",
-      "preserve_all_other_fields": true
+      "prompt_sha256_lf": "67e621abb74852de1539ae219ac3efdd265ac16e6504d771b89c88603cd2d716",
+      "preserve_all_other_fields": true,
+      "managed_here": true,
+      "preserved_fields_sha256": "656582d5861f8607cbc32363fb3e77e218670aa476b4438d876440858dbdb456",
+      "applied_config_sha256": "38d963f0502d0c462be242d11f49d029a1bcd9e7acc43e7444fdf8be235c5639",
+      "applied_update": "2026-11-04 readback verified existing live rules; repository template synchronized, no runtime change"
     },
     {
       "id": "automation-4",
@@ -59,11 +69,15 @@
       "status": "ACTIVE",
       "target_thread_id": "保留现值；此说明不是待写入的字段值",
       "project": "保留现有AnimeService项目上下文",
-      "source_config_sha256": "fc765ec2372ebe1bb2aff9de62daba156f9ec00fffe9c88e519bc6a28879eca0",
-      "source_prompt_sha256_lf": "766bb3086581791b6567900e7f9627d6a38cc08146340c9fc13086d91bd78cd8",
+      "source_config_sha256": "a87a40251ab1f530d7a2258619cca4ba92f51058bcf6b7b7acad8e2cffc3aa8e",
+      "source_prompt_sha256_lf": "080d593e41d76a572474eabfb6fb7ebec0791f71b3a56c374a06870a79d441dd",
       "template": "automation-4.txt",
-      "prompt_sha256_lf": "84465fbd6057b3f687c495aab9626eaa32a03f2a67a258af57f7080179edeced",
-      "preserve_all_other_fields": true
+      "prompt_sha256_lf": "d745f23ec77f8479c7cd18ac3c0681c9498a80e8dfa461095ee5686d26d01cf1",
+      "preserve_all_other_fields": true,
+      "applied_update": "2026-11-04 native automation_update and full readback verified; original schedule, ACTIVE, target and all other fields preserved",
+      "managed_here": true,
+      "preserved_fields_sha256": "2f5f30193f012b8c895d9fb87607044ea6a572397bdbeab74a5584b01f76d150",
+      "applied_config_sha256": "cea7e0da991a1e03e3343feb53f455874c33363109996e13b70ccb2b37fb0fce"
     }
   ]
 }

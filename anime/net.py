@@ -1,4 +1,4 @@
-import datetime,math,re,time
+import datetime,math,re,sqlite3,time
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -33,6 +33,12 @@ def retry_after(response):
     except (ValueError,TypeError,OverflowError):return 0
 
 def safe_error(e):
+    if isinstance(e,sqlite3.OperationalError):
+        code=getattr(e,'sqlite_errorname','') or ''
+        if code.startswith('SQLITE_IOERR') or code=='SQLITE_FULL':
+            return 'OperationalError：本地数据库读写失败，请检查数据盘空间及磁盘状态（'+code+'）'
+        if code.startswith(('SQLITE_BUSY','SQLITE_LOCKED')):
+            return '本地数据库正忙，请稍后重试'
     # Never retain request URLs, headers, response bodies, or auth-bearing exception strings.
     if isinstance(e,NetworkError) or getattr(e,'safe_message',False):return str(e)
     return type(e).__name__+'：请求失败，请检查网络或本机接口'+where(e)

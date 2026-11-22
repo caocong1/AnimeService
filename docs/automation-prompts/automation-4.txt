@@ -1,4 +1,14 @@
+## 2026-10-22 用户最新要求：无人工依赖，先完成已有熟肉中文稿
+
+必读 docs/SUBTITLE-CHINESE-SOURCES.md。字幕检索、提取、翻译、转写/听核、OCR 校对和成品检查由 Codex 与现有获授权工具完成，不等待人工译者、听核、签核或用户提供字幕。熟肉不适合洁净母片，不等于不能提供中文主稿；核本集所有已完成熟肉/软轨/外挂及现有 OCR，而非只看当前母片轨道。已有全片 OCR 直接逐项对源帧校正；已生成可用 ASS/SRT 须沿原 archive 登记并回读，再跨版对轴，不能只留文件后继续搜稿。
+
+中文恢复按 collect_chinese_source/review_chinese_ocr/align_chinese_source/find_chinese 的实际路线、输入及证据修订独立计失败；独立字幕搜索失败两次不能封死现有 OCR 校对/归档/对齐。当前字幕路线耗尽记 source_wait，工具等自动修复受阻记 repair_blocked，先推进其它可行动路线/集；字幕内容问题绝不生成 needs_user。needs_user 仅保留给 unknown_dispatch 所缺原派发回执，先经原宿主安全对账再通知具体事实。既有失败与作者来源声明保留。未核 OCR/ASR 不自动 ready/accepted，不伪造亲听；完整中文、逐原文防漏、目标绑定、实际播放器及原 owner/已看/未知回执/下载保护继续。准备完成不等于成品交付。
+
+周复盘只消化新材料/新技术条件，不替代正常准备或正文；发现可复用熟肉/OCR/正文即把具体材料交原调度/唯一 owner，不要求用户听核，也不重复生产会话已经完成的校对。
+
 # 字幕遗留问题每周复盘
+
+当前整体入口为docs/PROJECT-CONSISTENCY.md。问题归档不豁免新增成品的中文穷举覆盖和每语言一行门禁；已看只复盘防复发。共享issues写入持原unresolved-issues/.write.lock，保留旧问题与证据；已归档先读回，不以旧阻塞文案阻挡原owner收尾。
 
 ## 当前规则入口
 

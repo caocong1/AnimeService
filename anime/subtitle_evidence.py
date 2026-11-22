@@ -174,7 +174,31 @@ def _guard(db, sid, ep, job):
         raise ValueError('A dispatch or responsible owner is in flight; inputs are protected')
 
 
-def register_evidence(delivery, sid, ep, kind, path, dry_run=False):
+def _resume_evidence_guard(db, sid, ep, job, thread_id, expected_input):
+    if thread_id is None and expected_input is None:
+        return _guard(db, sid, ep, job)
+    if not thread_id or not expected_input:
+        raise ValueError('Recovery evidence requires thread-id and expected-input together')
+    if lane(db, sid) != 'watching' or _scope(db, sid, ep) or _finished(db, sid, ep):
+        raise ValueError('Recovery scope or watched episode is protected')
+    if (not job or job['kind'] != 'episode' or job['state'] != 'blocked'
+            or job['dispatch_state'] != 'blocked-stopped' or job['thread_id'] != thread_id
+            or job['input_key'] != expected_input or job['lease_expires'] > time.time()):
+        raise ValueError('Recovery requires the stopped original owner and exact input')
+    payload = json.loads(job['payload'])
+    baseline = payload.get('v0_observation') or {}
+    observation = db.get(f'subtitle_delivery_finished_{sid}_{ep}', {}) or {}
+    if (not payload.get('owner_stopped_writing')
+            or current_target(db, sid, ep).get('fingerprint') != payload['assessment'].get('target_fingerprint')):
+        raise ValueError('Recovery baseline or fixed target changed')
+    if baseline or observation or payload.get('refinement_pending'):
+        if (not payload.get('refinement_pending') or not baseline.get('release_id')
+                or not baseline.get('video_sha256')
+                or any(baseline.get(k) != observation.get(k) for k in ('release_id', 'video_sha256'))):
+            raise ValueError('Recovery baseline or fixed target changed')
+
+
+def register_evidence(delivery, sid, ep, kind, path, dry_run=False, thread_id=None, expected_input=None):
     """Validate on a read snapshot, then atomically merge/reassess only this job.
 
     No broad refresh/enrollment is invoked. A concurrent scope, target or job
@@ -191,7 +215,7 @@ def register_evidence(delivery, sid, ep, kind, path, dry_run=False):
     with read_projection(db.path) as view:
         facts = _facts(view, sid, ep)
         job = view.one('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,))
-        _guard(view, sid, ep, job)
+        _resume_evidence_guard(view, sid, ep, job, thread_id, expected_input)
         root = private_root(view)
         file, raw, report = load_report(root, path)
         target = current_target(view, sid, ep)
@@ -201,13 +225,19 @@ def register_evidence(delivery, sid, ep, kind, path, dry_run=False):
         reference = {'path': str(file), 'sha256': hashlib.sha256(raw).hexdigest()}
         result = {'show_id': sid, 'episode': ep, 'kind': kind, 'sha256': reference['sha256'],
                   'target_fingerprint': target['fingerprint'], 'dry_run': dry_run}
-        if dry_run:
+        if dry_run and not thread_id:
             return {**result, 'would_register': True}
         record = {**facts['record'], kind: reference}
         overlay = _Overlay(view, key, record)
         assessor = SubtitleDelivery(overlay, readiness=delivery.readiness, clock=delivery.clock, initialize=False)
         source = view.one('SELECT payload FROM subtitle_studio_jobs WHERE show_id=? AND episode=?', (sid, ep))
         assessment = assessor._assessment(sid, ep, json.loads(source['payload']) if source else {})
+        if thread_id:
+            assessment = assessor._fixed_episode_assessment({**job, 'payload': json.loads(job['payload'])}, assessment)
+        if thread_id and assessment['input_signature'] != expected_input:
+            raise ValueError('Recovery evidence must preserve the fixed input')
+        if dry_run:
+            return {**result, 'would_register': True}
     # The adapter is a trusted read-only dependency. Rejections contain categories,
     # never file paths, report content or token-bearing names.
     with db.connect() as c:
@@ -215,7 +245,7 @@ def register_evidence(delivery, sid, ep, kind, path, dry_run=False):
         current = _Live(db, c)
         if _facts(current, sid, ep) != facts or _scope_transaction(c, sid, ep):
             raise ValueError('Preparation identity or scope changed; re-read before retrying')
-        _guard(current, sid, ep, current.one('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)))
+        _resume_evidence_guard(current, sid, ep, current.one('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)), thread_id, expected_input)
         try:
             if file.read_bytes() != raw:
                 raise ValueError()
@@ -223,17 +253,38 @@ def register_evidence(delivery, sid, ep, kind, path, dry_run=False):
             raise ValueError('Evidence changed during validation') from None
         if binding_error(root, kind, report, sid, ep, target.get('fingerprint')):
             raise ValueError('Evidence no longer valid')
+        if thread_id:
+            # Archive files are outside this SQLite snapshot. Re-read the trusted
+            # adapter before committing so a removed or rewritten original draft
+            # cannot slip between the initial assessment and this transaction.
+            live_overlay = _Overlay(current, key, record)
+            live_assessor = SubtitleDelivery(live_overlay, readiness=delivery.readiness,
+                                            clock=delivery.clock, initialize=False)
+            live_assessment = live_assessor._assessment(sid, ep, json.loads(source['payload']) if source else {})
+            live_assessment = live_assessor._fixed_episode_assessment(
+                {**job, 'payload': json.loads(job['payload'])}, live_assessment)
+            if live_assessment != assessment:
+                raise ValueError('Recovery source evidence changed during validation')
         unchanged = facts['record'].get(kind) == reference
         if not unchanged:
             c.execute('INSERT INTO kv(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                       (key, json.dumps(record, ensure_ascii=False)))
             payload = json.loads(job['payload'])
-            payload['assessment'] = assessment
+            if thread_id:
+                payload.setdefault('recovery_evidence_history', []).append({
+                    'kind': kind, 'reference': reference, 'previous_reference': facts['record'].get(kind),
+                    'assessment': assessment, 'registered_at': delivery.clock()})
+                payload['latest_assessment'] = {**(payload.get('latest_assessment') or {}), 'assessment': assessment}
+            else:
+                payload['assessment'] = assessment
             state = ('ready' if assessment['ready'] else 'preparing' if not
                      (assessment.get('material_ready') and assessment.get('clean_review_ready')) else 'blocked')
+            if thread_id:
+                state = job['state']
             c.execute('UPDATE subtitle_delivery_jobs SET payload=?,state=?,input_key=?,revision=revision+1,updated=? WHERE id=?',
                       (json.dumps(payload, ensure_ascii=False), state, assessment['input_signature'], delivery.clock(), identity))
-            delivery._event(c, identity, 'evidence-registered', {'kind': kind, 'sha256': reference['sha256']})
+            delivery._event(c, identity, 'owner-recovery-evidence-registered' if thread_id else 'evidence-registered',
+                            {'kind': kind, 'sha256': reference['sha256'], **({'thread_id': thread_id, 'input_key': expected_input} if thread_id else {})})
         else:
             state = job['state']
     return {**result, 'registered': True, 'replayed': unchanged, 'state': state,
@@ -261,6 +312,8 @@ def completed_selection(db, sid, ep, file):
     downloader lease/committing and no unconfirmed dialog hold.
     """
     for task in db.rows("SELECT * FROM tasks WHERE show_id=? AND status IN ('complete','linked')", (sid,)):
+        from .subtitle_reference_intake import reference_hash
+        if reference_hash(db,task['hash']):continue
         try:
             selected = json.loads(task['selection']).get('selected', {}).get(str(ep))
         except (TypeError, ValueError, AttributeError):
@@ -276,7 +329,8 @@ def completed_selection(db, sid, ep, file):
         if task.get('purpose') not in ('episode', 'source_sample', 'subtitle_sample'):
             continue
         queue = db.one('SELECT lease,committing,state FROM thunder_queue WHERE hash=?', (task['hash'],)) if _exists(db, 'thunder_queue') else None
-        if queue and (queue['lease'] or queue['committing'] or queue['state'] in ('claimed', 'review')):
+        from .download_receipts import pending_receipt
+        if pending_receipt(task, queue):
             continue
         if (db.get('thunder_dialog_hold_' + task['hash'], {}) or {}).get('unconfirmed'):
             continue
@@ -289,7 +343,32 @@ def _file_stamp(file):
     return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
-def bind_target(delivery, sid, ep, path, dry_run=False):
+def _target_guard(db, sid, ep, job, thread_id, expected_input):
+    """Explicit owner correction keeps the confirmed writer and rejects stale input.
+
+    The ordinary preparation path retains its unowned-only guard. This opt-in is
+    for a user-authorized correction before any viewing release or formal freeze.
+    """
+    if thread_id is None and expected_input is None:
+        return _guard(db, sid, ep, job)
+    if not thread_id or not expected_input:
+        raise ValueError('Owner correction requires thread-id and expected-input together')
+    if lane(db, sid) != 'watching' or _scope(db, sid, ep):
+        raise ValueError('Episode preparation scope is protected')
+    if _finished(db, sid, ep):
+        raise ValueError('Watched episodes are not prepared')
+    if _delivered(db, sid, ep) or db.get(f'subtitle_delivery_finished_{sid}_{ep}', {}):
+        raise ValueError('Completed episodes are protected')
+    if (not job or job['kind'] != 'episode' or job['state'] != 'production'
+            or job['dispatch_state'] != 'acknowledged' or job['thread_id'] != thread_id
+            or job['input_key'] != expected_input or job['lease_expires'] > time.time()):
+        raise ValueError('Owner correction requires the current acknowledged writer and exact input')
+    payload = json.loads(job['payload'])
+    if payload.get('owner_stopped_writing') or payload.get('v0_observation') or payload.get('finished_observation'):
+        raise ValueError('Stopped writers and existing viewing releases are protected')
+
+
+def bind_target(delivery, sid, ep, path, dry_run=False, thread_id=None, expected_input=None):
     """Record a reconciled completed file as an unfrozen episode's provisional production target.
 
     The readiness adapter already prefers such a record over the studio job's stale target;
@@ -305,7 +384,7 @@ def bind_target(delivery, sid, ep, path, dry_run=False):
     with read_projection(db.path) as view:
         facts = _facts(view, sid, ep)
         job = view.one('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,))
-        _guard(view, sid, ep, job)
+        _target_guard(view, sid, ep, job, thread_id, expected_input)
         if head(view, sid, ep):
             raise ValueError('The production target is already frozen; freeze and publish own it')
         if not file.is_file():
@@ -342,7 +421,7 @@ def bind_target(delivery, sid, ep, path, dry_run=False):
         current['task'] = live.rows('SELECT hash,status,selection,save_path,title,purpose FROM tasks WHERE hash=?', (task['hash'],))
         if current != facts or _scope_transaction(c, sid, ep):
             raise ValueError('Preparation identity or scope changed; re-read before retrying')
-        _guard(live, sid, ep, live.one('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)))
+        _target_guard(live, sid, ep, live.one('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)), thread_id, expected_input)
         if head(live, sid, ep):
             raise ValueError('The production target is already frozen; freeze and publish own it')
         # Queue leases, dialog holds and source policy may change independently
@@ -359,13 +438,26 @@ def bind_target(delivery, sid, ep, path, dry_run=False):
             c.execute('INSERT INTO kv(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                       (key, json.dumps(record, ensure_ascii=False)))
             payload = json.loads(job['payload'])
+            if thread_id:
+                payload.setdefault('target_corrections', []).append({
+                    'previous_input_key': job['input_key'], 'previous_assessment': payload.get('assessment'),
+                    'previous_target': previous, 'thread_id': thread_id, 'corrected_at': delivery.clock()})
             payload['assessment'] = assessment
+            if thread_id and 'latest_assessment' in payload:
+                payload['latest_assessment'] = {**payload['latest_assessment'], 'assessment': assessment}
             state = ('ready' if assessment['ready'] else 'preparing' if not
                      (assessment.get('material_ready') and assessment.get('clean_review_ready')) else 'blocked')
+            if thread_id:
+                state = job['state']  # Keep the sole writer; no begin/confirm or lease mutation.
             c.execute('UPDATE subtitle_delivery_jobs SET payload=?,state=?,input_key=?,revision=revision+1,updated=? WHERE id=?',
                       (json.dumps(payload, ensure_ascii=False), state, assessment['input_signature'], delivery.clock(), identity))
-            delivery._event(c, identity, 'target-bound', {'fingerprint': fingerprint, 'size': size, 'task_hash': task['hash']})
+            event = {'fingerprint': fingerprint, 'size': size, 'task_hash': task['hash']}
+            if thread_id:
+                event.update(thread_id=thread_id, previous_input_key=job['input_key'],
+                             input_key=assessment['input_signature'], previous_target=previous)
+            delivery._event(c, identity, 'owner-target-corrected' if thread_id else 'target-bound', event)
         else:
             state = job['state']
     return {**result, 'bound': True, 'replayed': unchanged, 'state': state,
+            **({'thread_id': thread_id, 'input_key': job['input_key'] if unchanged else assessment['input_signature']} if thread_id else {}),
             'assessment': {k: assessment.get(k) for k in ('ready', 'material_ready', 'clean_review_ready', 'capability_ready', 'reasons')}}

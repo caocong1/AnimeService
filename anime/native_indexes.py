@@ -37,12 +37,17 @@ def clean_required(db,sid):
 
 
 def clean_blocker(db,candidate):
+    from .subtitle_reference_intake import reference_only
+    if reference_only(candidate,db):return '该候选仅作本集对轴参考，不可用于母片或普通选源'
     if clean_required(db,candidate['show_id']) and media_mode(candidate) not in ('raw','soft'):
         return '字幕制作新取样需要生肉或明确可关闭的软字幕；当前版本未满足'
     return ''
 
 
 def task_clean_blocker(db,task):
+    from .subtitle_reference_intake import reference_task_blocker
+    blocked=reference_task_blocker(db,task)
+    if blocked:return blocked
     # Existing receipts/in-flight/uncertain outcomes continue reconciliation.
     if task.get('acknowledged') or task.get('status') not in ('intent','held'):return ''
     from .viewing_workflow import reference_task,enabled,lane
@@ -74,6 +79,8 @@ def search_mapping(mapping,kind):
 
 
 def candidate_mapping(mapping,candidate):
+    from .subtitle_reference_intake import reference_only,reference_mapping
+    if reference_only(candidate):return reference_mapping(mapping,candidate)
     return search_mapping(mapping,metadata(candidate).get('index'))
 
 

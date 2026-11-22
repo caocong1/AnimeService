@@ -40,7 +40,7 @@ def maintain_danmu(stop):
 
 
 class WebPlayer:
-    def __init__(self,db):
+    def __init__(self,db,*,initialize=True):
         self.db=db
         self.lock=threading.Lock()
         self.sources={}
@@ -60,16 +60,17 @@ class WebPlayer:
         self._inventory_rows=None;self._inventory_source=None
         inventory=db.path.parent/'inventory.json'
         if inventory.exists():self.inventory=json.loads(inventory.read_text(encoding='utf-8'))
-        with db.connect() as c:
-            c.execute('''CREATE TABLE IF NOT EXISTS web_danmu_sources(
-                source_key TEXT PRIMARY KEY,url TEXT NOT NULL UNIQUE)''')
-            c.execute('''CREATE TABLE IF NOT EXISTS web_progress(
-                media_id TEXT PRIMARY KEY,position REAL DEFAULT 0,duration REAL DEFAULT 0,
-                last_played REAL,updated REAL,sources TEXT DEFAULT '[]')''')
-            c.execute('''CREATE TABLE IF NOT EXISTS web_danmu_matches(
-                media_id TEXT NOT NULL,source_key TEXT NOT NULL,
-                episode_identity TEXT NOT NULL,
-                PRIMARY KEY(media_id,source_key))''')
+        if initialize:
+            with db.connect() as c:
+                c.execute('''CREATE TABLE IF NOT EXISTS web_danmu_sources(
+                    source_key TEXT PRIMARY KEY,url TEXT NOT NULL UNIQUE)''')
+                c.execute('''CREATE TABLE IF NOT EXISTS web_progress(
+                    media_id TEXT PRIMARY KEY,position REAL DEFAULT 0,duration REAL DEFAULT 0,
+                    last_played REAL,updated REAL,sources TEXT DEFAULT '[]')''')
+                c.execute('''CREATE TABLE IF NOT EXISTS web_danmu_matches(
+                    media_id TEXT NOT NULL,source_key TEXT NOT NULL,
+                    episode_identity TEXT NOT NULL,
+                    PRIMARY KEY(media_id,source_key))''')
 
     def inventory_rows(self):
         """Legacy inventory entries with their media keys, hashed once per inventory file version rather than per request."""

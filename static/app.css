@@ -255,6 +255,7 @@ tr.is-error td { color: var(--danger); }
 .t-ep { display: flex; align-items: baseline; gap: 6px; font-family: var(--num); }
 .t-ep b { font-size: var(--num-l); line-height: 1; font-weight: 700; }
 .t-ep small { font-size: var(--text-s); }
+.t-edition { display: inline-block; align-self: center; margin-left: 2px; padding: 2px 5px; border: 1px solid currentColor; border-radius: 4px; font-size: 11px; line-height: 1.2; font-weight: 600; white-space: nowrap; }
 .t-act { display: flex; align-items: center; gap: 6px; font-size: var(--text-s); }
 .t-act .i { width: 14px; height: 14px; }
 .t-time { font-family: var(--num); }

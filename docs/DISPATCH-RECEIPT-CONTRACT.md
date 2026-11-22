@@ -6,6 +6,50 @@ application is disabled until an owner-reviewed trusted host adapter can verify
 terminal absence; a list snapshot or caller assertion cannot authorize release.
 Existing deployment and ownership protections remain in force.
 
+2026-11-05 follow-up timeout: a preflight success does not prove that a later
+begin returned or archived its ticket. The original 646154/E5 caller lost its
+partial output by failing to catch TimeoutExpired; no original ticket was found.
+Do not retrospectively claim those bytes were saved. Future calls may use the
+begin-only helper documented in [DISPATCH-CALLER.md](DISPATCH-CALLER.md), without
+requiring or pretending to deploy a host bridge. It performs no host operation.
+It shares the durable byte-log runner, rejects partial/changed/invalid output,
+and requires exact original-ticket identity after a successful process exit.
+Expected-input checks and fixed begin-stage markers supplement existing gates;
+they grant no recovery authority. The direct child may be a Windows venv launcher:
+timeout termination/reaping of that child does not prove descendant termination.
+Only explicit caller context records whether a host attempt already happened.
+Neither this helper's no-host property, a ticket digest, nor a negative inventory
+can authorize not-created, release, reissue or reconstruction of an old ticket.
+
+2026-11-05 archive hardening: before claiming any lease, the CLI protects the
+ticket directory and exercises exclusive creation, write, flush/fsync, closed-file
+byte readback and deletion of its unique credential-free probe. Template/title
+reads also precede the lease. This is a preflight, not a guarantee about later IO.
+The actual original ticket still gets the full ACL check, exclusive creation,
+flush/fsync, byte/object readback and shared begin-ticket identity validation.
+Failed or partial tickets remain untouched; no retry or replacement ticket is made.
+ACL subprocesses use a 45-second wait budget and distinguish timeout, process exit
+and launch errors with bounded stderr, never argv, stdout or ticket credentials.
+The single caller allows 120 seconds for begin's two ACL checks and IO; its host
+bridge still has its separate 30-second budget. Post-intent archive failure emits
+a credential-free stderr diagnostic and leaves committing protected. There is
+still no applicable release/recovery transition for a missing original ticket:
+do not reconstruct it from current DB credentials, event timestamps or a digest.
+An operator/model statement that no host call occurred does not substitute for
+the trusted operation-bound absence proof required by this contract.
+These are subprocess wait budgets, not a promise of exact wall-clock deadlines:
+operating-system process creation can add delay before the timeout is observed
+([Python subprocess documentation](https://docs.python.org/3/library/subprocess.html#subprocess.run)).
+
+2026-11-04 consistency clarification: refresh preserves the entire original
+committing/unknown job, including its payload, revision, input and ticket. Fresh
+observations remain readable from current readiness facts; refreshing the queue
+must not retrofit an in-flight dispatch. A callback records a genuine created
+fact against that original ticket, then independently checks current scope,
+watched/stop/owner protections before any state change. If current authority
+blocks applying the fact, retain both the receipt and the unresolved original
+dispatch. This is not permission to clear, reissue or automatically reconcile it.
+
 ## Distinguish the facts
 
 `confirm` calls `reconcile_dispatch`: created means a responsible **chat** was

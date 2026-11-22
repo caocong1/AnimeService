@@ -3,6 +3,10 @@
 This policy adds constraints; it never grants download or episode authorization.
 """
 import json
+import datetime
+import hashlib
+from pathlib import Path
+from urllib.parse import urlsplit
 
 KEY = 'viewing_workflow_policy'
 POLICY = {'version': 1, 'enabled': True, 'auto_clean_bases': 2,
@@ -37,6 +41,71 @@ def scope_blocker(db, sid, episode=1):
     if not row or json.loads(row['config']).get('mode') not in RESEARCH_MODES:
         return '尚无有效的个人首集/字幕研究政策'
     return ''
+
+
+def verified_early_release(db, sid, episode, airing):
+    """An operator-verified official release, bound to this exact catalog row.
+
+    A completed download or publisher label alone cannot bypass the air-date gate.
+    Keep the broadcast catalog intact; archive the official source and bind its
+    checksum before recording a separate, episode-specific streaming release.
+    """
+    proof = db.get(f'verified_early_release_{sid}_{episode}', {})
+    if not isinstance(proof, dict) or proof.get('version') != 1:
+        return None
+    if (proof.get('show_id') != sid or proof.get('episode') != episode
+            or proof.get('season') != (db.mapping(sid).get('season') or 1)
+            or proof.get('source_episode') != airing.get('source_episode', episode)
+            or proof.get('catalog_airdate') != airing.get('airdate')):
+        return None
+    if proof.get('mapping_sha256'):
+        from .official_releases import digest
+        if proof['mapping_sha256'] != digest(db.mapping(sid)):
+            return None
+    try:
+        source = urlsplit(proof['source_url'])
+        released = datetime.datetime.fromisoformat(proof['released_at'])
+        if (source.scheme != 'https' or not source.hostname or source.username or source.password
+                or released.utcoffset() is None):
+            return None
+        root = db.path.parent.resolve()
+        evidence = (root / proof['evidence']['path']).resolve()
+        if not evidence.is_relative_to(root) or not evidence.is_file():
+            return None
+        if hashlib.sha256(evidence.read_bytes()).hexdigest() != proof['evidence']['sha256']:
+            return None
+        return released
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def unreleased_date(db, sid, episode, now):
+    """Future local air date, or '' when this episode is already dated/unknown.
+
+    Cumulative episode numbers are converted by the same local-airing mapping used
+    elsewhere. A dated file/release may still be delivered; callers must not use
+    this helper to hide or revoke an existing finished release.
+    """
+    row = next((r for r in db.local_airings(sid) if r['episode'] == episode), None)
+    value = (row or {}).get('airdate') or (db.show(sid)['air_date'] if episode == 1 else '')
+    if not isinstance(value, str) or not value.strip():
+        return ''
+    try:
+        air = datetime.date.fromisoformat(value.strip()[:10])
+    except ValueError:
+        return ''
+    zone = datetime.timezone(datetime.timedelta(hours=8))
+    current = datetime.datetime.fromtimestamp(now, zone)
+    if air <= current.date():
+        return ''
+    released = verified_early_release(db, sid, episode, row or {'airdate': value})
+    if released is None:
+        from .official_releases import scheduled_release
+        released = scheduled_release(db, sid, episode, row or {'airdate': value}, now)
+    if released is not None and released.astimezone(zone).date() < air:
+        # An announced future streaming release still waits until its exact time.
+        return released.astimezone(zone).date().isoformat() if released > current else ''
+    return value.strip()[:10]
 
 
 def clean_reservations(db, sid, episode):
@@ -102,10 +171,13 @@ def require_reference_slot(db, sid, episode):
         raise ValueError('本集已有两份额外参考视频；先提取去重和比较现有基稿')
 
 
-def queue_snapshot(db):
+def queue_snapshot(db, sid=None):
     """Small, read-only control plane shared by both heartbeats and the API."""
     queues = {'wish': [], 'watching': []}
-    for show in db.rows('SELECT id,title,state FROM shows WHERE selected=1 ORDER BY id'):
+    query = 'SELECT id,title,state FROM shows WHERE selected=1'
+    if sid is not None:
+        query += ' AND id=?'
+    for show in db.rows(query+' ORDER BY id', (sid,) if sid is not None else ()):
         route = lane(db, show['id'])
         if route is None:
             continue

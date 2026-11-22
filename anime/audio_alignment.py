@@ -412,6 +412,27 @@ class AlignmentService:
 
     def _source_audio(self, job):
         from yt_dlp import YoutubeDL
+        from yt_dlp.extractor.bilibili import BiliBiliIE
+
+        class AudioReferenceIE(BiliBiliIE):
+            def extract_formats(self, play_info):
+                formats = super().extract_formats(play_info)
+                dash = (play_info or {}).get('dash') or {}
+                audio = list(dash.get('audio') or [])
+                audio.extend((dash.get('dolby') or {}).get('audio') or [])
+                flac = (dash.get('flac') or {}).get('audio')
+                if flac:
+                    audio.append(flac)
+                backups = {
+                    track.get('baseUrl') or track.get('base_url') or track.get('url'):
+                    track.get('backupUrl') or track.get('backup_url') or []
+                    for track in audio
+                }
+                for fmt in formats:
+                    if fmt.get('vcodec') == 'none':
+                        fmt['alignment_backups'] = backups.get(fmt.get('url'), [])
+                return formats
+
         result=[]; error=[]; done=threading.Event()
         if not self.extractor_lock.acquire(blocking=False):raise Unavailable('busy')
         # Extractor may block on a remote request. It never owns a worker result/cache.
@@ -419,17 +440,30 @@ class AlignmentService:
             try:
                 with YoutubeDL({'quiet':True,'no_warnings':True,'logger':Quiet(),'skip_download':True,
                                 'noplaylist':True,'socket_timeout':8,'retries':0,'extractor_retries':0,
-                                'cachedir':False,'http_headers':{'User-Agent':'Mozilla/5.0'}}) as ydl:
-                    info=ydl.extract_info(job['url'],download=False)
+                                'cachedir':False,'http_headers':{'User-Agent':'Mozilla/5.0'}},
+                               auto_init=False) as ydl:
+                    ydl.add_info_extractor(AudioReferenceIE())
+                    info=ydl.extract_info(job['url'],download=False,ie_key=AudioReferenceIE.ie_key())
                 if info.get('entries'):raise Unavailable()
                 formats=[f for f in info.get('formats',[]) if f.get('vcodec')=='none' and f.get('acodec') not in (None,'none')]
                 if not formats:raise Unavailable('no_source_audio')
-                audio=min(formats,key=lambda f:f.get('abr') or f.get('tbr') or float('inf'))
-                validate_cdn(audio['url'])
                 duration=float(info.get('duration') or 0)
                 if not math.isfinite(duration) or duration<240:raise Unavailable('short_source')
-                result.append((audio['url'],audio.get('http_headers') or info.get('http_headers') or
-                               {'User-Agent':'Mozilla/5.0','Referer':'https://www.bilibili.com/'},duration, str(info.get('id',''))))
+                seen = set()
+                for audio in sorted(formats, key=lambda f: f.get('abr') or f.get('tbr') or float('inf')):
+                    for url in [audio['url'], *audio.get('alignment_backups', [])]:
+                        self._check(job)
+                        if not isinstance(url, str) or url in seen:
+                            continue
+                        seen.add(url)
+                        try:
+                            validate_cdn(url)
+                        except Unavailable:
+                            continue
+                        result.append((url, audio.get('http_headers') or info.get('http_headers') or
+                                       {'User-Agent':'Mozilla/5.0','Referer':'https://www.bilibili.com/'},
+                                       duration, str(info.get('id',''))))
+                        return
             except Exception as exc:error.append(exc.reason if isinstance(exc,Unavailable) and exc.reason else 'source_info')
             finally:self.extractor_lock.release();done.set()
         thread=threading.Thread(target=extract,daemon=True);thread.start()

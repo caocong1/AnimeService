@@ -40,13 +40,13 @@
     return out.join('');
   }
 
-  function screening(s, lead) {
+  function screening(s, lead, eager) {
     const n = s.next;
     const prog = n?.s === 'resume' && n.duration
       ? `<div class="progress" style="--p:${Math.round(n.position / n.duration * 100)}%"><span class="track"><i></i></span><span>${clock(n.position)} / ${clock(n.duration)}</span></div>` : '';
     const t = ticket(s).replace('class="ticket', `class="ticket${lead ? ' hero' : ''}`);
     return `<article class="screening${lead ? ' lead' : ''}${s.state === 'paused' ? ' dim' : ''}" style="${lineColour(s.id)}">
-      ${cover(s.image, s.title, '', '/show/' + s.id)}
+      ${cover(s.image, s.title, '', '/show/' + s.id, {eager, priority: lead})}
       <div class="body"><div class="head"><a class="title" href="/show/${s.id}">${esc(s.title)}</a><div class="facts">${facts(s)}</div></div>${prog}${epStrip(s)}</div>
       ${t}</article>`;
   }
@@ -71,7 +71,7 @@
       return;
     }
     $('#screens').innerHTML = playing.length
-      ? `<h2 class="group-head"><b>可以看</b><span class="count">${playing.length}</span></h2>` + playing.map((s, i) => screening(s, i === 0)).join('')
+      ? `<h2 class="group-head"><b>可以看</b><span class="count">${playing.length}</span></h2>` + playing.map((s, i) => screening(s, i === 0, i < 6)).join('')
       : `<div class="empty"><h2>待看的都看完了</h2><a class="btn" href="/season">${icon('season')}看看新番</a></div>`;
 
     const coming = [], waiting = [], upcoming = [];
@@ -85,7 +85,7 @@
           const retry = x.retry_at ? new Date(x.retry_at * 1000).toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}) : '';
           return `<span class="download-reason">第 ${e.n} 集：${esc(x.reason)}${x.source_error ? '；部分查源失败：' + esc(x.source_error) : ''}${retry ? ' · ' + retry + ' 自动重试' : ''}${checked ? ' · ' + checked + ' 检查' : ''}</span>`;
         }).join('');
-        coming.push(sideItem(s, cover(s.image, s.title), parts.join(' · ') + notes, dl.length ? `<span class="bar-p" style="--p:${dl[0].progress}%"><i></i></span>` : ''));
+        coming.push(sideItem(s, cover(s.image, s.title, '', '', {width: 160, eager: coming.length < 8}), parts.join(' · ') + notes, dl.length ? `<span class="bar-p" style="--p:${dl[0].progress}%"><i></i></span>` : ''));
       }
       const aired = (s.eps || []).some(e => e.s !== 'future');
       if (!aired && s.air_date > today()) upcoming.push(s);
@@ -98,8 +98,8 @@
     $('#side').innerHTML =
       group('下载 · 缺集', coming.slice(0, 8)) +
       group('即将首播', upcoming.map(s => sideItem(s, `<span class="date">${esc(airDate(s.air_date, false))}</span>`, `${WEEK[new Date(s.air_date + 'T00:00').getDay()]} · ${STATES[s.state]}${s.authorized ? ' · 自动下载' : ''}`))) +
-      group('等更新', waiting.map(s => { const f = nextFuture(s); return sideItem(s, cover(s.image, s.title), `${s.watched}/${s.total || '?'} · 第 ${f.n} 集${f.date ? ' ' + airDate(f.date) : ''}`); })) +
-      group('暂搁', paused.map(s => sideItem(s, cover(s.image, s.title), `${s.watched}/${s.total || '?'}${s.unwatched ? ' · 待看 ' + s.unwatched : ''}`)));
+      group('等更新', waiting.map(s => { const f = nextFuture(s); return sideItem(s, cover(s.image, s.title, '', '', {width: 160}), `${s.watched}/${s.total || '?'} · 第 ${f.n} 集${f.date ? ' ' + airDate(f.date) : ''}`); })) +
+      group('暂搁', paused.map(s => sideItem(s, cover(s.image, s.title, '', '', {width: 160}), `${s.watched}/${s.total || '?'}${s.unwatched ? ' · 待看 ' + s.unwatched : ''}`)));
   }
 
   function renderShelf() {
@@ -119,7 +119,7 @@
     page = Math.min(page, pages);
     const start = (page - 1) * pageSize;
     $('#summary').textContent = `${quarter ? quarterName(quarter) + ' · ' : ''}${filters.size ? [...filters].map(s => STATES[s]).join('、') + ' · ' : ''}筛选结果 ${rows.length} 部`;
-    $('#shelf').innerHTML = rows.length ? rows.slice(start, start + pageSize).map(s => `<div class="shelf-row" style="${lineColour(s.id)}">${cover(s.image, s.title, '', '/show/' + s.id)}
+    $('#shelf').innerHTML = rows.length ? rows.slice(start, start + pageSize).map((s, i) => `<div class="shelf-row" style="${lineColour(s.id)}">${cover(s.image, s.title, '', '/show/' + s.id, {width: 160, eager: i < 12})}
       <div><a class="name" href="/show/${s.id}">${esc(s.title)}</a><div class="facts">${facts(s)}</div></div>${epStrip(s)}<div class="end">${ticket(s, false)}</div></div>`).join('')
       : shows.length ? `<div class="empty"><p>没有符合当前筛选条件的作品</p><button class="btn small" type="button" id="clear">清除筛选</button></div>`
       : `<div class="empty"><h2>还没有追番</h2><a class="btn primary" href="/season">${icon('season')}去看新番</a></div>`;
@@ -175,11 +175,11 @@
     if (loading) return;
     loading = true;
     try {
-      await boot();
+      const ready = boot();
       const forced = params.get('state');
       if (forced === 'error') throw Error('后台没有响应');
-      const [list, home, releases] = await Promise.all([api('/shows?scope=history'), all ? Promise.resolve({resume: []}) : api('/home'),
-        FinishedReleases.load({verifyMedia: true}).catch(e => { toast(e.message); return []; })]);
+      const [list, home, releases] = await Promise.all([api('/shows?scope=' + (all ? 'history' : 'home') + '&viewing=true'), all ? Promise.resolve({resume: []}) : api('/home'),
+        FinishedReleases.load({verifyMedia: true}).catch(e => { toast(e.message); return []; }), ready]);
       if (forced === 'empty-first') { list.length = 0; home.resume = []; }
       const scheduled = await applyListAiringSchedules(list);
       shows = FinishedReleases.applyList(scheduled, releases);

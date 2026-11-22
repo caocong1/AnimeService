@@ -1,5 +1,5 @@
 """Lightweight process health and small operator summaries from the local database."""
-import os,subprocess,sys,threading,time
+import os,shutil,subprocess,sys,threading,time
 from .db import ROOT
 
 STARTED_AT=time.time()
@@ -23,7 +23,7 @@ def problems(db,now):
         FROM tasks t LEFT JOIN thunder_queue q ON q.hash=t.hash WHERE t.status='review'""")
     history=db.get('dandan_history_health') or {};error=None
     for event in db.rows("""SELECT e.scope,e.message,e.time,t.status task_status,t.error task_error FROM events e
-        LEFT JOIN tasks t ON e.scope='task:'||t.hash WHERE e.level='error' ORDER BY e.id DESC LIMIT 60"""):
+        LEFT JOIN tasks t ON substr(e.scope,1,5)='task:' AND t.hash=substr(e.scope,6) WHERE e.level='error' ORDER BY e.id DESC LIMIT 60"""):
         if event['scope']=='api' or now-event['time']>=3600:continue
         if event['scope']=='dandan-history' and history.get('ok') is True and history.get('success',0)>event['time']:continue
         if event['scope'].startswith('task:') and (event['task_status'] in ('review','complete','cleaned','linked') or not event['task_error']) and event['task_status'] is not None:continue
@@ -31,14 +31,22 @@ def problems(db,now):
     return {'reviews':len(reviews),'uncertain':sum(r['uncertain'] for r in reviews),'error':error,'blocker':submission_blocker(db)}
 
 
-def health(db,now=None):
+def health(db,now=None,*,library=None):
     """Liveness, version and operator summaries; /api/status stays the detailed view."""
     now=now or time.time();heartbeat=db.get('heartbeat') or {};maintenance=db.get('download_maintenance_at',0)
     age=round(now-heartbeat['time']) if heartbeat.get('time') else None
     worker=any(t.name=='anime-worker' and t.is_alive() for t in threading.enumerate())
+    storage=None
+    if library is not None:
+        try:
+            available=shutil.disk_usage(library.anchor or library.parent).free
+            reserve=db.get('minimum_free_gb',10)
+            storage={'library':str(library),'free_gib':round(available/2**30,2),'reserve_gib':reserve,'below_reserve':available<reserve*2**30}
+        except OSError:pass
     return {'service':'AnimeService','ok':age is not None and age<=max(600,3*db.get('poll_seconds',180)),'time':now,
-            'pid':os.getpid(),'started_at':STARTED_AT,'uptime':round(now-STARTED_AT),'code_version':VERSION,
+            'pid':os.getpid(),'started_at':STARTED_AT,'uptime':round(now-STARTED_AT),'code_version':VERSION,'download_storage':storage,
             'python':sys.version.split()[0],'worker_thread':worker,'download_gap_reconciliation':3,
+            'tracking_inbox':any(t.name=='tracking-inbox' and t.is_alive() for t in threading.enumerate()),
             'heartbeat':{'phase':heartbeat.get('phase'),'age':age},
             'maintenance_age':round(now-maintenance) if maintenance else None,
             'qbit':(db.get('qbit_health') or {}).get('ok'),'subtitle_studio':(db.get('subtitle_studio_health') or {}).get('ok'),

@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 
 from .net import safe_error
-from .viewing_workflow import lane, queue_snapshot, scope_blocker, RESEARCH_MODES
+from .viewing_workflow import lane, queue_snapshot, scope_blocker, RESEARCH_MODES, unreleased_date
 
 
 STATES = {'preparing', 'ready', 'production', 'blocked', 'accepted', 'finished', 'late-review'}
@@ -65,6 +65,18 @@ def _canonical(value):
             return v
         raise ValueError('receipt envelope allows only strings, numbers, booleans, lists and objects')
     return _json(clean(value))
+
+
+def _resumed_payload(payload):
+    """Clear stopped facts only after a real created receipt, never at reservation."""
+    value = dict(payload)
+    value['owner_stopped_writing'] = False
+    value['auto_recovery_turn'] = ''
+    if value.pop('manual_recovery_pending', False):
+        value['user_stopped'] = False
+        value['recovery_class'] = 'protected'
+        value['recovery_turn'] = ''
+    return value
 
 
 def validate_ticket(ticket):
@@ -125,6 +137,82 @@ def delivery_policy(db):
     """The owner-maintained `subtitle_delivery_policy` record; missing keys mean the historical behaviour."""
     value = db.get('subtitle_delivery_policy', {})
     return value if isinstance(value, dict) else {}
+
+
+def production_limit(policy):
+    """Invalid or absent opt-in values retain the historical single slot."""
+    value = policy.get('max_active_productions') if isinstance(policy, dict) else None
+    return value if type(value) is int and 1 <= value <= 3 else 1
+
+
+def _automatic_recovery_turns(c, thread_id, now):
+    """Return actual automatic recovery intents by exact origin turn."""
+    from .subtitle_recovery import AUTO_RECOVERY_WINDOW
+    rows = c.execute('''SELECT job_id,payload,recorded FROM subtitle_delivery_events
+        WHERE kind='owner-auto-recovery' AND recorded>=?''', (now - AUTO_RECOVERY_WINDOW,)).fetchall()
+    turns = {}
+    for row in rows:
+        payload = json.loads(row['payload'])
+        if payload.get('owner_thread_id') != thread_id:
+            continue
+        turn, recorded = payload.get('turn_id'), row['recorded']
+        if (not isinstance(turn, str) or not turn or isinstance(recorded, bool)
+                or not isinstance(recorded, (int, float)) or not math.isfinite(recorded)
+                or recorded > now + 30):
+            raise ValueError('Automatic owner recovery history is invalid')
+        if turn in turns and turns[turn]['job_id'] != row['job_id']:
+            raise ValueError('Conflicting automatic owner recovery history')
+        turns[turn] = {'job_id': row['job_id'], 'at': min(recorded, turns.get(turn, {}).get('at', recorded))}
+    return {turn: value['at'] for turn, value in turns.items()}
+
+
+def _automatic_recovery_seen(c, thread_id, origin_turn):
+    """Full-history exact-turn replay check; the 24h budget window must not forget it."""
+    rows = c.execute("SELECT job_id,payload,recorded FROM subtitle_delivery_events WHERE kind='owner-auto-recovery'").fetchall()
+    for row in rows:
+        payload = json.loads(row['payload'])
+        if payload.get('turn_id') != origin_turn:
+            continue
+        if payload.get('owner_thread_id') != thread_id:
+            raise ValueError('Conflicting automatic owner recovery history')
+        recorded = row['recorded']
+        if isinstance(recorded, bool) or not isinstance(recorded, (int, float)) or not math.isfinite(recorded):
+            raise ValueError('Automatic owner recovery history is invalid')
+        return True
+    return False
+
+
+def production_conflict(c, row, now, thread_id=None, check_capacity=True):
+    """Check the episode/thread and global bound inside the caller's transaction.
+
+    Uncertain dispatches retain their slots even after their lease expires. A
+    live undispatched lease also occupies one slot, never two for the same job.
+    Receipt callbacks use only identity checks: their dispatch already owns a
+    slot and a later limit reduction must not discard a real created receipt.
+    """
+    active = c.execute('''SELECT id,revision,show_id,episode,thread_id,dispatch_state FROM subtitle_delivery_jobs
+        WHERE id!=? AND (dispatch_state IN ('committing','unknown','acknowledged') OR lease_expires>?)''',
+                       (row['id'], now)).fetchall()
+    if any(other['show_id'] == row['show_id'] and other['episode'] == row['episode'] for other in active):
+        return 'episode_owner_active'
+    thread_id = thread_id or row['thread_id']
+    if thread_id and any(other['thread_id'] == thread_id for other in active):
+        return 'thread_owner_active'
+    from .subtitle_dispatch_fence import fence_keys, fenced
+    fences = fence_keys(c, capacity_only=True)
+    if check_capacity or fenced(row, fences):
+        stored = c.execute("SELECT value FROM kv WHERE key='subtitle_delivery_policy'").fetchone()
+        policy = json.loads(stored['value']) if stored else {}
+        if sum(not fenced(other, fences) for other in active) >= production_limit(policy):
+            return 'production_capacity_full'
+    return ''
+
+
+def capacity_snapshot(jobs, policy, now):
+    occupied = sum((job['dispatch_state'] in PROTECTED_DISPATCH or job['lease_expires'] > now)
+                   and not job.get('slot_fenced') for job in jobs)
+    limit = production_limit(policy)
+    return {'limit': limit, 'occupied': occupied, 'available': max(0, limit - occupied)}
 
 
 def priority_show_ids(policy):
@@ -309,6 +397,7 @@ class SubtitleDelivery:
 
     def _dispatch_assessment(self, job):
         assessment = self._assessment(job['show_id'], job['episode'], self._source_payload(job))
+        assessment = self._fixed_episode_assessment(job, assessment)
         if job['kind'] == 'refinement':
             observation = self.db.get(f"subtitle_delivery_finished_{job['show_id']}_{job['episode']}", {}) or {}
             if (observation.get('release_id') != job['payload']['baseline_release_id']
@@ -326,8 +415,65 @@ class SubtitleDelivery:
                                                  'late_sources': job['payload']['late_sources']})
         return assessment
 
+    def _fixed_episode_assessment(self, job, assessment):
+        """Replay an owned episode's fixed bundle when only archive references were added.
+
+        The live adapter still verifies every file and readiness gate. Reconstruct
+        both adapter signatures rather than treating arbitrary signature drift as
+        a harmless change; the original media and every original draft must survive.
+        """
+        if (job['kind'] != 'episode' or not job.get('thread_id')
+                or job.get('dispatch_state') not in RETAINED_DISPATCH):
+            return assessment
+        assessment = dict(assessment)
+        assessment['reasons'] = list(assessment.get('reasons') or [])
+        fixed = job['payload'].get('assessment') or {}
+        if assessment.get('target_fingerprint') != fixed.get('target_fingerprint'):
+            assessment['ready'] = False
+            assessment['reasons'].append('fixed_episode_target_changed')
+            return assessment
+        if job['payload'].get('refinement_pending'):
+            baseline = job['payload'].get('v0_observation') or {}
+            observed = self.db.get(f"subtitle_delivery_finished_{job['show_id']}_{job['episode']}", {}) or {}
+            if (not baseline.get('release_id') or not baseline.get('video_sha256')
+                    or any(baseline.get(k) != observed.get(k) for k in ('release_id', 'video_sha256'))):
+                assessment['ready'] = False
+                assessment['reasons'].append('refinement_baseline_or_target_changed')
+                return assessment
+        if assessment['input_signature'] == job['input_key']:
+            return assessment
+
+        def bundle(value):
+            refs = value.get('material_refs') or []
+            media = [r for r in refs if isinstance(r, dict) and r.get('kind') == 'completed_media']
+            drafts = [{k: v for k, v in r.items() if k not in
+                       ('kind', 'target_matching_status', 'candidate_not_reliable_base')}
+                      for r in refs if isinstance(r, dict) and r.get('kind') == 'archived_draft']
+            signature = hashlib.sha256(json.dumps({'target': value.get('target_fingerprint'), 'drafts': drafts},
+                                                  sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            return media, drafts, signature
+
+        old_media, old_drafts, old_key = bundle(fixed)
+        media, drafts, live_key = bundle(assessment)
+        by_id = {d.get('id'): d for d in drafts}
+        old_ids = {d.get('id') for d in old_drafts}
+        append_only = (fixed.get('input_signature') == job['input_key'] == old_key
+                       and live_key == assessment['input_signature']
+                       and old_media and media == old_media and old_drafts
+                       and len(by_id) == len(drafts) and len(old_ids) == len(old_drafts)
+                       and None not in by_id and None not in old_ids
+                       and len(drafts) > len(old_drafts)
+                       and all(by_id.get(d['id']) == d for d in old_drafts)
+                       and set(fixed.get('text_hashes') or []) <= set(assessment.get('text_hashes') or []))
+        if append_only:
+            assessment['observed_input_signature'] = assessment['input_signature']
+            assessment['input_signature'] = job['input_key']
+        return assessment
+
     def refresh(self, snapshot=None):
         """Prepare durable jobs from current gates; never dispatch or perform acquisition."""
+        from .official_releases import reconcile_released_facts
+        reconcile_released_facts(self.db, self.clock())
         from .subtitle_enrollment import reconcile
         enrollment = reconcile(self.db)
         snapshot = snapshot or queue_snapshot(self.db)
@@ -341,6 +487,8 @@ class SubtitleDelivery:
             for ep, studio_job in sorted(jobs.items()):
                 identity = self.episode_id(show['id'], ep)
                 present.add(identity)
+                if unreleased_date(self.db, show['id'], ep, self.clock()):
+                    continue  # Do not create a production request for a future episode.
                 error_key = 'subtitle_delivery_refresh_error_' + identity
                 try:
                     source = self.db.one('SELECT payload FROM subtitle_studio_jobs WHERE show_id=? AND episode=?', (show['id'], ep))
@@ -357,6 +505,14 @@ class SubtitleDelivery:
                         c.execute('BEGIN IMMEDIATE')
                         old = c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone()
                         if old:
+                            if old['dispatch_state'] in ('committing', 'unknown'):
+                                # An external create/send may already have succeeded.
+                                # Keep its entire ticket-bound row stable until the
+                                # original callback is reconciled. Live assessments
+                                # remain read-only; callback scope/watch checks still
+                                # run against current facts in their own transaction.
+                                c.execute('DELETE FROM kv WHERE key=?', (error_key,))
+                                continue
                             prior = json.loads(old['payload'])
                             if old['dispatch_state'] in RETAINED_DISPATCH or old['lease_expires'] > self.clock():
                                 # In-flight work keeps its original input and responsible chat.
@@ -410,6 +566,8 @@ class SubtitleDelivery:
                 with self.db.connect() as c:
                     c.execute('BEGIN IMMEDIATE')
                     old = c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (row['id'],)).fetchone()
+                    if old['dispatch_state'] in ('committing', 'unknown'):
+                        continue
                     value = json.loads(old['payload']); value['scope_blocker'] = blocker
                     state = old['state'] if old['dispatch_state'] in RETAINED_DISPATCH else 'blocked'
                     if old['payload'] != _json(value) or state != old['state']:
@@ -438,21 +596,37 @@ class SubtitleDelivery:
         self.refresh({'queues': {'watching': [row]}})
         return self.get(self.episode_id(sid, ep))
 
-    def snapshot(self):
+    def snapshot(self, *, include_release_review=True, viewing_queues=None, viewer_only=False):
         """Read-only queue; an expired lease never erases dispatch uncertainty."""
         # The live Store otherwise opens a new connection for every lookup.
         # Keep the backlog and job facts consistent, without running migrations.
         if not hasattr(self.db, 'con'):
             from .read_projection import read_projection
             with read_projection(self.db.path) as db:
-                return SubtitleDelivery(db, clock=self.clock, initialize=False).snapshot()
-        if not _exists(self.db, 'subtitle_delivery_jobs'):
-            return {'jobs': [], 'summary': {state: 0 for state in sorted(STATES)}}
+                return SubtitleDelivery(db, clock=self.clock, initialize=False).snapshot(
+                    include_release_review=include_release_review,viewing_queues=viewing_queues,viewer_only=viewer_only)
         policy = delivery_policy(self.db)
+        from .subtitle_dispatch_fence import fence_keys, fenced
+        fences = fence_keys(self.db.con, capacity_only=True)
         lane = priority_show_ids(policy)
         jobs = []
-        for row in self.db.rows('SELECT * FROM subtitle_delivery_jobs ORDER BY created,id'):
+        rows = []
+        if _exists(self.db, 'subtitle_delivery_jobs'):
+            query='SELECT j.* FROM subtitle_delivery_jobs j'
+            params=()
+            if viewer_only:
+                # The public board only displays unwatched tracking episodes.
+                # Keep every global lease and pending owner for exact capacity.
+                query+=""" WHERE j.dispatch_state IN ('committing','unknown','acknowledged') OR j.lease_expires>?
+                    OR (EXISTS (SELECT 1 FROM shows s WHERE s.id=j.show_id AND s.selected=1
+                              AND s.cleanup_hold=0 AND s.state='watching')
+                        AND NOT EXISTS (SELECT 1 FROM watches w WHERE w.show_id=j.show_id
+                                      AND w.episode=j.episode AND w.finished=1))"""
+                params=(self.clock(),)
+            rows=self.db.rows(query+' ORDER BY j.created,j.id',params)
+        for row in rows:
             value = {**row, 'payload': json.loads(row['payload'])}
+            value['slot_fenced'] = fenced(row, fences)
             value['finished'] = _finished(self.db, row['show_id'], row['episode'])
             value['delivery_finished'] = _delivered(self.db, row['show_id'], row['episode'])
             # A long-running pre-delivery-first host can refresh the legacy job
@@ -480,17 +654,53 @@ class SubtitleDelivery:
                                    job['episode'], job['created'], job['id']))
         from .subtitle_enrollment import coverage
         from .subtitle_preparation import preparation_plan
+        from .subtitle_recovery import recovery_plan
+        preparation = preparation_plan(self.db, jobs)
+        try:
+            recovery = recovery_plan(self.db, jobs, preparation, include_release_review=include_release_review)
+        except (OSError, ValueError, TypeError, KeyError):
+            recovery = {'schema': 1, 'checked_at': time.time(), 'error': 'recovery_journal_invalid',
+                        'items': [], 'next_action': None, 'summary': {}}
         return {'jobs': jobs, 'summary': {state: sum(job['state'] == state for job in jobs) for state in sorted(STATES)},
-                'preparation': preparation_plan(self.db, jobs),
-                'enrollment_coverage': coverage(self.db),
+                'capacity': capacity_snapshot(jobs, policy, self.clock()),
+                'preparation': preparation, 'recovery': recovery,
+                'enrollment_coverage': coverage(self.db, viewing_queues),
                 'preparation_features': {'research_modes': list(RESEARCH_MODES), 'all_available_unwatched': True,
+                                         'verified_official_early_release': 1,
+                                         'automatic_official_release_review': 1,
+                                         'autonomous_chinese_sources': 1,
+                                         'fixed_input_owner_recovery': 1,
+                                         'pending_dispatch_refresh_frozen': 1,
                                          'watched_acquisition_guard': True, 'watching_auto_enrollment': True}}
 
+    def set_production_limit(self, limit):
+        """Change only the opted-in capacity, preserving every owner and receipt."""
+        if type(limit) is not int or not 1 <= limit <= 3:
+            raise ValueError('Production capacity must be an integer from 1 to 3')
+        with self.db.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            stored = c.execute("SELECT value FROM kv WHERE key='subtitle_delivery_policy'").fetchone()
+            policy = json.loads(stored['value']) if stored else {}
+            if not isinstance(policy, dict):
+                raise ValueError('Existing subtitle delivery policy must be an object')
+            previous = production_limit(policy)
+            if policy.get('max_active_productions') != limit or type(policy.get('max_active_productions')) is not int:
+                policy['max_active_productions'] = limit
+                c.execute('INSERT OR REPLACE INTO kv VALUES(?,?)', ('subtitle_delivery_policy', _json(policy)))
+                self._event(c, 'policy:subtitle-delivery', 'production-capacity-configured',
+                            {'previous': previous, 'limit': limit})
+        return {'capacity': self.snapshot()['capacity']}
+
     def reserve(self, identity, owner, expected_revision, lease_seconds=900, allow_experience=False,
-                resume_thread=None):
-        """Reserve one ready episode globally; safe undispatched leases may be reclaimed."""
+                resume_thread=None, auto_recovery_turn=None, manual_recovery=False):
+        """Reserve one ready episode within capacity; preserve each episode's owner."""
         if not isinstance(owner, str) or not owner.strip() or not 30 <= lease_seconds <= 86400:
             raise ValueError('Invalid delivery owner or lease duration')
+        if auto_recovery_turn is not None and (not isinstance(auto_recovery_turn, str)
+                                              or not auto_recovery_turn.strip() or len(auto_recovery_turn) > 200):
+            raise ValueError('Automatic recovery requires the exact origin turn')
+        if manual_recovery and auto_recovery_turn is not None:
+            raise ValueError('Manual and automatic recovery are separate operations')
         job = self._job(identity)
         from .subtitle_refinement import two_pass
         continuing_v1 = (two_pass(self.db) and job['payload'].get('refinement_pending')
@@ -500,6 +710,8 @@ class SubtitleDelivery:
         blocker = _scope(self.db, job['show_id'], job['episode'])
         if blocker:
             raise ValueError(blocker)
+        if unreleased_date(self.db, job['show_id'], job['episode'], self.clock()):
+            raise ValueError('Episode is not yet released; wait for actual available media')
         if _finished(self.db, job['show_id'], job['episode']) and not allow_experience:
             raise ValueError('Finished episodes are retained experience samples, not first-delivery priority')
         from .subtitle_refinement import two_pass
@@ -530,20 +742,42 @@ class SubtitleDelivery:
                 raise ValueError('Existing dispatch/receipt must be reconciled, never dispatched again')
             if row['dispatch_state'] == 'blocked-stopped' and not resuming:
                 raise ValueError('Stopped episode must resume its existing responsible chat')
-            occupied = c.execute('''SELECT id FROM subtitle_delivery_jobs WHERE id!=? AND
-                (dispatch_state IN ('committing','unknown','acknowledged') OR lease_expires>?) LIMIT 1''',
-                (identity, self.clock())).fetchone()
-            if occupied:
-                raise ValueError('Another episode already has the single production owner')
+            conflict = production_conflict(c, row, self.clock(),
+                                           check_capacity=row['lease_expires'] <= self.clock())
+            if conflict:
+                if conflict == 'episode_owner_active':
+                    raise ValueError('Episode already has a single production owner')
+                if conflict == 'thread_owner_active':
+                    raise ValueError('Responsible chat already owns another active episode')
+                raise ValueError('Production capacity is full (single production owner by default)')
+            value = json.loads(row['payload'])
+            if auto_recovery_turn is not None:
+                if (not resuming or value.get('user_stopped') or value.get('recovery_class') != 'system'
+                        or value.get('recovery_turn') != auto_recovery_turn):
+                    raise ValueError('Automatic recovery is not authorized for this stopped turn')
+            if resuming and auto_recovery_turn is None and not manual_recovery:
+                raise ValueError('Stopped-owner recovery requires the exact auto turn or explicit manual recovery')
+            if value.get('user_stopped') and not manual_recovery:
+                raise ValueError('A user stop requires a new explicit manual recovery request')
+            if manual_recovery and not resuming:
+                raise ValueError('Manual recovery requires the original stopped responsible chat')
             if row['lease_expires'] > self.clock():
                 if row['lease_owner'] != owner:
                     raise ValueError('Episode already leased')
                 return {**dict(row), 'job_id': identity, 'payload': json.loads(row['payload'])}
             if row['state'] not in ('ready', 'late-review', 'production') and not resuming:
                 raise ValueError('Episode is not dispatchable')
+            if auto_recovery_turn is not None:
+                from .subtitle_recovery import MAX_FAILURES
+                turns = _automatic_recovery_turns(c, row['thread_id'], self.clock())
+                if _automatic_recovery_seen(c, row['thread_id'], auto_recovery_turn):
+                    raise ValueError('This origin turn already has an automatic recovery intent')
+                if len(turns) >= MAX_FAILURES:
+                    raise ValueError('Same-owner automatic recovery limit reached for 24 hours')
             token = uuid.uuid4().hex
-            value = json.loads(row['payload']); value['experience_only'] = allow_experience is True
-            value['owner_stopped_writing'] = False
+            value['experience_only'] = allow_experience is True
+            value['auto_recovery_turn'] = auto_recovery_turn or ''
+            value['manual_recovery_pending'] = manual_recovery is True
             c.execute('UPDATE subtitle_delivery_jobs SET state=\'production\',lease_owner=?,lease_token=?,lease_expires=?,payload=?,revision=revision+1,updated=? WHERE id=?',
                       (owner, token, self.clock() + lease_seconds, _json(value), self.clock(), identity))
             self._event(c, identity, 'reserved', {'owner': owner, 'input_key': row['input_key']})
@@ -551,9 +785,10 @@ class SubtitleDelivery:
             return {**record, 'job_id': identity, 'payload': json.loads(record['payload'])}
 
     def resume(self, identity, thread_id, owner, expected_revision, lease_seconds=900,
-               allow_experience=False):
+               allow_experience=False, auto_recovery_turn=None, manual_recovery=False):
         return self.reserve(identity, owner, expected_revision, lease_seconds,
-                            allow_experience=allow_experience, resume_thread=thread_id)
+                            allow_experience=allow_experience, resume_thread=thread_id,
+                            auto_recovery_turn=auto_recovery_turn, manual_recovery=manual_recovery)
 
     def release(self, identity, owner, expected_revision, lease_token=None, reason='released'):
         """Give back a lease that never reached dispatch; a started dispatch must be reconciled instead."""
@@ -566,10 +801,15 @@ class SubtitleDelivery:
             if row['dispatch_state'] in PROTECTED_DISPATCH:
                 raise ValueError('Dispatch already started; reconcile its result instead of releasing the lease')
             state = row['state']
-            if row['dispatch_state'] != 'blocked-stopped':
+            value = json.loads(row['payload'])
+            value['auto_recovery_turn'] = ''
+            value['manual_recovery_pending'] = False
+            if row['dispatch_state'] == 'blocked-stopped':
+                state = 'blocked'
+            else:
                 state = 'late-review' if row['kind'] == 'late' else 'ready'
-            c.execute('UPDATE subtitle_delivery_jobs SET state=?,lease_owner=\'\',lease_token=\'\',lease_expires=0,revision=revision+1,updated=? WHERE id=?',
-                      (state, self.clock(), identity))
+            c.execute('UPDATE subtitle_delivery_jobs SET state=?,lease_owner=\'\',lease_token=\'\',lease_expires=0,payload=?,revision=revision+1,updated=? WHERE id=?',
+                      (state, _json(value), self.clock(), identity))
             self._event(c, identity, 'lease-released', {'owner': owner, 'reason': reason})
             record = dict(c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone())
             return {**record, 'job_id': identity, 'payload': json.loads(record['payload'])}
@@ -587,6 +827,8 @@ class SubtitleDelivery:
             raise ValueError('Episode was already delivered; do not dispatch another first release')
         if _scope(self.db, job['show_id'], job['episode']):
             raise ValueError('Delivery scope changed')
+        if unreleased_date(self.db, job['show_id'], job['episode'], self.clock()):
+            raise ValueError('Episode is not yet released; preserve the existing request without dispatching')
         assessment = self._dispatch_assessment(job)
         if not assessment['ready'] or assessment['input_signature'] != job['input_key']:
             raise ValueError('Exact ready inputs changed')
@@ -605,6 +847,9 @@ class SubtitleDelivery:
                 raise ValueError('Delivery lease/revision expired or changed')
             if row['dispatch_state'] in PROTECTED_DISPATCH:
                 raise ValueError('Dispatch already started; reconcile its result')
+            conflict = production_conflict(c, row, self.clock(), check_capacity=False)
+            if conflict:
+                raise ValueError('Production writer conflict: ' + conflict)
             token = uuid.uuid4().hex
             c.execute('UPDATE subtitle_delivery_jobs SET dispatch_token=?,dispatch_state=\'committing\',revision=revision+1,updated=? WHERE id=?',
                       (token, self.clock(), identity))
@@ -617,8 +862,50 @@ class SubtitleDelivery:
                       'issued_at': self.clock()}
             self._event(c, identity, 'dispatch-ticket-issued', {'ticket_digest': _digest(_canonical(ticket))})
             return {**record, 'job_id': identity, 'payload': json.loads(record['payload']),
-                    'assessment': json.loads(row['payload'])['assessment'],
+                    'assessment': assessment,
                     'action': 'reuse-thread' if row['thread_id'] else 'create-thread', 'ticket': ticket}
+
+    def mark_auto_recovery(self, identity, owner, expected_revision, origin_turn, ticket):
+        """Consume one exact-turn recovery after ticket archival, before host resume.
+
+        The caller must stop if this transaction fails. Once it succeeds, an
+        unknown host outcome still consumes the attempt and cannot be resent.
+        """
+        validate_ticket(ticket)
+        if (ticket['job_id'] != identity or ticket['owner'] != owner
+                or ticket['revision'] != expected_revision or not isinstance(origin_turn, str) or not origin_turn):
+            raise ValueError('Automatic recovery ticket binding mismatch')
+        with self.db.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row = c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone()
+            if (not row or row['revision'] != expected_revision or row['dispatch_state'] != 'committing'
+                    or _digest(row['dispatch_token']) != _digest(ticket['dispatch_token'])
+                    or row['lease_owner'] != owner or row['input_key'] != ticket['input_key']):
+                raise ValueError('Automatic recovery dispatch changed before host resume')
+            if _scope_transaction(c, row['show_id'], row['episode']):
+                raise ValueError('Automatic recovery scope changed before host resume')
+            watched = c.execute('SELECT finished FROM watches WHERE show_id=? AND episode=?',
+                                (row['show_id'], row['episode'])).fetchone()
+            if watched and watched['finished']:
+                raise ValueError('Automatic recovery episode became watched before host resume')
+            value = json.loads(row['payload'])
+            if (value.get('user_stopped') or value.get('recovery_class') != 'system'
+                    or value.get('recovery_turn') != origin_turn
+                    or value.get('auto_recovery_turn') != origin_turn):
+                raise ValueError('Automatic recovery authorization changed before host resume')
+            turns = _automatic_recovery_turns(c, row['thread_id'], self.clock())
+            if _automatic_recovery_seen(c, row['thread_id'], origin_turn):
+                raise ValueError('This origin turn already has an automatic recovery intent')
+            from .subtitle_recovery import MAX_FAILURES
+            if len(turns) >= MAX_FAILURES:
+                raise ValueError('Same-owner automatic recovery limit reached for 24 hours')
+            attempted_at = self.clock()
+            self._event(c, identity, 'owner-auto-recovery', {
+                'owner_thread_id': row['thread_id'], 'turn_id': origin_turn,
+                'input_key': row['input_key'], 'ticket_digest': _digest(_canonical(ticket)),
+                'trigger': 'automatic', 'attempted_at': attempted_at})
+        return {'automatic_recovery_recorded': True, 'origin_turn_recorded': True,
+                'attempted_at': attempted_at}
 
     def reconcile_dispatch(self, identity, dispatch_token, thread_id=None, definitely_not_created=False,
                            absence_evidence=None):
@@ -635,6 +922,9 @@ class SubtitleDelivery:
             row = c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone()
             if not row or not dispatch_token or row['dispatch_token'] != dispatch_token:
                 raise ValueError('Dispatch token mismatch')
+            from .subtitle_dispatch_fence import fence_keys, fenced
+            if fenced(row, fence_keys(c)):
+                raise ValueError('Fenced resume requires the original ticket and confirmed host receipt')
             if row['thread_id']:
                 if thread_id == row['thread_id'] and row['dispatch_state'] not in ('committing', 'unknown'):
                     return {**dict(row), 'payload': json.loads(row['payload']), 'duplicate': True}
@@ -643,6 +933,9 @@ class SubtitleDelivery:
             if thread_id:
                 if not isinstance(thread_id, str) or not thread_id.strip():
                     raise ValueError('Invalid chat receipt')
+                conflict = production_conflict(c, row, self.clock(), thread_id, check_capacity=False)
+                if conflict:
+                    raise ValueError('Production writer conflict: ' + conflict)
                 state, status = 'production', 'acknowledged'
             elif definitely_not_created:
                 if row['thread_id'] or row['dispatch_state'] not in ('committing', 'unknown'):
@@ -652,8 +945,9 @@ class SubtitleDelivery:
                 status = 'not-created'
             else:
                 state, status = 'blocked', 'unknown'
-            c.execute('UPDATE subtitle_delivery_jobs SET state=?,dispatch_state=?,thread_id=?,lease_expires=0,revision=revision+1,updated=? WHERE id=?',
-                      (state, status, thread_id or row['thread_id'], self.clock(), identity))
+            value = _resumed_payload(json.loads(row['payload'])) if thread_id else json.loads(row['payload'])
+            c.execute('UPDATE subtitle_delivery_jobs SET state=?,dispatch_state=?,thread_id=?,lease_expires=0,payload=?,revision=revision+1,updated=? WHERE id=?',
+                      (state, status, thread_id or row['thread_id'], _json(value), self.clock(), identity))
             self._event(c, identity, 'dispatch-reconciled', {'result': status, 'thread_id': thread_id,
                                                               **({'absence_evidence': absence_evidence} if definitely_not_created else {})})
             record = dict(c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone())
@@ -738,8 +1032,9 @@ class SubtitleDelivery:
                     state, status = 'production', 'acknowledged'
                 else:
                     state, status = ('late-review' if row['kind'] == 'late' else 'ready'), 'not-created'
-                c.execute('UPDATE subtitle_delivery_jobs SET state=?,dispatch_state=?,thread_id=?,lease_expires=0,revision=revision+1,updated=? WHERE id=?',
-                          (state, status, thread_id or row['thread_id'], self.clock(), ticket['job_id']))
+                value = _resumed_payload(json.loads(row['payload'])) if outcome == 'created' else json.loads(row['payload'])
+                c.execute('UPDATE subtitle_delivery_jobs SET state=?,dispatch_state=?,thread_id=?,lease_expires=0,payload=?,revision=revision+1,updated=? WHERE id=?',
+                          (state, status, thread_id or row['thread_id'], _json(value), self.clock(), ticket['job_id']))
                 self._event(c, ticket['job_id'], 'dispatch-reconciled', {'result': status, 'thread_id': thread_id, 'receipt_id': receipt_id,
                                                                          **({'absence_evidence': evidence} if outcome == 'not_created' else {})})
                 changed = 1
@@ -789,6 +1084,9 @@ class SubtitleDelivery:
                 return 'already_acknowledged', 1
             if row['dispatch_state'] not in ('committing', 'unknown') or (row['thread_id'] and row['thread_id'] != thread_id):
                 return 'state_conflict', 1
+            conflict = production_conflict(c, row, self.clock(), thread_id, check_capacity=False)
+            if conflict:
+                return conflict, int(conflict != 'production_capacity_full')
             return '', 1
         # not_created: only a creation attempt can be proven absent; an existing responsible thread is never cleared by it
         if ticket['dispatch_action'] != 'create' or row['thread_id'] or row['dispatch_state'] not in ('committing', 'unknown'):
@@ -851,8 +1149,19 @@ class SubtitleDelivery:
                 'blockers': reasons, 'can_apply': False, 'read_only': True,
                 'next_action': 'owner review of authoritative host fact and explicit current-revision CAS; no credential retrofit'}
 
-    def record_blocked(self, identity, thread_id, reasons, owner_stopped=False):
+    def record_blocked(self, identity, thread_id, reasons, owner_stopped=False,
+                       recovery_class=None, recovery_turn=None, user_stopped=False):
         """Keep the same responsible chat; a blocker does not authorize a second chat."""
+        if recovery_class not in (None, 'system', 'source_wait', 'repair_blocked'):
+            raise ValueError('Unknown stopped-owner recovery classification')
+        if recovery_class is not None and not owner_stopped:
+            raise ValueError('Recovery classification requires a stopped writer')
+        if recovery_class == 'system' and (not isinstance(recovery_turn, str) or not recovery_turn.strip()):
+            raise ValueError('System recovery requires the exact stopped turn')
+        if recovery_turn is not None and recovery_class != 'system':
+            raise ValueError('A recovery turn is only valid for a system stop')
+        if user_stopped and not owner_stopped:
+            raise ValueError('A user stop must also stop the writer')
         with self.db.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             row = c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (identity,)).fetchone()
@@ -862,12 +1171,29 @@ class SubtitleDelivery:
                 raise ValueError('Accepted episodes cannot be downgraded to an ordinary blocker')
             if row['dispatch_state'] in ('committing', 'unknown'):
                 raise ValueError('Unknown dispatch cannot be released as an ordinary production blocker')
-            value = json.loads(row['payload']); value['production_blockers'] = list(reasons or [])
+            if not owner_stopped and row['dispatch_state'] != 'acknowledged':
+                raise ValueError('Only an active acknowledged owner can report a non-stopped blocker')
+            value = json.loads(row['payload'])
+            if value.get('user_stopped') and not owner_stopped:
+                raise ValueError('A user-stopped writer cannot be reclassified as active')
+            value['production_blockers'] = list(reasons or [])
+            previous_recovery = (value.get('recovery_class'), value.get('recovery_turn'))
             value['owner_stopped_writing'] = owner_stopped is True
+            value['user_stopped'] = bool(value.get('user_stopped') or user_stopped)
+            value['recovery_class'] = 'user_stopped' if value['user_stopped'] else (recovery_class or 'protected')
+            value['recovery_turn'] = recovery_turn or ''
+            value['auto_recovery_turn'] = ''
+            value['manual_recovery_pending'] = False
+            if (previous_recovery == (value['recovery_class'], value['recovery_turn'])
+                    and isinstance(value.get('recovery_since'), (int, float))):
+                pass  # Re-reporting the same condition must not postpone recovery.
+            else:
+                value['recovery_since'] = self.clock()
             status = 'blocked-stopped' if owner_stopped is True else row['dispatch_state']
             c.execute('UPDATE subtitle_delivery_jobs SET state=\'blocked\',dispatch_state=?,lease_expires=0,payload=?,revision=revision+1,updated=? WHERE id=?',
                       (status, _json(value), self.clock(), identity))
-            self._event(c, identity, 'production-blocked', {'reasons': value['production_blockers']})
+            self._event(c, identity, 'production-blocked', {'reasons': value['production_blockers'],
+                        'recovery_class': value['recovery_class'], 'recovery_turn': value['recovery_turn']})
         return self.get(identity)
 
     def record_finished(self, identity, thread_id, release, player_report):

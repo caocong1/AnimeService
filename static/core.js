@@ -38,6 +38,24 @@ async function api(path, body, options = {}) {
   return data;
 }
 
+async function saveTrackingState(sid, state, onPending = () => {}) {
+  const path = '/shows/' + sid + '/state';
+  let result = await api(path, {state});
+  const confirmed = value => {
+    if (!value.selected || !Object.hasOwn(STATES, value.state)) throw Error('保存结果待核对，正在读取当前状态');
+    return value.state;
+  };
+  if (!result.pending) return confirmed(result);
+  onPending(result.pending);
+  const until = Date.now() + 15000;
+  while (Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 400));
+    result = await api(path);
+    if (!result.pending) return confirmed(result);
+  }
+  throw Error('状态请求已保存，后台仍在处理。刷新作品页可查看进度。');
+}
+
 /* Only the fields the pages know are kept from an optional capabilities object; nothing else is merged. */
 function capabilityWhitelist(c) {
   const w = c && typeof c === 'object' && c.playback_writer && typeof c.playback_writer === 'object' ? c.playback_writer : null;
@@ -46,7 +64,7 @@ function capabilityWhitelist(c) {
 function boot() {
   App.ready ??= api('/bootstrap').then(b => {
     Object.assign(App, { token: b.token, local: b.local, settings: b.settings, quarters: b.quarters || [], catalog_years: b.catalog_years || [],
-      capabilities: capabilityWhitelist(b.capabilities) });
+      capabilities: capabilityWhitelist(b.capabilities), coverCache: b.cover_cache_version === 1 });
     return App;
   });
   return App.ready;
@@ -136,7 +154,7 @@ function shell(active) {
   document.body.append(toastEl);
   $('#check-now').addEventListener('click', e => act(e.currentTarget, async () => {
     const r = await api('/check', {});
-    toast(r.blocker ? '已请求检查 · 下载受阻：' + r.blocker : '已请求检查新集');
+    toast(r.blocker ? '已检查新集，下载暂时无法开始' : '已请求检查新集');
   }));
   const poll = () => health(active === 'manage');  // only the management page needs the full status
   boot().then(() => { poll(); setInterval(() => { if (!document.hidden) poll(); }, 60000); }).catch(e => toast(e.message));
@@ -168,8 +186,12 @@ function healthSummary(h, now = Date.now() / 1000) {
   /* From /api/health: alive within 240 s of the last heartbeat, then blocker, error, reviews in that order. */
   const alive = h.heartbeat && h.heartbeat.age != null && h.heartbeat.age < 240;
   const p = h.problems || {};
+  if (alive && h.download_storage?.below_reserve) {
+    const {free_gib, reserve_gib} = h.download_storage;
+    return {state:'warn', text:'下载盘空间不足', title:`剩余 ${free_gib} GiB，新增下载需保留 ${reserve_gib} GiB`};
+  }
   const state = !alive ? 'down' : p.blocker || p.error || p.reviews ? 'warn' : 'ok';
-  const text = !alive ? '后台未响应' : p.blocker ? '下载受阻' : p.error ? '有错误' : p.reviews ? '有待核查' : '后台正常';
+  const text = !alive ? '后台未响应' : p.blocker ? '下载受阻' : p.error ? '服务暂时异常' : p.reviews ? '正在确认下载' : '后台正常';
   return { state, text, title: alive ? '心跳 ' + ago(now - h.heartbeat.age) : '' };
 }
 
@@ -187,7 +209,7 @@ async function health(full = false) {
     const blocked = s.downloader?.blocker;
     const { error, reviews } = statusProblems(s);
     el.dataset.state = !alive ? 'down' : blocked || error || reviews.length ? 'warn' : 'ok';
-    el.lastElementChild.textContent = !alive ? '后台未响应' : blocked ? '下载受阻' : error ? '有错误' : reviews.length ? '有待核查' : '后台正常';
+    el.lastElementChild.textContent = !alive ? '后台未响应' : blocked ? '下载受阻' : error ? '服务暂时异常' : reviews.length ? '正在确认下载' : '后台正常';
     el.title = alive ? '心跳 ' + ago(s.heartbeat.time) : '';
     dispatchEvent(new CustomEvent('fanyu:status', { detail: s }));
   } catch {
@@ -217,12 +239,15 @@ async function act(control, fn) {
 
 /* ---------- Covers ---------- */
 
-function cover(src, title, cls = '', href = '') {
+function cover(src, title, cls = '', href = '', { width = 480, eager = false, priority = false } = {}) {
   const initial = esc(String(title || '番').trim().slice(0, 1));
-  const url = https(src);
+  let url = https(src);
+  if (App.coverCache && /^https:\/\/lain\.bgm\.tv\/(?:r\/[1-9][0-9]{0,3}\/)?pic\/cover\/[a-z]\/[a-f0-9]{2}\/[a-f0-9]{2}\/[A-Za-z0-9_-]{1,100}\.(?:jpg|jpeg|png|webp|gif)$/.test(src || '')) {
+    url = '/covers/v1/' + (width === 160 ? 160 : 480) + new URL(src).pathname;
+  }
   const tag = href ? 'a' : 'span';
   const attrs = href ? ` href="${href}" tabindex="-1" aria-hidden="true"` : '';
-  return `<${tag} class="cover ${cls}${url ? '' : ' no-img'}" data-initial="${initial}"${attrs}>${url ? `<img src="${url}" alt="" loading="lazy" decoding="async">` : ''}</${tag}>`;
+  return `<${tag} class="cover ${cls}${url ? '' : ' no-img'}" data-initial="${initial}"${attrs}>${url ? `<img src="${url}" alt="" loading="${eager || priority ? 'eager' : 'lazy'}" fetchpriority="${priority ? 'high' : 'auto'}" decoding="async">` : ''}</${tag}>`;
 }
 const lineColour = id => `--lc:var(--l${id % 8 + 1})`;
 document.addEventListener('error', e => {
@@ -322,8 +347,10 @@ function ticket(show, big = true) {
   const e = show.next;
   if (!e) return '';
   const resume = e.s === 'resume';
-  return `<a class="ticket${big ? '' : ' small'}" href="${watchHref(e)}" data-s="${e.s}" aria-label="${esc(show.title)} 第 ${e.n} 集 ${resume ? '续播' : '播放'}">
-    <span class="t-ep"><small>第</small><b>${e.n}</b><small>集</small></span>
+  const edition = ['v0', 'v1'].includes(e.release?.edition) ? e.release.edition : '';
+  const version = edition ? `<span class="t-edition" title="${edition === 'v1' ? '精校细调版' : '观看版'}">${edition}</span>` : '';
+  return `<a class="ticket${big ? '' : ' small'}" href="${watchHref(e)}" data-s="${e.s}" aria-label="${esc(show.title)} 第 ${e.n} 集${edition ? ' ' + edition : ''} ${resume ? '续播' : '播放'}">
+    <span class="t-ep"><small>第</small><b>${e.n}</b><small>集</small>${version}</span>
     <span class="t-act">${icon('play')}<span class="t-verb">${resume ? '续播' : '播放'}</span>${resume ? `<span class="t-time">${clock(e.position)}</span>` : ''}</span></a>`;
 }
 

@@ -3,7 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 STATES = {'wish','trial','watching','paused','dropped','completed'}
-DEFAULTS = {'poll_seconds':180,'resolution':'1080','subtitle':'any_zh','groups':[],
+DEFAULTS = {'poll_seconds':180,'resolution':'1080','subtitle':'any_zh','groups':[], 'qbit_auto_restore_enabled':False,
             'dandan_exe':str(Path.home()/'AppData/Roaming/弹弹play/dandanplay.exe'),
             'dandan_port':26666, 'minimum_free_gb':10}
 
@@ -48,6 +48,10 @@ class Store:
               position REAL DEFAULT 0,method TEXT DEFAULT 'manual',updated REAL,PRIMARY KEY(show_id,episode));
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,time REAL,level TEXT,scope TEXT,message TEXT);
             CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,value TEXT);
+            CREATE TABLE IF NOT EXISTS tracking_requests(show_id INTEGER PRIMARY KEY,state TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS candidates_by_show_status ON candidates(show_id,status);
+            CREATE INDEX IF NOT EXISTS tasks_by_show_status ON tasks(show_id,status);
+            CREATE INDEX IF NOT EXISTS events_by_level_id ON events(level,id);
             CREATE TABLE IF NOT EXISTS bangumi_sync_queue(show_id INTEGER PRIMARY KEY,
               revision INTEGER NOT NULL DEFAULT 1,state TEXT NOT NULL DEFAULT 'pending',
               error TEXT DEFAULT '',failures INTEGER DEFAULT 0,next_attempt REAL DEFAULT 0,
@@ -120,10 +124,10 @@ class Store:
                     UPDATE shows SET state='trial' WHERE id=NEW.show_id AND selected=1 AND state='wish';
                 END;''')
     @contextlib.contextmanager
-    def connect(self):
-        c=sqlite3.connect(self.path,timeout=20); c.row_factory=sqlite3.Row
-        c.execute('PRAGMA foreign_keys=ON');c.execute('PRAGMA synchronous=FULL')
+    def connect(self, *, timeout=20):
+        c=sqlite3.connect(self.path,timeout=timeout); c.row_factory=sqlite3.Row
         try:
+            c.execute('PRAGMA foreign_keys=ON');c.execute('PRAGMA synchronous=FULL')
             yield c;c.commit()
         except Exception:
             c.rollback();raise

@@ -31,7 +31,7 @@ proposal 条目：
 独立核心 `Archive.mapped_cue` 的规则：草稿 metadata 里的 `media_fingerprint` 等于当前母片 fingerprint 且时轴不是估计值时不需要映射；
 否则只有当条目的 `target_fingerprint` 等于当前母片 fingerprint、`status == "accepted"`、`reviewer` 与 `evidence` 非空时才使用 `segments`。
 四个毫秒值必须是 int，`source_end_ms > source_start_ms`，`target_end_ms > target_start_ms`，全部 ≥ 0；
-任何 cue 不完整落在某一段内都会抛错（cue crosses edit）。工具的 `segments` 已满足这些约束，人工改动后仍须满足。
+任何 cue 不完整落在某一段内都会抛错（cue crosses edit）。工具的 `segments` 已满足这些约束，编辑后仍须满足。
 
 ## 2. 最小提取示例
 
@@ -94,10 +94,10 @@ for point in result['review_points']:
 5. 以上完成后才把 `status` 改为 `accepted`，另存 `alignments.accepted.json`（不覆盖 proposed 文件），由原机唯一负责人执行
    `python -m subtitle_lab --root <私有归档根目录> workbook --show … --season … --episode … --base <中文基稿 id> --media <母片> --alignments alignments.accepted.json --refresh`。
    只对未看集、沿现有唯一 owner、生成新的不可变版本；研究电脑不运行它。
-6. 时间配对覆盖、人工锚点一致、文本相似都不是声学验收；`finished`、`edition`、`accepted` 继续分别记录。
+6. 时间配对覆盖、已核锚点一致、文本相似都不是声学验收；`finished`、`edition`、`accepted` 继续分别记录。
 
 ## 6. 禁止
 
 - 把字幕文件 hash 当 fingerprint；只改 status；用均匀平移代替分段；跨剪辑拆 cue。
 - 在研究电脑或非 owner 会话运行 workbook refresh、发布、DB 写入或唤醒任务。
-- 用工具输出覆盖输入或旧成品：工具本身拒绝，人工复制时同样适用。
+- 用工具输出覆盖输入或旧成品：工具本身拒绝，另行复制时同样适用。

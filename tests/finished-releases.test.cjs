@@ -35,7 +35,8 @@ test('v0 remains playable and v1 is preferred by edition rather than old artifac
   assert.equal(merge([],releases)[0].release.edition,'v1');
   assert.equal(merge([],releases)[0].release_versions.length,3);
   assert.ok(compare(releases[1],releases[0])>0);
-  assert.match(label(releases[0]),/v0.*观看/);
+  assert.equal(label(releases[0]),'观看版');
+  assert.equal(label(releases[1]),'精校版');
 });
 
 test('finished episodes replace missing/download states in viewing boards without editing source records', () => {
@@ -158,10 +159,87 @@ test('tracking attaches only to matching release id and content hash',async()=>{
   const {load}=require('../static/finished-releases.js'),original=global.fetch;
   const release={...sample(),video_sha256:'a'.repeat(64)};
   let hash='b'.repeat(64);
-  global.fetch=async url=>({ok:true,json:async()=>url.endsWith('index.json')?{releases:[release]}:{releases:[{id:release.id,video_sha256:hash,finished:true,progress:{position:90,duration:100}}]}});
+  global.fetch=async url=>({ok:true,json:async()=>url.endsWith('index.json')?{releases:[release]}:{releases:[{...release,video_sha256:hash,finished:true,progress:{position:90,duration:100}}]}});
   try{
-    assert.equal((await load())[0].progress,undefined);
+    assert.deepEqual(await load(),[]);
+    assert.equal((await load({verifyMedia:false}))[0].progress,undefined);
     hash=release.video_sha256;
     const [loaded]=await load();assert.equal(loaded.finished,true);assert.equal(loaded.progress.position,90);
   }finally{global.fetch=original;}
+});
+
+test('server catalog verifies a large library without individual media HEAD requests',async()=>{
+  const {load}=require('../static/finished-releases.js'),original=global.fetch,calls=[];
+  const releases=Array.from({length:133},(_,i)=>({...sample(),id:'release-'+i,episode:i+1,video_sha256:'a'.repeat(64)}));
+  const records=releases.map(r=>({...r,progress:null,finished:false,show_state:'watching'}));
+  // Missing, changed media, and stale episode/season/show mappings stay unavailable.
+  records.splice(0,1);records[0].video_sha256='b'.repeat(64);
+  records[1].season++;records[2].episode++;records[3].show_id++;
+  global.fetch=async(url,options)=>{
+    calls.push([url,options.method || 'GET']);
+    assert.ok(!url.endsWith('.mp4'));
+    return {ok:true,json:async()=>({releases:url.endsWith('index.json')?releases:records})};
+  };
+  try{
+    const loaded=await load({verifyMedia:true});
+    assert.equal(loaded.length,128);assert.equal(loaded[0].id,'release-5');
+    assert.deepEqual(calls.map(c=>c[1]),['GET','GET']);
+  }finally{global.fetch=original;}
+});
+
+test('index and viewing records start together and a detail page loads only its own releases',async()=>{
+  const {load}=require('../static/finished-releases.js'),original=global.fetch,calls=[];
+  const own={...sample(),video_sha256:'a'.repeat(64)},other={...own,id:'other-show',show_id:43};
+  let completeIndex;
+  global.fetch=(url)=>{
+    calls.push(url);
+    if(url.endsWith('index.json'))return new Promise(resolve=>completeIndex=()=>resolve({ok:true,json:async()=>({releases:[own,other]})}));
+    return Promise.resolve({ok:true,json:async()=>({releases:[own,other]})});
+  };
+  try{
+    const pending=load({verifyMedia:true,showId:42});
+    assert.deepEqual(calls,['/static/finished-media/index.json','/api/finished-viewing']);
+    completeIndex();assert.deepEqual((await pending).map(r=>r.id),[own.id]);
+  }finally{global.fetch=original;}
+});
+
+test('an unavailable viewing API retains the old view instead of trusting the manifest or sending HEAD',async()=>{
+  const {load}=require('../static/finished-releases.js'),original=global.fetch,calls=[];
+  global.fetch=async url=>{
+    calls.push(url);
+    return url.endsWith('index.json')?{ok:true,json:async()=>({releases:[sample()]})}:{status:503,ok:false};
+  };
+  try{
+    await assert.rejects(load({verifyMedia:true}),/观看记录/);
+    assert.equal(calls.length,2);
+  }finally{global.fetch=original;}
+});
+
+test('a detail observer ignores deliveries belonging to other shows',async()=>{
+  const f=observerFixture(),changes=[];
+  const stop=f.api.observe(rows=>changes.push(rows),{initial:[],showId:42});
+  const timer=[...f.timers.values()][0];
+  f.setRows([{...sample(),show_id:43}]);await timer.fn();assert.equal(changes.length,0);
+  f.setRows([sample(),{...sample(),id:'other',show_id:43}]);await timer.fn();
+  assert.equal(changes.length,1);assert.deepEqual(Array.from(changes[0],r=>r.show_id),[42]);
+  stop();
+});
+
+test('a large library can finish sequential index/tracking/media checks after eight seconds',async()=>{
+  const fs=require('node:fs'),vm=require('node:vm');
+  let clock=0,deadline=Infinity,abort,cleared=false;
+  const ctx=vm.createContext({AbortController,
+    setTimeout(fn,ms){deadline=clock+ms;abort=fn;return 1;},
+    clearTimeout(){cleared=true;},
+    fetch:async(url,options)=>{
+      clock+=url.endsWith('index.json')?12000:url==='/api/finished-viewing'?7000:100;
+      if(clock>=deadline)abort();
+      options.signal.throwIfAborted();
+      if(url.endsWith('index.json'))return {ok:true,json:async()=>({releases:[sample()]})};
+      if(url==='/api/finished-viewing')return {status:404};
+      return {ok:true,headers:new Headers({'content-length':'100','content-type':'video/mp4'})};
+    },module:{exports:{}}});
+  vm.runInContext(fs.readFileSync('static/finished-releases.js','utf8'),ctx);
+  const rows=await ctx.module.exports.load({verifyMedia:true});
+  assert.equal(rows.length,1);assert.ok(clock>8000);assert.ok(cleared);
 });

@@ -13,7 +13,8 @@ import re
 from pathlib import Path, PureWindowsPath
 
 from .subtitle_delivery import (
-    RECEIPT_SCHEMA, _canonical, _digest, _json, _scope_transaction, validate_ticket,
+    RECEIPT_SCHEMA, _canonical, _digest, _json, _scope_transaction, validate_ticket, production_conflict,
+    _resumed_payload,
 )
 
 RECONCILIATION_SCHEMA = 'dispatch-reconciliation/v1'
@@ -130,7 +131,14 @@ def _host_observation(path, ticket, source_id, revision, thread_id, project_root
     _reject_authority((created, read, waited), ticket)
     thread = read.get('thread') or {}
     polls = waited.get('polls') or []
-    if (created.get('threadId') != thread_id or created.get('hostId') != 'local'
+    # Native send_message_to_thread may return only threadId when its optional
+    # hostId argument defaults to the local host. Keep those raw bytes intact:
+    # the two independent native snapshots below must both explicitly bind the
+    # exact existing thread to local. An explicit incompatible host never falls
+    # back, and create_thread still requires its promised hostId in the result.
+    created_local = (created.get('hostId') == 'local'
+                     or (ticket['dispatch_action'] == 'reuse' and 'hostId' not in created))
+    if (created.get('threadId') != thread_id or not created_local
             or thread.get('id') != thread_id or thread.get('hostId') != 'local'
             or thread.get('kind') != 'codex' or len(polls) != 1 or waited.get('errors')):
         raise ValueError('Exact existing local Codex thread evidence required')
@@ -212,7 +220,7 @@ def reconcile_created(delivery, ticket, source_receipt_id, expected_revision, th
             raise ValueError('Fresh native host reverification required')
         source = c.execute('SELECT * FROM dispatch_receipts WHERE receipt_id=?', (source_receipt_id,)).fetchone()
         if (not source or source['schema'] != RECEIPT_SCHEMA or source['job_id'] != ticket['job_id']
-                or source['outcome'] != 'created' or source['reason'] != 'revision_moved'
+                or source['outcome'] != 'created' or source['reason'] not in ('revision_moved','production_capacity_full')
                 or source['receipt_accepted'] or source['state_changed']):
             raise ValueError('Original rejected revision_moved created receipt required')
         if stamp < source['recorded_at']:
@@ -253,19 +261,26 @@ def reconcile_created(delivery, ticket, source_receipt_id, expected_revision, th
         else:
             accepted = 1
             watched = c.execute('SELECT finished FROM watches WHERE show_id=? AND episode=?', (row['show_id'], row['episode'])).fetchone()
+            value = json.loads(row['payload'])
+            pending_recovery = bool(value.get('auto_recovery_turn') or value.get('manual_recovery_pending'))
+            initial_refinement = (row['kind'] == 'refinement' and bool(value.get('baseline_release_id'))
+                                  and not value.get('user_stopped'))
             if _scope_transaction(c, row['show_id'], row['episode']) or (watched and watched['finished']):
                 reason = 'scope_changed'
-            elif (row['state'] not in ('production', 'blocked') or json.loads(row['payload']).get('owner_stopped_writing')
+            elif (row['state'] not in ('production', 'blocked')
+                  or (value.get('owner_stopped_writing') and not (pending_recovery or initial_refinement))
                   or row['dispatch_state'] not in ('committing', 'unknown')
                   or (row['thread_id'] and row['thread_id'] != thread_id)):
                 reason = 'state_conflict'
-            elif c.execute("SELECT id FROM subtitle_delivery_jobs WHERE id!=? AND (dispatch_state IN ('committing','unknown','acknowledged') OR lease_expires>?) LIMIT 1",
-                           (ticket['job_id'], now)).fetchone():
-                reason = 'other_owner_active'
+            else:
+                conflict = production_conflict(c, row, now, thread_id)
+                if conflict:
+                    reason = 'other_owner_active' if conflict == 'production_capacity_full' else conflict
         changed = 0
         if not reason:
-            changed = c.execute("UPDATE subtitle_delivery_jobs SET state='production',dispatch_state='acknowledged',thread_id=?,lease_expires=0,revision=revision+1,updated=? WHERE id=? AND revision=? AND dispatch_token=? AND input_key=? AND lease_owner=? AND lease_token=?",
-                                (thread_id, now, ticket['job_id'], expected_revision, ticket['dispatch_token'],
+            value = _resumed_payload(json.loads(row['payload']))
+            changed = c.execute("UPDATE subtitle_delivery_jobs SET state='production',dispatch_state='acknowledged',thread_id=?,lease_expires=0,payload=?,revision=revision+1,updated=? WHERE id=? AND revision=? AND dispatch_token=? AND input_key=? AND lease_owner=? AND lease_token=?",
+                                (thread_id, _json(value), now, ticket['job_id'], expected_revision, ticket['dispatch_token'],
                                  ticket['input_key'], ticket['owner'], ticket['lease_token'])).rowcount
             if changed != 1:
                 raise ValueError('Reconciliation CAS failed')

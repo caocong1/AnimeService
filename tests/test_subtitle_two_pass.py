@@ -56,7 +56,7 @@ def test_v0_keeps_single_writer_until_evidenced_v1(setup,monkeypatch):
     s.refresh();assert s.get(identity)['state']=='production'
     assert not enqueue_refinement(s,identity)  # never create another writer for active v1
     s.record_blocked(identity,'writer',['synthetic tool interruption'],owner_stopped=True)
-    saved=s.get(identity);lease=s.resume(identity,'writer','dispatcher',saved['revision'])
+    saved=s.get(identity);lease=s.resume(identity,'writer','dispatcher',saved['revision'],manual_recovery=True)
     intent=s.begin_dispatch(identity,'dispatcher',lease['lease_token'],lease['revision'])
     s.reconcile_dispatch(identity,intent['dispatch_token'],thread_id='writer')
     v1root=root.with_name('v2');shutil.copytree(root,v1root)

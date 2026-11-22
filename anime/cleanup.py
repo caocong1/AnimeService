@@ -21,9 +21,11 @@ class Cleanup:
         if manual and manual['t']:played.append(manual['t'])
         activity=max(played) if played else first
         if s['state']!='dropped' and (not activity or now-activity<180*86400):return None
-        files=[];hashes=set();root=self.engine.library.resolve()
+        from .download_storage import library_for,stage_for
+        files=[];hashes=set()
         for e in episodes:
             p=Path(e['path']);resolved=p.resolve()
+            root=library_for(self.engine.library,resolved)
             task=self.db.one('SELECT * FROM tasks WHERE hash=? AND show_id=?',(e['hash'],sid))
             if not task or not resolved.is_relative_to(root) or resolved==root:raise ValueError('文件不在本项目动画目录或无任务所有权')
             # Reject junctions/symlinks and aliases, not merely lexical traversal.
@@ -38,6 +40,7 @@ class Cleanup:
         core={'id':sid,'state':s['state'],'activity':activity,'files':files,'hashes':sorted(hashes)}
         for h in sorted(hashes):
             task=self.db.one('SELECT * FROM tasks WHERE hash=?',(h,))
+            root=library_for(self.engine.library,task['save_path'])
             if task.get('provider')!='thunder':
                 aliases=[self.db.get(r['key']) for r in self.db.rows("SELECT key FROM kv WHERE key LIKE ?",('qbit_file_alias_'+h+'_%',))]
                 if not aliases:continue
@@ -46,7 +49,7 @@ class Cleanup:
                 self.engine.verify_qbit_files(task,self.engine.qb.files(h))
                 for alias in aliases:
                     source=Path(alias['source']).resolve();target=Path(alias['path']).resolve()
-                    if not source.is_relative_to(self.engine.incomplete.parent.resolve()) or not target.is_relative_to(root):raise ValueError('qB归库链接路径越界')
+                    if not source.is_relative_to(stage_for(self.engine.incomplete,source).parent) or not target.is_relative_to(root):raise ValueError('qB归库链接路径越界')
                     if not any(x['path']==str(target) for x in files):continue
                     if not source.is_file() or source.stat().st_size!=alias['size'] or not os.path.samefile(source,target):raise ValueError('qB归库链接已变化')
                     if any(x.is_symlink() or (hasattr(x,'is_junction') and x.is_junction()) for x in [source,*source.parents]):raise ValueError('链接路径不能自动清理')
@@ -56,7 +59,7 @@ class Cleanup:
             observed=self.engine.thunder.inspect(task)
             if not observed or not observed['verified_complete']:raise ValueError('迅雷尚未核验全部选中文件完成')
             stage=Path(task['staging_path']).resolve();dest=Path(task['save_path']).resolve()
-            if not stage.is_relative_to(self.engine.incomplete.resolve()):raise ValueError('迅雷暂存目录不属于项目')
+            if not stage.is_relative_to(stage_for(self.engine.incomplete,stage)):raise ValueError('迅雷暂存目录不属于项目')
             for f in observed['files']:
                 if not f['selected']:continue
                 source=(stage/f['name']).resolve();target=(dest/f['name']).resolve()

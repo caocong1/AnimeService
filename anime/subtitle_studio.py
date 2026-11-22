@@ -1,7 +1,8 @@
 """Episode subtitle research. Native downloads stay behind the host's existing gates."""
-import hashlib,importlib.util,json,re,shutil,sys,threading,time
+import hashlib,json,re,shutil,threading,time
 from pathlib import Path
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse,JSONResponse
+from .subtitle_lab import lab_core
 from .download_policy import require_submission_ready
 from .fidelity import fidelity_blocker,preference_blocker
 from .source_blacklist import blacklist_blocker,KEY as BLACKLIST_KEY
@@ -9,20 +10,10 @@ from .releases import bdecode,validate_title,select_files,Rejected
 from .source_review import family
 from .subtitles import Subtitles
 from .net import safe_error
+from .diagnostics import record_event,record_subtitle_health
 from .native_indexes import candidate_mapping,clean_blocker,acquisition_priority
 from .viewing_workflow import (enabled as split_enabled,production_wanted,base_remaining,
                               require_base_slot,require_reference_slot,queue_snapshot,RESEARCH_MODES)
-
-
-def lab_core():
-    name='_anime_subtitle_lab_core'
-    if name not in sys.modules:
-        path=Path('D:/SubtitleSkillLab/subtitle_lab/core.py')
-        if not path.is_file():raise ValueError('字幕研究项目未安装')
-        spec=importlib.util.spec_from_file_location(name,path)
-        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-        sys.modules[name]=module
-    return sys.modules[name]
 
 
 def archive_for(db):
@@ -41,11 +32,14 @@ def authored(db,item):
         selected=(accepted_build(archive,lab_core(),identity,target) if identity else None) if managed else archive.selected(item['show_id'],db.mapping(item['show_id']).get('season',1),item['episode'],target)
         if selected:
             book=json.loads((archive.root/'builds'/selected['id']/'decisions.json').read_text(encoding='utf-8'))
+            checked_drafts=set()
             for cue in book['cues']:
                 for field in ('source','japanese_source'):
                     ref=cue[field]
-                    if not ref.get('draft_id'):continue
-                    base=archive.draft(ref['draft_id'])
+                    draft_id=ref.get('draft_id')
+                    if not draft_id or draft_id in checked_drafts:continue
+                    checked_drafts.add(draft_id)
+                    base=archive.draft(draft_id)
                     if fidelity_blocker(db,base['metadata'].get('release','')):return None
         return selected
     except (ValueError,OSError,KeyError):return None
@@ -97,6 +91,8 @@ class SubtitleStudio:
         return out
 
     def queue(self,c,role='clean_base'):
+        from .subtitle_reference_intake import require_reference_candidate
+        require_reference_candidate(self.db,c,role)
         sid,ep=c['show_id'],c['episode'];self.ensure(sid,ep,True)
         if role not in ('clean_base','subtitle_reference'):raise ValueError('未知研究角色')
         if (ep==1 and role=='clean_base'
@@ -105,12 +101,14 @@ class SubtitleStudio:
         if role=='subtitle_reference':require_reference_slot(self.db,sid,ep)
         elif clean_blocker(self.db,c):raise ValueError(clean_blocker(self.db,c))
         data=self.engine.sources.torrent(c);h,files=bdecode(data)
+        require_reference_candidate(self.db,c,role,files)
         expected=re.search(r'(?i)([a-f0-9]{40})\.torrent',c['url'])
         if expected and expected[1].lower()!=h:raise ValueError('字幕样本hash不符')
         selected,ids=select_files(files,candidate_mapping(self.db.mapping(sid),c),[ep],[ep])
         if set(selected)!={ep}:raise ValueError('字幕研究只取该集单版本')
         selection={'files':files,'ids':ids,'selected':{str(ep):selected[ep]}}
         with self.db.gate:
+            require_reference_candidate(self.db,c,role,files)
             self.ensure(sid,ep,True);self.engine.check_legacy_owner(sid)
             if (ep==1 and role=='clean_base'
                     and self.engine.source_review.policy(sid).get('mode')!='subtitle_only'):return
@@ -165,6 +163,8 @@ class SubtitleStudio:
             choices={}
             current=[c for c in sorted(self.candidates(sid),key=acquisition_priority)
                      if c['episode'] not in watched]
+            from .subtitle_reference_intake import reference_only
+            current=[c for c in current if not reference_only(c,self.db)]
             archive=archive_for(self.db)
             seen_jobs=set()
             for c in current:
@@ -229,7 +229,8 @@ class SubtitleStudio:
                     if (not task or task['show_id']!=sid or task['purpose']!=row['_derived_purpose']
                             or task.get('provider') not in ('qbit','thunder')):continue
                     queue=self.db.one('SELECT state,lease,committing FROM thunder_queue WHERE hash=?',(task['hash'],))
-                    if queue and (queue['lease'] or queue['committing'] or queue['state'] in ('claimed','review')):continue
+                    from .download_receipts import pending_receipt
+                    if pending_receipt(task,queue):continue
                     if self.db.get('thunder_dialog_hold_'+task['hash'],{}).get('unconfirmed'):continue
                     candidate=self.db.one('SELECT * FROM candidates WHERE id=?',(row['candidate_id'],))
                     source=self.db.one('SELECT show_id FROM sources WHERE id=?',(candidate['source_id'],)) if candidate else None
@@ -253,7 +254,8 @@ class SubtitleStudio:
                         path=Path(receipt['path']).resolve()
                     else:
                         label='Source samples' if task['purpose']=='source_sample' else 'Subtitle samples'
-                        try:parts=root.relative_to(self.engine.library.resolve()).parts
+                        from .download_storage import library_for
+                        try:parts=root.relative_to(library_for(self.engine.library,root)).parts
                         except ValueError:parts=()
                         owned=(len(parts)==4 and parts[0].endswith(f' [bgm-{sid}]')
                                and parts[1]==f'Season {self.db.mapping(sid).get("season",1):02}'
@@ -283,8 +285,12 @@ class SubtitleStudio:
         for item in out:
             sample=self.db.one('SELECT evidence FROM source_samples WHERE candidate_id=?',(item.get('candidate_id'),)) if item.get('candidate_id') else None
             evidence=json.loads(sample['evidence']) if sample else {}
+            from .subtitle_chinese import PIPELINE, same_video_sidecars
+            task=self.db.one('SELECT selection,save_path FROM tasks WHERE hash=?',(item.get('hash'),)) if item.get('hash') else None
+            sidecars=same_video_sidecars(task,item['episode']) if task else []
             item['inventory_revision']=lab_core().digest(lab_core().canonical({'candidate_id':item.get('candidate_id'),
-                'tracks':evidence.get('tracks',[]),'ocr':evidence.get('ocr',{})}).encode())
+                'tracks':evidence.get('tracks',[]),'ocr':evidence.get('ocr',{}),
+                'chinese_pipeline':PIPELINE,'selected_sidecars':sidecars}).encode())
         return out
 
     def collect(self,item):
@@ -302,7 +308,9 @@ class SubtitleStudio:
             try:
                 fmt='ass' if track['codec'] in ('ass','ssa') else 'vtt'
                 path=self.sub.extract(item,track['index'],fmt)
-                ids.append(archive.add_base(sid,season,ep,path,{**metadata,'track':track['index'],'language':language}))
+                from .subtitle_chinese import archive_text_source
+                ids.extend(archive_text_source(archive,lab_core(),sid,season,ep,path,
+                    {**metadata,'track':track['index'],'language':language}))
             except (ValueError,OSError) as ex:errors.append(str(ex)[:200])
         # Already verified sidecar tracks/OCR remain identifiable, estimated OCR is not native timing.
         if item.get('candidate_id'):
@@ -331,15 +339,12 @@ class SubtitleStudio:
         if item.get('hash'):
             task=self.db.one('SELECT selection,save_path FROM tasks WHERE hash=?',(item['hash'],))
             if task:
-                selection=json.loads(task['selection']);root=Path(task['save_path']).resolve()
-                for f in selection['files']:
-                    if f['index'] not in selection['ids'] or Path(f['name']).suffix.lower() not in ('.ass','.ssa','.srt','.vtt'):continue
-                    path=(root/f['name']).resolve()
-                    if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size!=f['size']:continue
-                    hint=Path(f['name']).name.lower()
-                    lang='jpn' if re.search(r'(?<![a-z])(?:ja|jpn|jp)(?![a-z])|日语|日文|日本語',hint) else 'chi' if re.search(r'(?<![a-z])(?:chs|cht|chi|zho|zh)(?![a-z])|简体|繁体|繁體|中文',hint) else 'und'
-                    if lang=='und':errors.append('sidecar '+str(f['index'])+' language unverified');continue
-                    ids.append(archive.add_base(sid,season,ep,path,{**metadata,'track':100000+f['index'],'language':lang,'origin':'original-sidecar'}))
+                from .subtitle_chinese import same_video_sidecars, archive_text_source
+                for sidecar in same_video_sidecars(task,ep):
+                    lang=sidecar['language']
+                    if lang=='und':errors.append('sidecar '+str(sidecar['index'])+' language unverified');continue
+                    ids.extend(archive_text_source(archive,lab_core(),sid,season,ep,sidecar['path'],
+                        {**metadata,'track':100000+sidecar['index'],'language':lang,'origin':'original-sidecar'}))
         if item['fingerprint']!=lab_core().fingerprint(item['path'],item['size']):raise ValueError('字幕归档期间媒体发生变化')
         payload={'draft_ids':ids,'tracks':len(tracks),'errors':errors,'title':item['title'],'inventory_revision':item.get('inventory_revision')}
         self.db.execute('INSERT OR REPLACE INTO subtitle_studio_media VALUES(?,?,?,?,?,?)',
@@ -430,15 +435,15 @@ class SubtitleStudio:
                     if prior and json.loads(prior['payload']).get('inventory_revision')==item['inventory_revision']:continue
                     try:self.collect(item)
                     except Exception as ex:
-                        self.db.event('subtitle-studio',safe_error(ex),'warning')
+                        record_event(self.db,'subtitle-studio',safe_error(ex),'warning',error=ex)
                     count+=1
                     if count>=2:break
                 if self.db.get('subtitle_delivery_policy',{}).get('enabled'):
                     try:self.delivery.refresh()
                     except Exception as ex:  # keep the worker alive and the failure visible
-                        self.db.event('subtitle-delivery',safe_error(ex),'error')
-                        self.db.set('subtitle_studio_health',{'time':time.time(),'ok':False,'error':safe_error(ex)});return
-                self.db.set('subtitle_studio_health',{'time':time.time(),'ok':True})
+                        record_event(self.db,'subtitle-delivery',safe_error(ex),'error',error=ex)
+                        record_subtitle_health(self.db,{'time':time.time(),'ok':False,'error':safe_error(ex)},error=ex);return
+                record_subtitle_health(self.db,{'time':time.time(),'ok':True})
             finally:self.lock.release()
         threading.Thread(target=worker,name='subtitle-studio-archive',daemon=True).start()
 
@@ -501,21 +506,66 @@ class SubtitleStudio:
                      'accepted':accepted},
           'health':self.db.get('subtitle_studio_health',{}),'skill':'video-subtitle-studio'}
 
-    def library(self):
+    def library(self, *, compact=False):
         """Read-only catalogue: editorial progress never implies viewing acceptance."""
+        if not hasattr(self.db,'con'):
+            from .read_projection import read_projection
+            with read_projection(self.db.path) as snapshot_db:
+                reader=object.__new__(type(self));reader.db=snapshot_db
+                return reader.library(compact=compact)
         from .webplayer import WebPlayer
         jobs=self.db.rows('SELECT * FROM subtitle_studio_jobs ORDER BY show_id,episode')
         if not jobs:return {'entries':[],'summary':{'episodes':0,'shows':0,'accepted':0}}
-        player=WebPlayer(self.db);media=player.media();archive=archive_for(self.db)
+        archive=archive_for(self.db)
+        if compact:
+            # The shelf needs current playable bindings and material counts.
+            # Read historical workbooks and compare file fingerprints when
+            # the viewer actually opens the material records.
+            with archive.connect() as con:
+                selections={r[0] for r in con.execute('SELECT DISTINCT episode_key FROM selection')}
+                draft_counts={}
+                fidelity=self.db.get('source_fidelity','');blacklist=self.db.get(BLACKLIST_KEY,[])
+                for r in con.execute("SELECT episode_key,json_extract(metadata,'$.release') FROM drafts"):
+                    if not (blacklist_blocker(blacklist,r[1] or '') or preference_blocker(fidelity,r[1] or '')):
+                        draft_counts[r[0]]=draft_counts.get(r[0],0)+1
+            managed=set()
+            from .subtitle_targets import exists
+            if exists(self.db,'subtitle_targets'):
+                managed={(r['show_id'],r['episode']) for r in self.db.rows("""SELECT show_id,episode FROM subtitle_targets
+                    WHERE json_extract(payload,'$.previous_build_id') IS NOT NULL
+                    UNION SELECT show_id,episode FROM subtitle_publications""")}
+        media=(WebPlayer(self.db,initialize=False).media() if not compact or selections or managed else {})
+        by_episode={}
+        for item in media.values():
+            by_episode.setdefault((item.get('show_id'),item.get('episode')),item)
         fidelity=self.db.get('source_fidelity','');blacklist=self.db.get(BLACKLIST_KEY,[])
         entries=[]
         for job in jobs:
             sid,ep=job['show_id'],job['episode'];payload=json.loads(job['payload'])
-            item=next((m for m in media.values() if m.get('show_id')==sid and m.get('episode')==ep),None)
+            item=by_episode.get((sid,ep))
+            key=lab_core().episode_key(sid,payload['season'],ep)
+            if compact:
+                selected=None
+                current_key=lab_core().episode_key(sid,self.db.mapping(sid).get('season',1),ep)
+                if item and (current_key in selections or (sid,ep) in managed):
+                    try:
+                        path=Path(item['path'])
+                        if path.is_file() and path.stat().st_size==item['size']:
+                            selected=authored(self.db,item)
+                    except (ValueError,OSError):pass
+                entries.append({'show_id':sid,'title':self.db.show(sid)['title'],'season':payload['season'],
+                    'episode':ep,'base_count':draft_counts.get(key,0),'progress':None,
+                    'active':production_wanted(self.db,sid),'media_id':item['id'] if item else None,
+                    'build_id':selected['id'] if selected else None})
+                continue
             selected=None;target_matches_current=False
             if item:
                 try:
-                    current=player.item(item['id']);selected=authored(self.db,current)
+                    # This item is already from the current media catalogue.
+                    # Revalidate its bytes without rebuilding the full catalogue for every job.
+                    path=Path(item['path'])
+                    if not path.is_file() or path.stat().st_size!=item['size']:raise ValueError('媒体文件已变化')
+                    current=item;selected=authored(self.db,current)
                     target_matches_current=bool(payload.get('target') and payload['target'].get('fingerprint')==lab_core().fingerprint(current['path'],current['size']))
                 except (ValueError,OSError):pass
             progress=None;workpath=Path(payload.get('workbook') or '')
@@ -551,6 +601,10 @@ def register_subtitle_studio(app,engine):
     studio=engine.subtitle_studio
     @app.get('/api/subtitle-delivery')
     def delivery_queue():return studio.delivery.snapshot()
+    @app.get('/api/subtitle-progress')
+    def delivery_progress():
+        from .subtitle_delivery_view import catalogue
+        return JSONResponse(catalogue(studio.db))
     @app.post('/api/subtitle-delivery/refresh')
     def delivery_refresh():return studio.delivery.refresh()
     @app.post('/api/subtitle-delivery/report')
@@ -593,7 +647,7 @@ def register_subtitle_studio(app,engine):
     @app.get('/subtitle-studio')
     def page():return FileResponse(Path(__file__).resolve().parents[1]/'static/subtitle-studio.html')
     @app.get('/api/subtitle-library')
-    def library():return studio.library()
+    def library(compact:bool=False):return studio.library(compact=compact)
     @app.get('/subtitle-library')
     def library_page():return FileResponse(Path(__file__).resolve().parents[1]/'static/subtitle-library.html')
     from .subtitle_queue import production_queue

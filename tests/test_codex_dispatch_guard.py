@@ -1,6 +1,8 @@
 import pytest
 import importlib.util
+import json
 from pathlib import Path
+import sqlite3
 
 SPEC = importlib.util.spec_from_file_location('guard', Path(__file__).resolve().parents[1] / 'scripts/codex_dispatch_guard.py')
 guard = importlib.util.module_from_spec(SPEC)
@@ -28,6 +30,60 @@ def test_manual_turns_and_compaction_are_excluded():
 
 def test_active_tools_are_never_interrupted():
     assert guard.decide(TID, 'D:/AnimeService', TURN, [USER, {'type': 'commandExecution', 'status': 'inProgress'}], 50, 1300) == 'tool_in_progress'
+
+
+NATIVE = {'type': 'functionCallOutput', 'namespace': 'codex_app', 'name': 'automation_update',
+          'output': '<heartbeat>\r\n  <automation_id>automation-3</automation_id>\r\n'
+                    '<current_time_iso>2026-11-22T05:35:27Z</current_time_iso>\r\n'
+                    '<instructions>check A & B when n < 3</instructions>\r\n</heartbeat>\r\n'}
+
+
+def test_host_delivered_heartbeat_uses_the_same_progress_checks_as_legacy():
+    assert guard.decide(TID, 'D:/AnimeService', TURN, [NATIVE], 50, 1300) == 'interrupt_stale_model_wait'
+    assert guard.decide(TID, 'D:/AnimeService', TURN, [NATIVE], 500, 1300) == 'recent_progress'
+    busy = {'type': 'mcpToolCall', 'status': 'pending'}
+    assert guard.decide(TID, 'D:/AnimeService', TURN, [NATIVE, busy], 50, 1300) == 'tool_in_progress'
+
+
+@pytest.mark.parametrize('items', [
+    [{**NATIVE, 'namespace': 'another_app'}], [{**NATIVE, 'name': 'send_message_to_thread'}],
+    [{**NATIVE, 'output': NATIVE['output'].replace('automation-3', 'automation-2')}],
+    [{'type': 'commandExecution'}, NATIVE], [NATIVE, {'type': 'userMessage'}],
+    [{**USER, 'content': [{'type': 'text', 'text': '请检查这段记录 ' + NATIVE['output']}]}],
+    [{**NATIVE, 'output': NATIVE['output'].split('</instructions>')[0]}],
+])
+def test_only_the_original_heartbeat_can_identify_a_scheduled_turn(items):
+    assert guard.decide(TID, 'D:/AnimeService', TURN, items, 50, 1300) == 'not_scheduled_turn'
+
+
+def test_absent_recovery_registration_and_absent_turn_id_cannot_match():
+    cfg = {**guard.CONFIG, 'recovery_turns': {}}
+    assert guard.decide(TID, 'D:/AnimeService', TURN, [], 50, 1300, cfg) == 'not_scheduled_turn'
+
+
+def test_snapshot_reads_the_opening_and_all_tool_states_only_for_active_turns(tmp_path):
+    cfg = {**guard.CONFIG, 'targets': {TID: 'automation-3'}}
+    files = cfg['db_files']
+    with sqlite3.connect(tmp_path / files['state']) as state:
+        state.execute('CREATE TABLE threads(id, cwd)')
+        state.execute('INSERT INTO threads VALUES(?,?)', (TID, cfg['cwd']))
+    with sqlite3.connect(tmp_path / files['logs']) as logs:
+        logs.execute('CREATE TABLE logs(id, thread_id, ts)')
+    with sqlite3.connect(tmp_path / files['history']) as history:
+        history.execute('CREATE TABLE thread_turns(thread_id, turn_id, status, started_at, rollout_ordinal)')
+        history.execute('CREATE TABLE thread_items(thread_id, turn_id, rollout_ordinal, item_json)')
+        history.execute('INSERT INTO thread_turns VALUES(?,?,?,?,?)', (TID, 'turn', 'inProgress', 1, 5))
+        busy = {'type': 'futureTool', 'status': 'running', 'result': 'x' * 10000}
+        history.executemany('INSERT INTO thread_items VALUES(?,?,?,?)', [
+            (TID, 'turn', 9, json.dumps(busy)), (TID, 'turn', 6, json.dumps(NATIVE))])
+        history.commit()
+        history.row_factory = sqlite3.Row
+        assert guard.active_items(history, TID, 'turn') == [NATIVE, {'type': 'futureTool', 'status': 'running'}]
+        assert guard.snapshot(tmp_path, 1300, cfg)[0]['decision'] == 'tool_in_progress'
+        history.execute("UPDATE thread_turns SET status='completed'")
+        history.execute("UPDATE thread_items SET item_json='unreadable history'")
+        history.commit()
+        assert guard.snapshot(tmp_path, 1300, cfg)[0]['decision'] == 'idle'
 
 
 def test_other_threads_projects_and_completed_turns_are_excluded():
@@ -113,15 +169,70 @@ def test_control_uses_the_loaded_config_and_records_failure(tmp_path,monkeypatch
     def control(command,**kwargs):
         assert kwargs['env']['ANIMESERVICE_DISPATCH_CONFIG']==str(path.resolve())
         assert kwargs['timeout']==25
+        assert guard.control_history(tmp_path/'run/actions.jsonl')[-1]['control_state'] == 'intent'
         calls.append(command)
-        return SimpleNamespace(returncode=7,stdout='',stderr='synthetic control failure')
+        return SimpleNamespace(returncode=7,stdout='{"resultType":"error","error":"no-client-found"}',stderr='synthetic control failure')
     monkeypatch.setattr(guard.subprocess,'run',control)
     status=guard.run(True,now=1300,config=cfg)
     assert len(calls)==1 and status['threads'][0]['control_exit_code']==7
     assert status['threads'][0]['control_error']=='synthetic control failure'
+    second = guard.run(True, now=1301, config=cfg)
+    assert second['error'] and second['threads'][0]['decision'] == 'already_attempted'
+    assert second['threads'][0]['control_outcome'] == 'failed' and len(calls) == 1
     path.write_text('{}',encoding='utf-8')
+    monkeypatch.setattr(guard,'snapshot',lambda *args:[{'thread_id':TID,'turn_id':'next-turn','decision':'interrupt_stale_model_wait'}])
     status=guard.run(True,now=1301,config=cfg)
     assert len(calls)==1 and 'changed' in status['threads'][0]['control_error']
+
+
+@pytest.mark.parametrize(('code','receipt','outcome'), [
+    (0, {'resultType':'success','result':{'ok':True,'interruptedTurnId':'old-turn'}}, 'succeeded'),
+    (0, {'resultType':'success','result':{'ok':True,'interruptedTurnId':'other-turn'}}, 'unknown'),
+    (1, {'resultType':'error','error':'no-client-found'}, 'failed'),
+    (1, {'resultType':'error','error':'thread-follower-interrupt-turn-timeout'}, 'unknown'),
+    (None, None, 'unknown')])
+def test_migration_recognizes_exact_dispatcher_receipts(tmp_path, monkeypatch, code, receipt, outcome):
+    row = {'thread_id': TID, 'turn_id': 'old-turn', 'decision': 'interrupt_stale_model_wait'}
+    prior = {**row, 'at': 900, 'control_exit_code': code, 'control_receipt': json.dumps(receipt)}
+    (tmp_path/'actions.jsonl').write_text(json.dumps(prior)+'\n', encoding='utf-8')
+    cfg = {**guard.CONFIG, 'run_dir': str(tmp_path)}
+    monkeypatch.setattr(guard, 'snapshot', lambda *args: [dict(row)])
+    monkeypatch.setattr(guard.subprocess, 'run', lambda *a, **kw: pytest.fail('already attempted'))
+    status = guard.run(True, now=1300, config=cfg)
+    current = status['threads'][0]
+    assert current['decision'] == 'already_attempted' and current['control_outcome'] == outcome
+    assert current['control_receipt'] == prior['control_receipt'] and current['control_attempt_at'] == 900
+    assert bool(status['error']) == (outcome != 'succeeded')
+    assert guard.control_history(tmp_path/'actions.jsonl') == [prior]
+
+
+def test_parallel_guards_can_claim_a_turn_only_once(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    barrier = Barrier(2)
+    def claim():
+        row = {'thread_id': 'dispatcher', 'turn_id': 'one-turn'}
+        barrier.wait(timeout=5)
+        return guard.claim_control(tmp_path, row, 1300), row
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [f.result() for f in [pool.submit(claim), pool.submit(claim)]]
+    assert sorted(won for won, row in results) == [False, True]
+    loser = next(row for won, row in results if not won)
+    assert loser['control_outcome'] == 'unknown' and loser['reconciliation_required']
+    previous = guard.control_history(tmp_path/'actions.jsonl')
+    assert [x['control_state'] for x in previous] == ['intent']
+    after_restart = {'thread_id':'dispatcher','turn_id':'one-turn'}
+    assert guard.previous_control(after_restart, previous)
+    assert after_restart['control_outcome'] == 'unknown'
+
+
+def test_new_progress_before_control_leaves_the_turn_unclaimed(tmp_path, monkeypatch):
+    first = {'thread_id':TID,'turn_id':'same-turn','decision':'interrupt_stale_model_wait'}
+    snapshots = iter([[first], [{**first,'decision':'tool_in_progress'}]])
+    monkeypatch.setattr(guard, 'snapshot', lambda *args: next(snapshots))
+    status = guard.run(True, now=1300, config={**guard.CONFIG,'run_dir':str(tmp_path)})
+    assert status['threads'][0]['decision'] == 'changed_before_control'
+    assert not (tmp_path/'actions.jsonl').exists()
 
 
 @pytest.mark.parametrize('patch',[{'targets':{'t':None}},{'recovery_turns':[]},{'db_files':[]},{'db_files':{'state':'../prod.db','history':'h','logs':'l'}},{'run_dir':''},{'codex_home':5}])

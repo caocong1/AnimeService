@@ -12,7 +12,7 @@ def chunks(values):
 
 
 class ShowListSnapshot:
-    def __init__(self,db,clause,args,quarter,with_boards):
+    def __init__(self,db,clause,args,quarter,with_boards,*,viewing=False):
         self.shows={};self.episodes=defaultdict(list);self.watched=defaultdict(set)
         self.airings=defaultdict(list);self.candidates=defaultdict(list)
         self.memberships={};self.quarters=defaultdict(list);self.progress={};self.settings={}
@@ -20,7 +20,9 @@ class ShowListSnapshot:
         with db.connect() as c:
             # All database fields in one response come from the same WAL snapshot.
             c.execute('BEGIN')
-            self.data=[dict(r) for r in c.execute('SELECT * FROM shows WHERE '+clause+' ORDER BY score DESC,title',args)]
+            columns=('id,title,original,image,air_date,total,watched,state,selected,authorized,quarter,'
+                     'mapping,cleanup_hold,auto_download' if viewing else '*')
+            self.data=[dict(r) for r in c.execute(f'SELECT {columns} FROM shows WHERE '+clause+' ORDER BY score DESC,title',args)]
             self.shows={s['id']:dict(s) for s in self.data}
             ids=list(self.shows)
             def related(sql,values):

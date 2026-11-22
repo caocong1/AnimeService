@@ -9,7 +9,7 @@
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="stylesheet" href="/static/tokens.css">
 <link rel="stylesheet" href="/static/app.css">
-<link rel="stylesheet" href="/static/watch-controls.css?v=13">
+<link rel="stylesheet" href="/static/watch-controls.css?v=14">
 <link rel="stylesheet" href="/static/clip-export.css?v=1">
 <script src="/static/theme.js"></script>
 </head>
@@ -83,9 +83,20 @@
       </div>
       <div class="playlist" id="playlist" role="tabpanel" aria-labelledby="tab-playlist"></div>
       <div class="dm-list" id="danmu-list" role="tabpanel" aria-labelledby="tab-danmu-list" hidden>
+        <form class="dm-list-search" id="danmu-list-search" role="search" aria-label="查找弹幕内容">
+          <label class="sr" for="danmu-list-query">查找弹幕内容</label>
+          <input id="danmu-list-query" type="search" placeholder="查找弹幕内容" maxlength="200" autocomplete="off" aria-describedby="danmu-list-result" aria-controls="danmu-list-scroll">
+          <button class="btn quiet small" id="danmu-list-clear" type="button" disabled>清空</button>
+        </form>
+        <div class="dm-list-nav">
+          <button class="btn small" id="danmu-list-prev" type="button" title="上一条匹配（Shift+Enter）" aria-controls="danmu-list-scroll" disabled>上一条</button>
+          <span id="danmu-list-result" role="status" aria-live="polite" aria-atomic="true">输入关键词查找</span>
+          <button class="btn small" id="danmu-list-next" type="submit" form="danmu-list-search" title="下一条匹配（Enter）" aria-controls="danmu-list-scroll" disabled>下一条</button>
+        </div>
+        <button class="btn quiet small dm-list-current" id="danmu-list-current" type="button">回到当前播放</button>
         <div class="dm-list-head" aria-hidden="true"><span>时间</span><span>弹幕内容</span></div>
-        <div class="dm-list-scroll" id="danmu-list-scroll" tabindex="0" aria-label="弹幕列表，随播放滚动；右键可屏蔽发送者"><div class="dm-list-space" id="danmu-list-space"></div></div>
-        <p class="dm-list-hint">右键弹幕可屏蔽发送者</p>
+        <div class="dm-list-scroll" id="danmu-list-scroll" tabindex="0" aria-label="弹幕列表，双击跳转到对应视频时间；查找时按 Enter 跳转当前结果" aria-describedby="danmu-list-hint"><div class="dm-list-space" id="danmu-list-space"></div></div>
+        <p class="dm-list-hint" id="danmu-list-hint">双击弹幕跳转视频 · 右键屏蔽发送者</p>
       </div>
     </aside>
   </div>
@@ -148,8 +159,8 @@
     <p class="clip-error" id="clip-error" role="alert"></p>
   </div>
 </dialog>
-<script src="/static/core.js?v=20261016-unified"></script>
-<script src="/static/vendor/artplayer.js"></script>
+<script src="/static/core.js?v=20261121-viewing2"></script>
+<script src="/static/vendor/artplayer.js?v=buffered-snapshot-1"></script>
 <script src="/static/vendor/artplayer-plugin-danmuku.js"></script>
 <script src="/static/vendor/libass/subtitles-octopus.js"></script>
 <script src="/static/subtitle-renderer.js?v=3"></script>
@@ -161,8 +172,8 @@
 <script src="/static/screenshot.js?v=1"></script>
 <script src="/static/clip-export.js?v=1"></script>
 <script src="/static/picture-quality.js?v=1"></script>
-<script src="/static/finished-releases.js?v=20261016-unified"></script>
+<script src="/static/finished-releases.js?v=20261121-viewing2"></script>
 <script src="/static/playback-writer.js?v=1"></script>
-<script src="/static/watch.js?v=38"></script>
+<script src="/static/watch.js?v=41"></script>
 </body>
 </html>

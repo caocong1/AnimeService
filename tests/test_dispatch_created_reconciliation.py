@@ -1,6 +1,7 @@
 """Synthetic host responses and isolated DBs; no production host or media calls."""
 import copy
 import datetime
+import hashlib
 import importlib.util
 import json
 import os
@@ -57,6 +58,27 @@ def pending(delivery, tmp_path):
     return scheduler, ticket, receipt, revision, path, value, now
 
 
+@pytest.fixture
+def resumed_pending(delivery, tmp_path):
+    db, scheduler, ready, now = delivery
+    identity, first = begin(scheduler)
+    scheduler.record_dispatch_receipt(first['ticket'], 'created', thread_id='synthetic-chat')
+    scheduler.record_blocked(identity, 'synthetic-chat', ['synthetic system failure'], owner_stopped=True)
+    row = scheduler.get(identity)
+    lease = scheduler.resume(identity, 'synthetic-chat', 'test-owner', row['revision'], manual_recovery=True)
+    intent = scheduler.begin_dispatch(identity, 'test-owner', lease['lease_token'], lease['revision'])
+    ticket = intent['ticket']
+    assert ticket['dispatch_action'] == 'reuse' and ticket['thread_id'] == 'synthetic-chat'
+    db.execute('UPDATE subtitle_delivery_jobs SET revision=revision+1 WHERE id=?', (identity,))
+    receipt = scheduler.record_dispatch_receipt(ticket, 'created', thread_id='synthetic-chat')
+    assert receipt['reason'] == 'revision_moved'
+    revision = scheduler.get(identity)['revision']
+    value = bundle(ticket, receipt['receipt_id'], revision, db.path.parent.parent, now[0])
+    path = tmp_path/'resumed-host-evidence.json'
+    path.write_text(json.dumps(value), encoding='utf-8')
+    return scheduler, ticket, receipt, revision, path, value, now
+
+
 def apply(pending, **override):
     scheduler, ticket, source, revision, path, value, now = pending
     args = dict(delivery=scheduler, ticket=ticket, source_receipt_id=source['receipt_id'],
@@ -86,6 +108,84 @@ def test_reconcile_original_fact_once_without_rewriting_it_and_replay_after_stop
     assert tables(scheduler.db) == before
     encoded = json.dumps(scheduler.receipts(ticket['job_id']))
     assert ticket['dispatch_token'] not in encoded and ticket['lease_token'] not in encoded
+
+
+def test_resume_result_without_optional_host_uses_both_explicit_local_snapshots(resumed_pending):
+    scheduler, ticket, source, revision, path, value, now = resumed_pending
+    value['original_dispatch_result'] = tool({'threadId': 'synthetic-chat'})
+    path.write_text(json.dumps(value), encoding='utf-8')
+    archived = path.read_bytes()
+    original = copy.deepcopy(scheduler.receipts(ticket['job_id']))
+    result = apply(resumed_pending)
+    assert (result['receipt_accepted'], result['state_changed'], result['reason']) == (1, 1, '')
+    assert result['job']['thread_id'] == 'synthetic-chat'
+    assert result['job']['dispatch_state'] == 'acknowledged'
+    assert path.read_bytes() == archived
+    assert scheduler.receipts(ticket['job_id'])[:len(original)] == original
+    receipt = scheduler.db.one('SELECT envelope FROM dispatch_receipts WHERE receipt_id=?', (result['receipt_id'],))
+    assert json.loads(receipt['envelope'])['evidence']['sha256'] == hashlib.sha256(archived).hexdigest()
+    assert 'hostId' not in json.loads(value['original_dispatch_result']['content'][0]['text'])
+
+
+def test_initial_refinement_pending_payload_can_reconcile_late_created(resumed_pending):
+    scheduler, ticket, source, revision, path, value, now = resumed_pending
+    payload = scheduler.get(ticket['job_id'])['payload']
+    payload.update(baseline_release_id='synthetic-v0', owner_stopped_writing=True,
+                   user_stopped=False, recovery_class='protected', recovery_turn='',
+                   auto_recovery_turn='', manual_recovery_pending=False)
+    scheduler.db.execute("UPDATE subtitle_delivery_jobs SET kind='refinement',payload=? WHERE id=?",
+                         (json.dumps(payload), ticket['job_id']))
+    result = apply(resumed_pending)
+    assert result['state_changed'] == 1
+    assert result['job']['kind'] == 'refinement'
+    assert result['job']['payload']['owner_stopped_writing'] is False
+
+
+@pytest.mark.parametrize('mutation', [
+    'created_remote', 'created_null', 'created_empty', 'created_wrong_thread',
+    'read_missing_host', 'read_remote', 'read_wrong_thread', 'missing_read',
+    'wait_missing_host', 'wait_remote', 'wait_wrong_thread', 'missing_wait',
+])
+def test_resume_missing_host_cannot_override_conflicts_or_missing_local_snapshots(resumed_pending, mutation):
+    scheduler, ticket, source, revision, path, value, now = resumed_pending
+    created = {'threadId': 'synthetic-chat'}
+    if mutation.startswith('created_'):
+        if mutation == 'created_wrong_thread':
+            created['threadId'] = 'another-chat'
+        else:
+            created['hostId'] = {'created_remote': 'remote', 'created_null': None, 'created_empty': ''}[mutation]
+    elif mutation in ('missing_read', 'missing_wait'):
+        del value['read_thread_result' if mutation == 'missing_read' else 'wait_threads_result']
+    else:
+        name = 'read_thread_result' if mutation.startswith('read_') else 'wait_threads_result'
+        body = json.loads(value[name]['content'][0]['text'])
+        thread = body['thread'] if name == 'read_thread_result' else body['polls'][0]['thread']
+        if mutation.endswith('missing_host'):
+            del thread['hostId']
+        elif mutation.endswith('remote'):
+            thread['hostId'] = 'remote'
+        else:
+            thread['id'] = 'another-chat'
+        value[name] = tool(body)
+    value['original_dispatch_result'] = tool(created)
+    path.write_text(json.dumps(value), encoding='utf-8')
+    archived = path.read_bytes()
+    before = tables(scheduler.db)
+    with pytest.raises(ValueError):
+        apply(resumed_pending)
+    assert tables(scheduler.db) == before
+    assert path.read_bytes() == archived
+
+
+def test_create_result_still_requires_its_explicit_local_host(pending):
+    scheduler, ticket, source, revision, path, value, now = pending
+    assert ticket['dispatch_action'] == 'create'
+    value['original_dispatch_result'] = tool({'threadId': 'synthetic-chat'})
+    path.write_text(json.dumps(value), encoding='utf-8')
+    before = tables(scheduler.db)
+    with pytest.raises(ValueError, match='Exact existing local'):
+        apply(pending)
+    assert tables(scheduler.db) == before
 
 
 @pytest.mark.parametrize('sql,reason', [

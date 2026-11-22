@@ -65,6 +65,19 @@ def release_fixture(db, target):
     r={'id':'fixture-e2-v1','show_id':42,'episode':2,'status':'finished','duration_seconds':3,
        'formal_review_complete':False,'files':files}
     source_hash=hashlib.sha256(__import__('pathlib').Path(target['path']).read_bytes()).hexdigest()
+    from anime.subtitle_coverage import scan, sha
+    ass=root/'bilingual.ass'
+    ass.write_text('[Events]\nFormat: Layer, Start, End, Style, Name, Text\n'
+                   'Dialogue: 1,0:00:00.00,0:00:03.00,ZH,fixture,原创夹具\n',encoding='utf-8')
+    audit=scan(ass,{'ZH':'zh'},[])
+    coverage=root/'chinese-coverage-review.json'
+    coverage.write_text(json.dumps({'schema':1,'role':'episode_chinese_coverage_review',
+        'show_id':42,'episode':2,'media_sha256':source_hash,'ass_sha256':sha(ass),
+        'events_sha256':audit['events_sha256'],'styles':{'ZH':'zh'},'sources':[],
+        'reviewer':'synthetic fixture','source_inventory_evidence':'Synthetic Chinese-only fixture',
+        'decisions':[]}),encoding='utf-8')
+    for path in (ass,coverage):files[path.name]={'bytes':path.stat().st_size,'sha256':sha(path)}
+    r['source_ass_sha256']=sha(ass)
     config=root/'input-config.json';config.write_text(json.dumps({'media':target['path'],'media_sha256':source_hash}))
     r.update(source_media_sha256=source_hash,input_config_sha256=hashlib.sha256(config.read_bytes()).hexdigest())
     (root/'release.json').write_text(json.dumps(r))
@@ -79,7 +92,7 @@ def release_fixture(db, target):
     return root,proof
 
 
-@pytest.mark.parametrize('failure',[None,'unknown','wrong_owner','bad_file','wrong_episode','bad_player','worker_active','not_published'])
+@pytest.mark.parametrize('failure',[None,'unknown','wrong_owner','bad_file','wrong_episode','bad_player','worker_active','not_published','missing_coverage'])
 @pytest.mark.requires_lab
 def test_finished_receipt_verifies_files_and_releases_only_confirmed_owner(setup,monkeypatch,failure):
     db,q,e,archive,old,new,freeze,target,record=prepared_candidate(setup,monkeypatch)
@@ -90,6 +103,8 @@ def test_finished_receipt_verifies_files_and_releases_only_confirmed_owner(setup
     scheduler.reconcile_dispatch(job['id'],intent['dispatch_token'],None if failure=='unknown' else 'fixture-chat')
     root,proof=release_fixture(db,target)
     if failure=='bad_file':(root/'episode.mp4').write_bytes(b'changed')
+    if failure=='missing_coverage':
+        r=json.loads((root/'release.json').read_text());del r['files']['chinese-coverage-review.json'];(root/'release.json').write_text(json.dumps(r))
     if failure=='wrong_episode':
         r=json.loads((root/'release.json').read_text());r['episode']=3;(root/'release.json').write_text(json.dumps(r))
     if failure=='bad_player':

@@ -34,7 +34,8 @@ def test_audio_bytes_go_to_explicit_audio_input_without_acceptance(tmp_path):
     assert part['type']=='input_audio' and base64.b64decode(part['input_audio']['data'])==p.read_bytes()
     assert not any('transcript' in k for k in body)
     assert record['status']=='proposal_only' and record['scope']=='local_audio_model_observation_unaccepted'
-    assert not record['current_codex_listened'] and not record['human_listened'] and not record['subtitle_acceptance']
+    assert not record['current_codex_listened'] and not record['subtitle_acceptance']
+    assert 'human_listened' not in record
     assert 'data' not in record['audio'] and record['audio']['duration_seconds']==1
 
 

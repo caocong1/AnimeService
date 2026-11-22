@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import json
 import os
+import tempfile
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -18,18 +20,21 @@ def digest(path):
         return hashlib.file_digest(f, 'sha256').hexdigest()
 
 
-def publish(root, series_title, library):
+def publish(root, series_title, library, *, lock_timeout=300):
     root = root.resolve()
     assert root.is_relative_to(PROJECT / 'data/subtitle-studio/releases')
     r = json.loads((root / 'release.json').read_text(encoding='utf-8'))
     config = json.loads((root / 'input-config.json').read_text(encoding='utf-8-sig'))
-    if config.get('delivery_job_id'):
+    supervised = config.get('delivery_job_id') or (PROJECT/'data/anime.db').is_file()
+    if supervised:
         import sys
         sys.path.insert(0, str(PROJECT))
         from scripts.subtitle_delivery_queue import ReadStore
         db = ReadStore(PROJECT / 'data/anime.db')
         try:
-            if db.one('SELECT 1 FROM watches WHERE show_id=? AND episode=? AND finished=1', (r['show_id'],r['episode'])):
+            from anime.subtitle_dispatch_fence import check_output
+            check_output(db,r['show_id'],r['episode'])
+            if config.get('delivery_job_id') and db.one('SELECT 1 FROM watches WHERE show_id=? AND episode=? AND finished=1', (r['show_id'],r['episode'])):
                 raise ValueError('Episode already watched; do not publish subtitle changes')
         finally:
             db.con.rollback(); db.con.close()
@@ -47,28 +52,58 @@ def publish(root, series_title, library):
         p = (root / name).resolve()
         assert p.is_relative_to(root) and p.is_file()
         assert p.stat().st_size == record['bytes'] and digest(p) == record['sha256']
+    import sys
+    sys.path.insert(0, str(PROJECT))
+    from anime.subtitle_coverage import validate_release
+    validate_release(PROJECT, root, r)
+    from anime.subtitle_display_rows import validate as validate_display_rows
+    for subtitle in ('bilingual.ass', 'static.ass'):
+        validate_display_rows(root / subtitle)
     movie = next(root / name for name in r['files'] if name.endswith('.mp4'))
     static = PROJECT / 'static/finished-media'
     static.mkdir(exist_ok=True)
     lock = static / '.publish.lock'
-    with lock.open('x', encoding='utf-8') as f:
-        json.dump({'pid': os.getpid(), 'release': r['id']}, f)
-    try:
+    from scripts.subtitle_output_lock import output_lock
+    with output_lock(lock, 'subtitle_publication', timeout=lock_timeout):
+        # A waited publication still obeys the current watched-state gate.
+        if supervised:
+            db = ReadStore(PROJECT / 'data/anime.db')
+            try:
+                check_output(db,r['show_id'],r['episode'])
+                if config.get('delivery_job_id') and db.one('SELECT 1 FROM watches WHERE show_id=? AND episode=? AND finished=1', (r['show_id'], r['episode'])):
+                    raise ValueError('Episode already watched; do not publish subtitle changes')
+            finally:
+                db.con.rollback(); db.con.close()
         dest = static / r['id']
         dest.mkdir(exist_ok=True)
         links = []
         def link(src, target):
             if target.exists():
                 assert digest(target) == digest(src), 'Existing output differs; create a new version'
-            else:
+            elif src.stat().st_dev == target.parent.stat().st_dev:
                 os.link(src, target)
+            else:
+                # A library alias can now reside on another NTFS volume. Install
+                # only the verified bytes, without replacing an existing file.
+                with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as copy:
+                    tmp = Path(copy.name)
+                try:
+                    shutil.copyfile(src, tmp)
+                    if digest(tmp) != digest(src):
+                        raise ValueError('Cross-volume library copy failed validation')
+                    os.link(tmp, target)
+                finally:
+                    tmp.unlink(missing_ok=True)
             links.append({'source': str(src), 'path': str(target), 'same_file': os.path.samefile(src, target)})
         link(movie, dest / 'episode.mp4')
         link(root / 'subtitles.zip', dest / 'subtitles.zip')
         link(root / '版本说明.txt', dest / 'notes.txt')
         if library:
             library = library.resolve()
-            assert library.is_relative_to(Path('D:/MediaLibrary/Anime').resolve())
+            import sys
+            sys.path.insert(0,str(PROJECT))
+            from anime.download_storage import download_roots, library_for
+            assert library.is_relative_to(library_for(download_roots()[0],library))
             library.mkdir(parents=True, exist_ok=True)
             link(movie, library / movie.name)
             link(root / 'subtitles.zip', library / (movie.stem + '.字幕.zip'))
@@ -94,11 +129,20 @@ def publish(root, series_title, library):
             index['releases'].append(entry)
         if previous and not (root / 'index-before.json').exists():
             (root / 'index-before.json').write_bytes(previous)
-        tmp = static / f'index-{os.getpid()}.tmp'
-        with tmp.open('x', encoding='utf-8') as f:
-            json.dump(index, f, ensure_ascii=False, indent=2)
-        assert (index_path.read_bytes() if index_path.exists() else None) == previous
-        os.replace(tmp, index_path)
+        # Unique even after a crash/PID reuse, with replace inside the same
+        # process lock as the read/merge so another episode cannot be lost.
+        fd, name = tempfile.mkstemp(prefix='index-', suffix='.tmp', dir=static)
+        tmp = Path(name)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(index, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            assert (index_path.read_bytes() if index_path.exists() else None) == previous
+            os.replace(tmp, index_path)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
         receipt = {'at': datetime.now().astimezone().isoformat(), 'status': 'registered_for_viewing',
                    'links': links, 'library_url': 'http://127.0.0.1:4871/subtitle-library?show=' + str(r['show_id']),
                    'player_url': 'http://127.0.0.1:4871/watch?release=' + r['id'],
@@ -108,9 +152,6 @@ def publish(root, series_title, library):
             with receipt_path.open('x', encoding='utf-8') as f:
                 json.dump(receipt, f, ensure_ascii=False, indent=2)
         print(json.dumps(receipt, ensure_ascii=False))
-    finally:
-        if lock.exists() and json.loads(lock.read_text())['pid'] == os.getpid():
-            lock.unlink()
 
 
 if __name__ == '__main__':

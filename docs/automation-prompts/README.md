@@ -1,5 +1,7 @@
 # 审定的完整任务prompt
 
+2026-11-04应用状态：任务2与4已通过原生automation_update更新并回读；任务3模板同步现有活动规则，其运行配置未改。原周期、聊天及ACTIVE保持。家庭影视模板为独立项目历史导出，不由本仓库管理。`scripts/check_automation_contract.py`只读检查本项目三个任务的模板、应用摘要及全部保留字段，漂移非零退出，不自动覆盖配置；整体契约见[PROJECT-CONSISTENCY.md](../PROJECT-CONSISTENCY.md)。
+
 四份txt为最终完整prompt，manifest列源配置/原prompt及最终prompt摘要；本目录是公开脱敏导出，不是活动任务备份，也不意味着已经应用。第一项属于独立家庭影视项目，保留其原项目/目标和下载规则，不因本仓库收录而迁入AnimeService。
 
 保留现有四周期/ACTIVE/heartbeat及目标/项目/环境/其它字段，只替换prompt。摘要采用UTF-8无BOM，CRLF/CR转LF、末尾LF规范为一个，不去掉空格。应用前比源配置原始字节SHA、原prompt规范摘要和协调轮空闲；运行TOML只读。保存后用原生读取核全文SHA与所有保留字段，不Run now。失败只恢复本次修改且没有并发新编辑的那一项；工具不支持时停止，不猜IPC/新建任务。

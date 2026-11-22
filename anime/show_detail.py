@@ -18,8 +18,11 @@ class ShowDetailSnapshot:
             c.execute('BEGIN')
             def rows(sql,args=(sid,)):
                 return [dict(r) for r in c.execute(sql,args)]
-            data=rows('SELECT * FROM shows WHERE id=?')
+            data=rows('''SELECT s.*,q.state AS pending_state FROM shows s
+                LEFT JOIN tracking_requests q ON q.show_id=s.id WHERE s.id=?''')
             if not data:return
+            if data[0]['pending_state'] is None:
+                del data[0]['pending_state']
             self.shows[sid]=data[0]
             self.episodes[sid]=rows('''SELECT e.*,coalesce(w.finished,0) finished,w.method watch_method,
                 t.title source_task_title,t.selection source_task_selection,t.status task_status,t.error task_error

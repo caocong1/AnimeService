@@ -1,3 +1,15 @@
+# 2026-10-24 结构化停止、自动恢复预算与宿主边界
+
+先执行 [SUBTITLE-RECOVERY.md](SUBTITLE-RECOVERY.md) 的本轮新规则。 stopped owner 必须以 `--recovery-class system --recovery-turn 原始精确turn` 登记可自动恢复的系统故障；`source_wait`、`repair_blocked` 和 `--user-stopped` 分别走材料等待、工程受阻和明确用户停止，不再以11436等自由文本作为通用授权。旧/含义不明停止保持保护。
+
+自动恢复必须走 `begin --auto-recovery-turn 原turn`。原票据归档及校验后、宿主resume前，`mark_auto_recovery` 在事务中重核范围、未看、原dispatch和恢复台账；此后宿主未知也消耗一次。每owner每24小时最多两次自动恢复、全历史同turn禁止重放；手动明确恢复不增加或清空台账。所有 `blocked-stopped` 的无参数恢复都拒绝，人工恢复必须显式 `--manual-recovery`，不能用protected分类绕过。只有真实created回执才解除停止事实，reserve/lease失败保留原停止与分类；首次refinement的合法pending也可按原ticket对账，明确用户停止不放行。第三次空挂仍由守卫中断，核停写后让其它合规集用槽，不允许为限制resume而放弃中断。
+
+`state=blocked + acknowledged` 表示活动owner报告阻塞但未停写，仍占槽并继续由owner guard监控；真实停写后才可转 blocked-stopped/恢复。守卫fresh-check到IPC之间仍可能有新工具，中断后必须重新核宿主终态、最后工具与遗留writer，不能直接把expectedTurnId成功当作恢复或让槽证据。僵尸tool_in_progress也不能自动杀或清状态。
+
+可信非模型create/resume桥及compact完成确认未具备前，不新增普通后台重发通道。压缩卡死被中断后，必须取得真实compact completed且无writer的证据才沿同thread短交接恢复；compact未知不得发送。此限制不因自动恢复台账已实现而被绕过。
+
+2026-10-22 并行更新：用户明确要求多会话同时处理字幕积压，执行 [SUBTITLE-PARALLEL.md](SUBTITLE-PARALLEL.md)。整体改为显式容量最多三集，不同集并行，每集/每线程仍唯一；片源、原稿准备独立推进。下文历史单槽描述由本条覆盖，已看、未知回执、owner 与质量保护不变。
+
 # 字幕制作停滞恢复
 
 ## 2026-10-19 当前制作负责人无进展自动恢复授权
@@ -33,9 +45,9 @@ Windows PowerShell 5会继承宿主PowerShell 7的PSModulePath，导致Get-Acl�
 
 ## 后续准备
 
-唯一制作槽有人工作时，调度仍可完成下一未看集的只读材料核实、真实洁净检查和工具能力准备，沿既有readiness路径登记；不得因此抢占writer、反复下载或把准备写成完成。v0发布后须按实际player报告调用finished，回执continue_refinement=true就由原writer继续v1；v1真正完成后才释放槽并按原优先序派发后集。
+现有制作槽被有效负责人占用时，调度仍可完成下一未看集的只读材料核实、真实洁净检查和工具能力准备，沿既有readiness路径登记；不得因此抢占writer、反复下载或把准备写成完成。v0发布后须按实际player报告调用finished，回执continue_refinement=true就由原writer继续v1；v1真正完成后才释放槽并按原优先序派发后集。
 
-## 显式 created 事实的人工对账恢复
+## 显式 created 事实的受控对账恢复
 
 原始 created 回执因 revision 变化被拒绝时，先用只读 reconcile-plan 核原 ticket、拒绝回执与当前事实。只有用户明确授权、原负责线程已停止写入、范围/未看/固定输入仍满足，才可由 owner 使用 confirm 的显式对账参数；协调轮不得因看到旧拒绝回执而自动恢复。
 

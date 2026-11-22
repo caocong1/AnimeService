@@ -1,4 +1,4 @@
-"""Watch only the current acknowledged subtitle writer; never release its slot.
+"""Watch current acknowledged subtitle writers; never release their slots.
 
 The user's 2026-10-19 recovery authorization permits expected-turn cancellation
 of a proven idle model wait, followed by same-owner recovery by automation-2.
@@ -6,14 +6,14 @@ All business and Codex databases are read-only here. Unknown dispatches, user
 stops, other chats and running tools are excluded. No model call or resume.
 """
 import json
-import hashlib
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import time
 
-from codex_dispatch_guard import ROOT, normalize_cwd, readonly, node_path
+from codex_dispatch_guard import (ROOT, claim_control, control_history, normalize_cwd,
+                                  node_path, previous_control, readonly, record_outcome)
 
 BUSY = {'inProgress', 'running', 'pending'}
 MODEL_ITEMS = {'contextCompaction', 'reasoning', 'agentMessage', 'userMessage'}
@@ -21,16 +21,18 @@ MODEL_ITEMS = {'contextCompaction', 'reasoning', 'agentMessage', 'userMessage'}
 
 def owners(db_path):
     with readonly(db_path) as db:
-        rows = db.execute("""SELECT j.id,j.thread_id,j.input_key,j.revision,j.payload
+        rows = db.execute("""SELECT j.id,j.show_id,j.episode,j.thread_id,j.input_key,j.revision,j.payload
             FROM subtitle_delivery_jobs j JOIN shows s ON s.id=j.show_id
             LEFT JOIN watches w ON w.show_id=j.show_id AND w.episode=j.episode
-            WHERE j.state='production' AND j.dispatch_state='acknowledged'
+            WHERE j.state IN ('production','blocked') AND j.dispatch_state='acknowledged'
               AND j.thread_id<>'' AND s.selected=1 AND s.state='watching'
               AND s.authorized=1 AND s.cleanup_hold=0
               AND coalesce(w.finished,0)=0""").fetchall()
         active = [dict(row) for row in rows
                   if not json.loads(row['payload']).get('owner_stopped_writing')]
-        if len(active) > 1:
+        episodes = {(row['show_id'], row['episode']) for row in active}
+        threads = {row['thread_id'] for row in active}
+        if len(episodes) != len(active) or len(threads) != len(active):
             raise ValueError('Conflicting production writers; preserve all owners for reconciliation')
         return active
 
@@ -76,14 +78,13 @@ def run(apply, home, config, now=None):
     actions = run_dir / 'actions.jsonl'
     try:
         status['threads'] = snapshot(home, config, now)
-        previous = [json.loads(line) for line in actions.read_text(encoding='utf-8').splitlines()] if actions.exists() else []
+        previous = control_history(actions)
         for row in status['threads']:
             if not apply or row['decision'] != 'interrupt_stale_owner_wait':
                 continue
             # One control attempt per exact turn, even if the host result was
             # unknown. A repeated incident is diagnosed by the dispatcher.
-            if any(x['thread_id'] == row['thread_id'] and x['turn_id'] == row['turn_id'] for x in previous):
-                row['decision'] = 'already_attempted'
+            if previous_control(row, previous):
                 continue
             row['previous_interrupted_turns_24h'] = len({x['turn_id'] for x in previous
                 if x['thread_id'] == row['thread_id'] and now - x['at'] < 86400})
@@ -95,22 +96,8 @@ def run(apply, home, config, now=None):
                 row['decision'] = 'changed_before_control'
                 continue
             # Write intent BEFORE IPC. A crash/unknown result cannot duplicate it.
-            intent = {'at': now, **row, 'control_state': 'intent'}
-            intent_key = hashlib.sha256((row['thread_id'] + ':' + row['turn_id']).encode()).hexdigest()
-            try:
-                # Exclusive per-turn intent also serializes a manual invocation
-                # racing the scheduled task. Never erase an unknown attempt.
-                with (run_dir / ('intent-' + intent_key + '.json')).open('x', encoding='utf-8') as f:
-                    json.dump(intent, f)
-                    f.flush()
-                    os.fsync(f.fileno())
-            except FileExistsError:
-                row['decision'] = 'already_attempted'
+            if not claim_control(run_dir, row, now):
                 continue
-            with actions.open('a', encoding='utf-8') as f:
-                f.write(json.dumps(intent) + '\n')
-                f.flush()
-                os.fsync(f.fileno())
             # The existing native control accepts only this fresh exact turn.
             scoped = {**config, 'targets': {row['thread_id']: 'subtitle-production-owner'},
                       'recovery_turns': {row['thread_id']: row['turn_id']},
@@ -124,10 +111,13 @@ def run(apply, home, config, now=None):
                     capture_output=True, text=True, encoding='utf-8', timeout=25,
                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                 row.update(control_exit_code=result.returncode, control_receipt=result.stdout[:2000], control_error=result.stderr[:500])
+                record_outcome(row)
             finally:
                 temp.unlink(missing_ok=True)
             with actions.open('a', encoding='utf-8') as f:
                 f.write(json.dumps({'at': now, **row, 'control_state': 'result'}) + '\n')
+        if any(row.get('reconciliation_required') for row in status['threads']):
+            status['error'] = 'owner_control_requires_review'
     except Exception as error:
         status['error'] = f'{type(error).__name__}: {error}'
     with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=run_dir, delete=False) as f:

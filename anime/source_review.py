@@ -119,8 +119,10 @@ class SourceReview:
                             (sid,'dmhy',url,'https://share.dmhy.org/topics/list?'+query))
     @staticmethod
     def filter_candidates(rows,mapping,fidelity,blacklist=()):
+        from .subtitle_reference_intake import reference_only
         out=[]
         for c in rows:
+            if reference_only(c):continue
             try:
                 eps=validate_title(c['title'],candidate_mapping(mapping,c),{},False)
                 if eps!=[1]:continue
@@ -219,6 +221,11 @@ class SourceReview:
                 'sampling':sum(s['mode']=='sampling' for s in shows),'protected':sum(not s['eligible'] for s in shows)},
             'note':'仅用户已加入想看、试看或在追并核验授权的新番参与取样、实评与自动选源；季度默认授权不代表想看。记录持续累计，待下载/待评不会当已完成。'}
     def start(self,sid,candidate_ids=None):
+        from .subtitle_reference_intake import reference_only
+        if isinstance(candidate_ids,list):
+            for cid in candidate_ids:
+                candidate=self.db.one('SELECT * FROM candidates WHERE id=? AND show_id=?',(cid,sid))
+                if candidate and reference_only(candidate,self.db):raise ValueError('对轴参考候选不可用作首集选源')
         # Continuing shows can join subtitle production without reopening the
         # watched premiere or claiming that a primary source was reviewed.
         if self.policy(sid).get('mode')=='subtitle_only':return
@@ -277,6 +284,8 @@ class SourceReview:
         self.engine.wake.set()
         return self.status(sid)
     def queue(self,c):
+        from .subtitle_reference_intake import reference_only
+        if reference_only(c,self.db):raise ValueError('对轴参考候选不可用作首集样本')
         sid=c['show_id'];self.ensure(sid)
         if clean_blocker(self.db,c):raise ValueError(clean_blocker(self.db,c))
         if fidelity_blocker(self.db,c['title']):raise ValueError(fidelity_blocker(self.db,c['title']))
@@ -311,7 +320,7 @@ class SourceReview:
             if shutil.disk_usage(self.engine.incomplete.anchor or self.db.path.parent).free<size+self.db.get('minimum_free_gb',10)*1024**3:
                 raise ValueError('评测磁盘空间不足')
             stage=self.engine.incomplete/h;dest=self.root/'samples'/h
-            if not thunder:
+            if not thunder or self.engine.library.resolve() == Path('C:/MediaLibrary/Anime').resolve():
                 title=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',self.db.show(sid)['title']).strip('. ')[:80]
                 dest=self.engine.library/(title+f' [bgm-{sid}]')/f'Season {self.db.mapping(sid).get("season",1):02}'/'Source samples'/h
             stage.mkdir(parents=True,exist_ok=True);dest.mkdir(parents=True,exist_ok=True)
@@ -638,7 +647,11 @@ class SourceReview:
             found=self.engine.thunder.inspect(t) if t['provider']=='thunder' else None
             if not found or not found['verified_complete']:raise ValueError('新样本尚未核验完成')
         title=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',self.db.show(sid)['title']).strip('. ')[:80]
-        dest=self.engine.library/(title+f' [bgm-{sid}]')/f'Season {self.db.mapping(sid).get("season",1):02}'
+        from .download_storage import OLD_LIBRARY
+        library=self.engine.library
+        if library.drive.lower()=='c:' and Path(t['save_path']).drive.lower()=='d:':
+            library=OLD_LIBRARY
+        dest=library/(title+f' [bgm-{sid}]')/f'Season {self.db.mapping(sid).get("season",1):02}'
         selection=json.loads(t['selection'])
         for f in selection['files']:
             if f['index'] not in selection['ids']:continue
@@ -689,7 +702,18 @@ class SourceReview:
             self.engine.wake.set()
             return receipt
     def decision(self,c,*,ordinary=False):
+        if not hasattr(self.db,'con'):
+            # One current, immutable read transaction for this decision. The
+            # history scan otherwise opens several connections per candidate,
+            # competing with page requests throughout background ingestion.
+            from copy import copy
+            from .read_projection import read_projection
+            with read_projection(self.db.path) as db:
+                reader=copy(self);reader.db=db
+                return reader.decision(c,ordinary=ordinary)
         def result(code,reason='',allowed=False):return {'code':code,'reason':reason,'allowed':allowed}
+        from .subtitle_reference_intake import reference_only
+        if reference_only(c,self.db):return result('subtitle_reference_only','该候选仅供原逐集对轴参考入口使用')
         cfg=self.policy(c['show_id'])
         blocked=blacklist_blocker(self.db.get(BLACKLIST_KEY,[]),c['title']) or fidelity_blocker(self.db,c['title'])
         if blocked:return result('source_excluded',blocked)

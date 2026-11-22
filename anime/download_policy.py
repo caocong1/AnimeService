@@ -43,4 +43,6 @@ def status(db):
             'ready': not bool(submission_blocker(db)),
             'blocker': submission_blocker(db),
             'qbit_profile': 'D:\\MediaService\\qbit-profile',
-            'profile_note': '本机后台持续查源；迅雷界面任务由定时 computer use 执行。已确认下载失败或 Computer Use 故障时，经归属和未提交核查后自动交接 qB 备用；不重投结果不确定的任务。' if preference=='thunder_first' and db.get('thunder_ui_enabled',False) else '使用现有127.0.0.1:4870 qB；不自动启动或切换实例，不定时操作桌面。只有qB实际下载失败后才考虑迅雷；已有和不确定任务继续对账，不重复下载。'}
+            'qbit_auto_restore_enabled':db.get('qbit_auto_restore_enabled',False),
+            'qbit_restore_status':db.get('qbit_restore_status',{}),
+            'profile_note': '本机后台持续查源；迅雷界面任务由定时 computer use 执行。已确认下载失败或 Computer Use 故障时，经归属和未提交核查后自动交接 qB 备用；不重投结果不确定的任务。' if preference=='thunder_first' and db.get('thunder_ui_enabled',False) else ('使用原127.0.0.1:4870 qB；确认原进程退出且端口空闲后自动恢复原配置，启动冷却和未知回执保护生效；不启动第二实例、不重复下载。' if db.get('qbit_auto_restore_enabled',False) else '使用现有127.0.0.1:4870 qB；自动恢复未启用，不切换实例。已有和不确定任务继续对账，不重复下载。')}

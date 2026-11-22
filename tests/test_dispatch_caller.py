@@ -75,7 +75,28 @@ def test_lost_host_response_only_records_interrupted(delivery,tmp_path):
     calls,args=harness(result,host)
     with pytest.raises(DispatchFailure):dispatch_once(**args)
     assert ('interrupted',result['ticket_path']) in calls
+    assert ('journal','host_returned') not in calls
     assert not any(isinstance(x,tuple) and x[0]=='confirm' for x in calls)
+
+
+def test_original_host_result_survives_interruption_during_confirmation(delivery, tmp_path):
+    _, scheduler, _, _ = delivery
+    _, intent = begin(scheduler)
+    result = archive(tmp_path, intent)
+    host = SimpleNamespace(preflight=lambda: {'create': True, 'resume': True},
+                           dispatch=lambda **kw: {'thread_id': 'synthetic-thread', 'host_ref': 'operation'})
+    _, args = harness(result, host)
+    records = []
+    args['journal'] = records.append
+    def confirmation_unavailable(*args):
+        assert records[-1]['phase'] == 'host_returned'
+        raise RuntimeError('confirmation interrupted')
+    args['confirm'] = confirmation_unavailable
+    with pytest.raises(RuntimeError, match='confirmation interrupted'):
+        dispatch_once(**args)
+    assert records[-1] == {'phase': 'host_returned', 'job_id': intent['id'], 'revision': intent['revision'],
+                           'ticket_sha256': verified_ticket(result, result['ticket_path'])[1],
+                           'thread_id': 'synthetic-thread', 'host_ref': 'operation'}
 
 
 def test_revision_advance_after_host_keeps_original_callback_identity(delivery,tmp_path):
@@ -94,20 +115,27 @@ def test_observation_refresh_keeps_live_ticket_and_activity(delivery):
     assessment=ready(db,42,1,{})
     ready.values[(42,1)]={**assessment,'review_notes':['a new diagnostic observation']}
     now[0]+=30;s.refresh();after=s.get(identity)
-    assert after['revision']==before['revision'] and after['updated']==before['updated']
-    assert after['payload']['latest_assessment']['assessment']['review_notes']==['a new diagnostic observation']
+    assert after==before  # unresolved external intent retains the entire original ticket-bound row
+    assert s._dispatch_assessment(before)['review_notes']==['a new diagnostic observation']
     receipt=s.record_dispatch_receipt(intent['ticket'],'created',thread_id='synthetic-thread')
     assert receipt['receipt_accepted']==1 and receipt['state_changed']==1
 
 
 @pytest.mark.parametrize('change',['input','scope','watched'])
-def test_real_authority_changes_still_invalidate_live_ticket(delivery,change):
+def test_pending_ticket_stays_frozen_and_receipt_rechecks_current_authority(delivery,change):
     db,s,ready,now=delivery;identity,intent=begin(s);before=s.get(identity)
     if change=='input':ready.values[(42,1)]={**ready(db,42,1,{}),'input_signature':'new-synthetic-input'}
     if change=='scope':db.execute('UPDATE shows SET authorized=0 WHERE id=42')
     if change=='watched':db.execute('INSERT INTO watches(show_id,episode,finished) VALUES(42,1,1)')
     now[0]+=30;s.refresh();after=s.get(identity)
-    assert after['revision']>before['revision']
+    assert after==before
     receipt=s.record_dispatch_receipt(intent['ticket'],'created',thread_id='synthetic-thread')
-    assert receipt['receipt_accepted']==0 and receipt['reason']=='revision_moved'
-    assert after['dispatch_state']=='committing'
+    # A genuine host fact is retained. Scope/watch changes prevent activation;
+    # a new reference cannot replace the fixed input of the original request.
+    assert receipt['receipt_accepted']==1
+    if change=='input':
+        assert receipt['state_changed']==1 and receipt['reason']==''
+        assert s.get(identity)['input_key']==intent['input_key']
+    else:
+        assert receipt['state_changed']==0 and receipt['reason']=='scope_changed'
+        assert s.get(identity)==before and before['dispatch_state']=='committing'

@@ -15,7 +15,7 @@
       notes_url: '/static/finished-media/' + r.id + '/notes.txt'}));
   }
   function compare(a,b) { const rank=r=>r.edition==='v1'?2:r.edition==='v0'?0:1;return rank(a)-rank(b)||a.version-b.version; }
-  function label(r) { return r.edition==='v0'?'v0 · 观看版':r.edition==='v1'?'v1 · 精校细调版':`v${r.version} · 既有版本`; }
+  function label(r) { return r.edition==='v0'?'观看版':r.edition==='v1'?'精校版':`v${r.version} · 既有版本`; }
   function merge(entries, releases) {
     const rows = entries.map(e => ({...e}));
     const key = r => `${r.show_id}/${r.season}/${r.episode}`;
@@ -68,23 +68,32 @@
           .map(e => Date.parse(e.release.finished_at) / 1000 || 0))};
     });
   }
-  async function load({verifyMedia = false} = {}) {
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8000);
+  async function load({verifyMedia = true, showId = null} = {}) {
+    // The viewing API checks the files and current season in one batch.
+    // HEAD is only needed when connecting to an older host without that API.
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 60000);
     try {
-      const response = await fetch('/static/finished-media/index.json', {cache: 'no-store', credentials: 'same-origin', signal: controller.signal});
+      const options = {cache: 'no-store', credentials: 'same-origin', signal: controller.signal};
+      const [response, tracking] = await Promise.all([
+        fetch('/static/finished-media/index.json', options), fetch('/api/finished-viewing', options)
+      ]);
       if (response.status === 404) return [];
       if (!response.ok) throw Error('成品清单暂时无法读取');
-      const releases = normalize(await response.json());
-      if (releases.length) {
-        const tracking = await fetch('/api/finished-viewing', {cache: 'no-store', credentials: 'same-origin', signal: controller.signal});
-        if (tracking.status !== 404) {
-          if (!tracking.ok) throw Error('观看记录暂时无法同步');
-          const records = (await tracking.json()).releases || [];
-          for (const r of releases) {
-            const record = records.find(p => p.id === r.id && p.video_sha256 === r.video_sha256);
-            if (record) Object.assign(r, {progress: record.progress, finished: record.finished, show_state: record.show_state});
-          }
+      const releases = normalize(await response.json()).filter(r => showId == null || r.show_id === showId);
+      if (!releases.length) return [];
+      if (tracking.status !== 404) {
+        if (!tracking.ok) throw Error('观看记录暂时无法同步');
+        const records = (await tracking.json()).releases;
+        if (!Array.isArray(records)) throw Error('观看记录暂时无法同步');
+        const byId = new Map(records.map(r => [r.id, r]));
+        const available = new Set();
+        for (const r of releases) {
+          const record = byId.get(r.id);
+          if (!record || record.video_sha256 !== r.video_sha256) continue;
+          Object.assign(r, {progress: record.progress, finished: record.finished, show_state: record.show_state});
+          if (record.show_id === r.show_id && record.season === r.season && record.episode === r.episode) available.add(r.id);
         }
+        return verifyMedia ? releases.filter(r => available.has(r.id)) : releases;
       }
       if (!verifyMedia) return releases;
       // Do not turn a stale index entry or a removed output into a play button.
@@ -106,14 +115,14 @@
     } finally { clearTimeout(timer); }
   }
   // Only viewing lists observe new deliveries. An active player is never changed.
-  function observe(onChange, {initial = [], intervalMs = 60000} = {}) {
+  function observe(onChange, {initial = [], intervalMs = 60000, showId = null} = {}) {
     const signature = rows => JSON.stringify([...rows].sort((a,b) => a.id.localeCompare(b.id)));
     let previous = signature(initial), busy = false, stopped = false;
     async function check() {
       if (busy || stopped || root.document.hidden) return;
       busy = true;
       try {
-        const releases = await load({verifyMedia: true}), current = signature(releases);
+        const releases = await load({verifyMedia: true, showId}), current = signature(releases);
         if (!stopped && current !== previous) {
           onChange(releases);
           previous = current;

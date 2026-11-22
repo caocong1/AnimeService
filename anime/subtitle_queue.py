@@ -9,9 +9,9 @@ import re
 import time
 from pathlib import Path
 
-from .subtitle_delivery import SubtitleDelivery, PROTECTED_DISPATCH, _exists, delivery_policy, priority_show_ids
+from .subtitle_delivery import SubtitleDelivery, _exists, delivery_policy, priority_show_ids
 from .subtitle_delivery_view import STAGES
-from .viewing_workflow import queue_snapshot
+from .viewing_workflow import queue_snapshot, unreleased_date
 
 # Recorded activity is the owner's stage report, a scheduler event or a job change.
 STALL_SECONDS = {'producing': 90 * 60, 'starting': 30 * 60}
@@ -22,7 +22,7 @@ OWNER_GUARD_STATUS = 'data/diagnostics/codex-subtitle-owner-guard/status.json'
 OWNER_STATES = {'recent_progress': 'working', 'tool_in_progress': 'working', 'terminal_or_idle': 'idle',
                 'interrupt_stale_owner_wait': 'stuck', 'already_attempted': 'stuck'}
 RANK = {'producing': 0, 'starting': 0, 'queued': 1, 'preparing': 2, 'downloading': 3,
-        'waiting_video': 4, 'blocked': 5, 'v0_ready': 6, 'done': 7}
+        'waiting_video': 4, 'blocked': 5, 'unreleased': 6, 'protected': 7, 'v0_ready': 8, 'done': 9}
 DOWNLOADING = ('held', 'cleaned', 'file_missing', 'error', 'complete')
 _PATH = re.compile(r'[A-Za-z]:[\\/][^\s]*|(?<![\w:])/[^\s]+')
 PUBLIC_REASONS = frozenset(('needs_verified_completed_media', 'completed_media_needs_inventory_or_reconcile',
@@ -110,8 +110,15 @@ def work(db, job, events, now, edition, guard=None):
            'owner_state': owner['state'] if owner else None,
            'owner_last_activity': owner['last_activity'] if owner else None}
     dispatch, state = job['dispatch_state'], job['state']
+    if dispatch == 'blocked-stopped':
+        stopped = payload.get('recovery_class')
+        out['stop_class'] = ('user_stopped' if payload.get('user_stopped') or stopped == 'user_stopped'
+                             else stopped if stopped in ('system', 'source_wait', 'repair_blocked') else 'protected')
     if dispatch in ('committing', 'unknown'):
         status = 'starting'
+    elif job['scope_blocker']:
+        status = 'protected'
+        out['reasons'] = ['scope_protected']
     elif dispatch == 'acknowledged':
         status = 'producing'
     elif dispatch == 'blocked-stopped' or state == 'blocked':
@@ -142,19 +149,32 @@ def work(db, job, events, now, edition, guard=None):
     return out
 
 
+def attach_recovery(target, repair):
+    """Shared public vocabulary for the queue, details and subtitle library."""
+    if repair and repair['status'] in ('actionable', 'overdue', 'retry_wait', 'source_wait',
+                                       'repair_blocked', 'reconciling', 'needs_user', 'waiting_media'):
+        target['recovery'] = {k: repair.get(k) for k in ('status', 'action', 'domain', 'failed_attempts',
+                              'auto_recoveries_24h', 'next_check_at', 'deadline_at', 'user_action', 'explanation')}
+        if repair['status'] == 'waiting_media' and target['status'] in ('preparing', 'blocked'):
+            target['status'] = 'waiting_video'
+    return target
+
+
 def episode_item(db, sid, ep, season, title, jobs, episode, gap, events, now, guard=None, order=None, lane=frozenset()):
     item = {'show_id': sid, 'episode': ep, 'season': season, 'title': title, 'status': 'waiting_video',
             'edition': 'v0', 'stage': None, 'progress': None, 'since': None, 'last_activity': None,
             'stalled': False, 'stalled_seconds': 0, 'position': None, 'ahead': None, 'reasons': [],
             'gates': None, 'gap': None, 'download_progress': None, 'release_id': None, 'refinement': None,
             'video_ready_at': None, 'waiting_seconds': None, 'owner_state': None, 'owner_last_activity': None,
-            'priority_lane': sid in lane,
+            'priority_lane': sid in lane, 'release_date': None,
             'order': min([(order or {}).get(j['id'], len(order or {})) for j in jobs.values()] or [len(order or {})])}
     if episode and episode['status'] == 'complete' and episode['first_completed']:
         # How long a playable file has waited for its own subtitles; the first completion is recorded once.
         item['video_ready_at'] = episode['first_completed']
         item['waiting_seconds'] = max(0, int(now - episode['first_completed']))
     job, refinement = jobs.get('episode'), jobs.get('refinement')
+    if job:
+        item['_job_id'] = job['id']
     observation = db.get(f'subtitle_delivery_finished_{sid}_{ep}', {}) or {}
     delivered = job['delivery_finished'] if job else bool(observation.get('release_id'))
     if delivered:
@@ -167,7 +187,12 @@ def episode_item(db, sid, ep, season, title, jobs, episode, gap, events, now, gu
         follow = refinement or (job if job and job['payload'].get('refinement_pending') else None)
         if follow:
             item['refinement'] = work(db, follow, events, now, 'v1', guard)
+            item['refinement']['_job_id'] = follow['id']
             item['refinement']['position'] = item['refinement']['ahead'] = None
+        return item
+    future = unreleased_date(db, sid, ep, now) if not (job and job['state'] in ('accepted', 'finished')) else ''
+    if future:
+        item.update(status='unreleased', release_date=future)
         return item
     if job:
         item.update(work(db, job, events, now, job['payload'].get('edition', 'v0'), guard))
@@ -182,17 +207,56 @@ def episode_item(db, sid, ep, season, title, jobs, episode, gap, events, now, gu
     return item
 
 
+def queued_work_positions(items, capacity):
+    """The same global waiting line for first versions and v1 follow-ups."""
+    queued = sorted((i for i in items if i['status'] == 'queued'
+                     or (i.get('refinement') or {}).get('status') == 'queued'), key=lambda i: i['order'])
+    positions = {}
+    for position, item in enumerate(queued, 1):
+        target = item['refinement'] if item['status'] == 'v0_ready' else item
+        fields = {'position': position, 'ahead': max(0, capacity['occupied'] + position - capacity['limit']),
+                  'capacity_available': capacity['available']}
+        target.update(fields)
+        positions[target['_job_id']] = fields
+    return positions
+
+
 def scheduler_health(root, now):
     """The dispatch guard's last look at the two scheduler chats, without their IDs."""
     try:
-        status = json.loads((Path(root) / GUARD_STATUS).read_text(encoding='utf-8-sig'))
-    except (OSError, ValueError):
+        from .subtitle_recovery import read_json
+        status = read_json(Path(root) / GUARD_STATUS, 256 * 1024)
+    except FileNotFoundError:
         return None
-    threads = status.get('threads') or []
-    last = max([float(t.get('last_log_at') or 0) for t in threads] + [0])
-    return {'checked_at': status.get('at'), 'ok': not status.get('error'),
-            'decisions': sorted({str(t.get('decision')) for t in threads if t.get('decision')}),
-            'last_activity': last or None, 'stale': bool(status.get('at')) and now - float(status['at']) > 1800}
+    except (OSError, ValueError, UnicodeError):
+        return {'ok': False, 'checked_at': None, 'stale': True}
+    if not isinstance(status, dict):
+        return {'ok': False, 'checked_at': None, 'stale': True}
+    at = status.get('at')
+    valid = type(at) in (int, float) and 0 < at <= now + 30
+    threads = status.get('threads') if isinstance(status.get('threads'), list) else []
+    threads = [t for t in threads if isinstance(t, dict)]
+    last = max([t['last_log_at'] for t in threads if type(t.get('last_log_at')) in (int, float)
+                and 0 <= t['last_log_at'] <= now + 30] + [0])
+    result = {'checked_at': at if valid else None, 'ok': valid and isinstance(status.get('threads'), list) and not status.get('error'),
+              'decisions': sorted({str(t.get('decision')) for t in threads if t.get('decision')}),
+              'last_activity': last or None, 'stale': not valid or now - at > 1800}
+    preparation = status.get('preparation_recovery')
+    if isinstance(preparation, dict):
+        checked = preparation.get('checked_at')
+        valid_time = (not isinstance(checked, bool) and isinstance(checked, (int, float))
+                      and 0 < checked <= now + 30)
+        execution = preparation.get('execution')
+        valid_execution = execution is None or isinstance(execution, dict)
+        execution = execution if isinstance(execution, dict) else {}
+        result.update(
+            recovery_ok=not preparation.get('error') and valid_time and valid_execution and now - checked <= 1800,
+            recovery_checked_at=checked if valid_time else None,
+            recovery_stale=not valid_time or now - checked > 1800,
+            recovery_execution_stalled=execution.get('status') == 'stalled')
+    elif preparation is not None:
+        result.update(recovery_ok=False, recovery_stale=True)
+    return result
 
 
 def production_queue(db, now=None, show=None):
@@ -202,7 +266,12 @@ def production_queue(db, now=None, show=None):
             return production_queue(snapshot_db, now=now, show=show)
     now = now or time.time()
     snapshot = queue_snapshot(db)
-    jobs = SubtitleDelivery(db, initialize=False).snapshot()['jobs']
+    # The full media/date audit belongs to the dispatcher. This viewer projection
+    # still checks each episode's actual release gate below.
+    delivery_snapshot = SubtitleDelivery(db, initialize=False).snapshot(
+        include_release_review=False, viewing_queues=snapshot, viewer_only=True)
+    jobs = delivery_snapshot['jobs']
+    recovery = delivery_snapshot['recovery']
     events = last_events(db)
     gaps = (db.get('download_gaps', {}) or {}).get('shows', {})
     items, shows = [], []
@@ -229,17 +298,22 @@ def production_queue(db, now=None, show=None):
         items.extend(entries)
         shows.append({'show_id': sid, 'title': row['title'], 'season': season,
                       'next_unwatched': row.get('next_unwatched'), 'items': entries})
-    occupied = any(job['dispatch_state'] in PROTECTED_DISPATCH or job['lease_expires'] > now for job in jobs)
-    # A delivered v0 whose v1 refinement is ready waits in the same line as first versions.
-    queued = sorted((i for i in items if i['status'] == 'queued' or (i['refinement'] or {}).get('status') == 'queued'),
-                    key=lambda i: i['order'])
-    for position, item in enumerate(queued, 1):
-        target = item['refinement'] if item['status'] == 'v0_ready' else item
-        target['position'] = position
-        target['ahead'] = position - 1 + (1 if occupied else 0)
-    items.sort(key=lambda i: (RANK[i['status']], i['position'] or 0, i['show_id'], i['episode']))
+    capacity = delivery_snapshot['capacity']
+    occupied = capacity['occupied'] > 0
+    queued_work_positions(items, capacity)
+    recovery_by_job = {r['job_id']: r for r in recovery['items']}
+    recovery_status = {}
     for item in items:
         item.pop('order')
+        for target in (item, item.get('refinement')):
+            if not target:
+                continue
+            job_id = target.pop('_job_id', None)
+            repair = recovery_by_job.get(job_id)
+            attach_recovery(target, repair)
+            if target.get('recovery'):
+                recovery_status[job_id] = repair
+    items.sort(key=lambda i: (RANK[i['status']], i['position'] or 0, i['show_id'], i['episode']))
     active = [i for i in items if i['status'] in ('producing', 'starting')
               or (i['refinement'] or {}).get('status') in ('producing', 'starting')]
     slot = None
@@ -250,9 +324,25 @@ def production_queue(db, now=None, show=None):
         slot.update({k: part[k] for k in ('status', 'edition', 'stage', 'since', 'last_activity', 'stalled', 'stalled_seconds')})
     summary = {status: sum(i['status'] == status for i in items) for status in RANK}
     summary['stalled'] = sum(i['stalled'] or (i['refinement'] or {}).get('stalled', False) for i in items)
+    recovery_values = list(recovery_status.values())
+    summary['reconciling'] = sum(r.get('status') == 'reconciling' for r in recovery_values)
+    summary['needs_user'] = sum(r.get('status') == 'needs_user' for r in recovery_values)
+    summary['source_wait'] = sum(r.get('status') == 'source_wait' for r in recovery_values)
+    summary['repair_blocked'] = sum(r.get('status') == 'repair_blocked' for r in recovery_values)
+    # A v0 can be watchable while its v1 occupies a slot. Episode totals and
+    # unfinished work totals are separate, so the header includes refinements.
+    work_items = [(i.get('refinement') or i) if i['status'] == 'v0_ready' else i for i in items]
+    work_summary = {status: sum(i['status'] == status for i in work_items) for status in RANK}
+    work_summary.update({k: summary[k] for k in ('stalled', 'needs_user', 'source_wait', 'repair_blocked')})
+    work_summary['active_preparation'] = sum(i['status'] in ('preparing', 'downloading')
+        and (i.get('recovery') or {}).get('status') not in
+        ('source_wait', 'retry_wait', 'waiting_media', 'overdue', 'repair_blocked', 'reconciling', 'needs_user')
+        for i in work_items)
     if show is not None:  # positions, the slot and the summary stay global; one show's page still sees its true place
         items = [i for i in items if i['show_id'] == show]
         shows = [s for s in shows if s['show_id'] == show]
     return {'schema': 1, 'generated_at': now, 'stall_seconds': STALL_SECONDS,
-            'slot': {'occupied': occupied, 'item': slot}, 'summary': summary,
+            'slot': {'occupied': occupied, 'item': slot}, 'capacity': capacity, 'summary': summary,
+            'work_summary': work_summary,
+            'recovery_health': {'error': recovery.get('error')},
             'scheduler': scheduler_health(db.path.parent.parent, now), 'shows': shows, 'items': items}

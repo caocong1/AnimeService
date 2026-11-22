@@ -71,7 +71,8 @@ def readiness(db, sid, ep, payload):
                 if task.get('purpose') not in ('episode', 'source_sample', 'subtitle_sample'):
                     continue
                 queue = db.one('SELECT lease,committing,state FROM thunder_queue WHERE hash=?', (task['hash'],))
-                if queue and (queue['lease'] or queue['committing'] or queue['state'] in ('claimed', 'review')):
+                from .download_receipts import pending_receipt
+                if pending_receipt(task, queue):
                     continue
                 if db.get('thunder_dialog_hold_' + task['hash'], {}).get('unconfirmed'):
                     continue
@@ -107,11 +108,30 @@ def readiness(db, sid, ep, payload):
                     d = {k: row[k] for k in ('id', 'raw_hash', 'text_hash', 'language')}
                     d.update(estimated=bool(meta.get('timing_is_estimated')),
                              mixed=bool(meta.get('mixed_language_suspected')),
-                             origin=meta.get('origin'), target_fingerprint=meta.get('media_fingerprint'))
+                             origin=meta.get('origin'), target_fingerprint=meta.get('media_fingerprint'),
+                             target_matching_status=meta.get('target_matching_status'),
+                             candidate_not_reliable_base=bool(meta.get('candidate_not_reliable_base')))
+                    if 'ocr' in str(meta.get('origin', '')).lower():
+                        qualified = False
+                        if meta.get('origin') == 'codex-reviewed-ocr':
+                            try:
+                                report = proof(root, meta.get('chinese_review_report'))
+                                qualified = bool(report.get('schema') == 'chinese-dialogue-review/v1'
+                                    and report.get('reviewer_kind') == 'codex'
+                                    and report.get('source_raw_sha256') == meta.get('source_raw_sha256')
+                                    and report.get('corrected_subtitle', {}).get('sha256') == row['raw_hash']
+                                    and report.get('target_fingerprint') == target.get('fingerprint'))
+                            except (ValueError, KeyError, TypeError, OSError):
+                                pass
+                        d['candidate_not_reliable_base'] |= not qualified
                     drafts.append(d)
                 except (ValueError, KeyError, TypeError, OSError):
                     reasons.append('archived_input_changed_or_invalid')
-    zh = [d for d in drafts if d['language'] in core.ZH and not d['estimated'] and not d['mixed']]
+    zh = [d for d in drafts if d['language'] in core.ZH and not d['estimated'] and not d['mixed']
+          and not d.get('candidate_not_reliable_base')]
+    if any(d.get('target_matching_status') in ('pending', 'alignment_pending')
+           or (d.get('target_fingerprint') and d['target_fingerprint'] != target.get('fingerprint')) for d in zh):
+        review_notes.append('chinese_source_target_alignment_pending')
     # Manual sign readings and song-only tracks are not a Japanese dialogue base.
     ja_candidates = [d for d in drafts if d['language'] in core.JA and not d['estimated']
           and d['origin'] not in ('manual-screen', 'manual-screen-text', 'screen_text', 'local-asr')]
@@ -212,9 +232,14 @@ def readiness(db, sid, ep, payload):
                 book_sha = sha(book.read_bytes())
         except OSError:
             pass
-    signature = sha(json.dumps({'target': target.get('fingerprint'), 'drafts': drafts},
+    signature_drafts = [{k: v for k, v in d.items() if k not in
+                        ('target_matching_status', 'candidate_not_reliable_base')} for d in drafts]
+    signature = sha(json.dumps({'target': target.get('fingerprint'), 'drafts': signature_drafts},
                                sort_keys=True, ensure_ascii=False).encode())
+    from .subtitle_chinese import chinese_preparation
+    preparation = chinese_preparation(db, sid, ep, target)
     return {'material_ready': bool(valid_media and zh and (ja or first_release) and 'archived_input_changed_or_invalid' not in reasons),
+            'chinese_preparation': preparation,
             'dispatch_standard': 'finished_v1' if first_release else 'reviewed_bilingual',
             'review_notes': sorted(set(review_notes)),
             'clean_review_ready': clean_ready, 'capability_ready': capability_ready,

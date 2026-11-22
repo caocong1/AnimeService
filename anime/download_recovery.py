@@ -70,7 +70,7 @@ def recover_downloads(engine,limit=4):
                     title=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',db.show(sid)['title']).strip('. ')[:80]
                     label='Subtitle samples' if t['purpose']=='subtitle_sample' else 'Source samples'
                     save=str(engine.library/(title+f' [bgm-{sid}]')/f'Season {m.get("season",1):02}'/label/h)
-                if shutil.disk_usage(engine.library.anchor or engine.library.parent).free<sum(f['size'] for f in chosen.values())+db.get('minimum_free_gb',10)*1024**3:
+                if shutil.disk_usage(Path(save).anchor or engine.library.parent).free<sum(f['size'] for f in chosen.values())+db.get('minimum_free_gb',10)*1024**3:
                     raise ValueError('备用下载磁盘空间不足，稍后自动重试')
                 Path(save).mkdir(parents=True,exist_ok=True)
                 reason='用户改为qB优先；核验原迅雷意图未提交' if qbit_first else fault['reason']

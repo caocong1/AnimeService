@@ -1,4 +1,14 @@
+2026-11-18 qB原实例恢复：用户已授权原媒体后台在确认qB退出后自动恢复原profile/4870，执行[单实例及回执规则](QBIT-CONNECTION-RECOVERY.md)。这不授权自动聊天直接启动/切换下载器或创建Engine；自动任务继续使用原后台并读取 `qbit_restore_status`，保留现有周期、目标、ACTIVE和未知提交保护，不新增任务、不Run now。本轮未改应用自动任务提示词或manifest。
+
+2026-10-24 恢复闭环：执行 [SUBTITLE-RECOVERY.md](SUBTITLE-RECOVERY.md) 与 [SUBTITLE-STALL-RECOVERY.md](SUBTITLE-STALL-RECOVERY.md) 新规则。桌面turn completed不等于实修完成，必须核真实动作、证据和状态回读；现有五分钟守卫显示30分钟无实际动作及新鲜监控错误。 stopped系统故障用结构化 `recovery_class/recovery_turn`，自动恢复用原票据 `begin --auto-recovery-turn` 并在宿主前计次；每owner每24小时最多两次，未知结果也计，手动恢复不清台账。可信宿主桥/compact完成确认未具备前，不从普通后台直接重发。原任务周期、目标和ACTIVE不变。
+
+2026-10-22 无人工字幕生产：执行 [中文字幕来源与无人工作业](SUBTITLE-CHINESE-SOURCES.md)。中文熟肉软轨和经 Codex 实帧核正的硬字幕 OCR 可供主稿，已有 OCR/正文先校对、归档和对轴，不因独立稿搜索失败转人工。collect/review/align/find 分路线记录实际失败；字幕缺件 source_wait、工具自动修复 repair_blocked，当前 needs_user 仅保留 unknown_dispatch 原回执事实。中文防漏、唯一 owner、已看/未知回执与原下载门禁保持。
+
+2026-10-22 并行更新：用户明确要求多会话同时处理字幕积压，执行 [SUBTITLE-PARALLEL.md](SUBTITLE-PARALLEL.md)。整体改为显式容量最多三集，不同集并行，每集/每线程仍唯一；片源、原稿准备独立推进。下文历史单槽描述由本条覆盖，已看、未知回执、owner 与质量保护不变。
+
 # 定时任务与持续制作
+
+2026-11-04整体复盘执行[端到端契约](PROJECT-CONSISTENCY.md)。任务2收尾使用`subtitle_recovery.py round-check --before 本轮recovery-before.json`，到期动作未处理时退出2，不以聊天completed或复制closure判正常。模板和活动任务使用`check_automation_contract.py`只读比对；应用状态以原生更新和回读为准，旧字段/周期说明不重放。
 
 本文和automation-prompts保存审定规则与脱敏完整prompt；文档入库不等于运行任务已更新。周期/状态按本机配置核对，实际应用前须重新读配置、运行状态、原目标与项目，不能复建历史任务。时间按Asia/Shanghai，应用时核界面时区。
 
@@ -45,7 +55,7 @@ acknowledged、notLoaded或旧成品存在不代表仍在制作；核精确turn�
 
 先看status.json新鲜度/整体error，再按当前调度聊天、精确turn及时间筛actions.jsonl的控制尝试和control_exit_code/receipt/error；每次有status，只有尝试控制才追加actions。不能把全局末行、缺行或IPC成功当业务完成，结合实时队列只续未完成动作，不重放整轮。
 
-codex_absence_verifier是独立只读--dry-run采集器，不是生产核验器；报告固定diagnostic_only、absence_authorized=false。原ticket、真实可用host_ref、既有私有输出目录是前提，权限只核不修，报告/sha256独占创建。版本白名单state 1..61/history 1..8/logs 1..2，未知schema fail closed；默认20秒、200行，time-limit范围0.05..30、max-rows 1..1000；SQL预算不保证可中断OS文件I/O。错误/截断/超时非零，退出0仅声明诊断范围完成。没有宿主operation级终态API：投影终态/空列表/人工签核都不授权not_created、清owner或重投。详见DISPATCH-ABSENCE-EVIDENCE.md。
+codex_absence_verifier是独立只读--dry-run采集器，不是生产核验器；报告固定diagnostic_only、absence_authorized=false。原ticket、真实可用host_ref、既有私有输出目录是前提，权限只核不修，报告/sha256独占创建。版本白名单state 1..61/history 1..8/logs 1..2，未知schema fail closed；默认20秒、200行，time-limit范围0.05..30、max-rows 1..1000；SQL预算不保证可中断OS文件I/O。错误/截断/超时非零，退出0仅声明诊断范围完成。没有宿主operation级终态API：投影终态/空列表/额外签核都不授权not_created、清owner或重投。详见DISPATCH-ABSENCE-EVIDENCE.md。
 
 ## 安静、质量与禁止事项
 

@@ -3,6 +3,8 @@ import json
 import time
 from pathlib import Path
 
+from .viewing_workflow import unreleased_date
+
 
 def preparation_plan(db, jobs, now=None):
     now = time.time() if now is None else now
@@ -11,6 +13,8 @@ def preparation_plan(db, jobs, now=None):
     for job in jobs:
         if job['kind'] != 'episode' or job.get('delivery_finished') or job['state'] in ('finished', 'accepted'):
             continue
+        if unreleased_date(db, job['show_id'], job['episode'], now):
+            continue  # Future episodes are not media-preparation failures.
         sid, ep = job['show_id'], job['episode']
         if job.get('scope_blocker'):
             protected.append({'job_id': job['id'], 'reason': job['scope_blocker']})
@@ -18,19 +22,30 @@ def preparation_plan(db, jobs, now=None):
         # Unknown dispatches and stopped writers have their own recovery path.
         if job.get('dispatch_state') or job.get('thread_id') or job.get('lease_owner'):
             continue
+        if job['state'] == 'ready' and not job.get('finished'):
+            continue
         files = set()
-        for task in db.rows("SELECT title,selection,save_path FROM tasks WHERE show_id=? AND status IN ('complete','linked')", (sid,)):
+        arrivals = []
+        research_files = set()
+        for task in db.rows("""SELECT t.title,t.selection,t.save_path,t.hash,t.purpose,t.acknowledged,
+                                      e.first_completed FROM tasks t LEFT JOIN episodes e
+                               ON e.show_id=t.show_id AND e.episode=? AND e.hash=t.hash AND e.status='complete'
+                               WHERE t.show_id=? AND t.status IN ('complete','linked')""", (ep, sid)):
             try:
                 from .fidelity import fidelity_blocker
-                if fidelity_blocker(db, task['title'], task['selection']):
-                    continue
                 item = json.loads(task['selection']).get('selected', {}).get(str(ep))
                 if not item:
+                    continue
+                if fidelity_blocker(db, task['title'], task['selection']):
                     continue
                 root = Path(task['save_path']).resolve()
                 path = (root / item['name']).resolve()
                 if path.is_relative_to(root) and path.is_file() and path.stat().st_size == item['size']:
                     files.add(path)
+                    if task['first_completed'] and 0 < task['first_completed'] <= now:
+                        arrivals.append(task['first_completed'])
+                    if task['purpose'] == 'subtitle_sample' and task['acknowledged'] == 1:
+                        research_files.add(path)
             except (OSError, ValueError, TypeError, KeyError):
                 continue
         show = db.show(sid)
@@ -49,6 +64,11 @@ def preparation_plan(db, jobs, now=None):
             continue
         if job['state'] == 'ready':
             continue
+        # The first verified episode completion survives later inventory runs.
+        # Keep an earlier research observation when both sources exist.
+        if arrivals:
+            arrival = min(arrivals)
+            seen = min(seen, arrival) if seen else arrival
         payload = job.get('payload') or {}
         latest = payload.get('latest_assessment') or payload
         assessment = latest.get('assessment') or payload.get('assessment') or {}
@@ -67,9 +87,12 @@ def preparation_plan(db, jobs, now=None):
                 actions.append('reconcile_current_materials')
         else:
             actions.append('await_or_reconcile_media')
-        # File existence now cannot establish how long it has been available.
-        since = max(job['created'], seen) if seen else now
+        # Missing inventory time cannot prove recent arrival. Job creation is a
+        # stable upper bound for an attention reminder; using this round's now
+        # would postpone the reminder forever on every status read.
+        since = max(job['created'], seen) if seen else job['created']
         row.update(actions=actions, reasons=reasons, material_seen_at=seen,
+                   completed_research_files=len(research_files),
                    waiting_since=since, waiting_seconds=max(0, now - since),
                    attention_required=bool(files and now - since >= 21600))
         (available if files else waiting).append(row)

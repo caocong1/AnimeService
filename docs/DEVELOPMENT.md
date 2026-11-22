@@ -106,6 +106,14 @@ GET `/api/web/media/{key}/audio-tracks` 只探测登记文件；POST `/{index}/p
 
 `tests/test_audio_tracks.py` 覆盖实际流索引、默认标记、媒体变化失效、并发/空间限制、失败清理、逐轨映射、只复制视频、鉴权及 Range；真实 FFmpeg 双轨 fixture 和 Edge 浏览器复现脚本/截图保存在本机 docs，所有测试观看写入均拦截。前端 ArtPlayer 5.4.0 通过原生 video.paused 判断暂停，切源 loadedmetadata 不重复执行首开自动播放或旧断点恢复。
 
+## 弹幕列表查找与视频跳转
+
+放映室右侧「弹幕列表」支持按内容查找，保留完整时间顺序列表及虚拟滚动，高亮关键词和当前结果。输入即滚动到首个结果，上一条/下一条循环定位；Enter/Shift+Enter 查找下一条/上一条，Escape 或「清空」结束查找。查找期间暂停播放跟随，「回到当前播放」清空查找并立即恢复跟随。
+
+双击列表中的弹幕，按该条弹幕经过来源偏移校正后的时间跳转主视频，保留播放/暂停状态；列表获得焦点时，Enter 可跳转当前查找结果。视频未就绪或正在切换时提示稍后重试。查找只移动列表，跳转不标为已看，未播放时不写观看进度。屏蔽用户、重新匹配或移除来源均重算结果，普通视频与自制字幕 v0/v1 共用本入口。
+
+隔离真实浏览器回归：`node scripts/verify_danmu_list_controls.cjs`，可通过 `PAGE_QA_PLAYWRIGHT` 指定已安装的 Playwright。默认私有目录 `data/diagnostics/danmu-list-controls-20261108/` 需先放置合成的 1200 秒 `fixture.mp4`；脚本只访问被本地拦截的 `fixture.test`，覆盖 1.2 万条弹幕、关键词转义、输入法、校正后跳转、观看保护及手机布局，不连接生产播放接口。
+
 ## 弹幕音频对齐
 
 添加来源支持作品/视频标题搜索，以及独立的「B站网址 / BV号」直达查询。普通搜索框也兼容 BV号和标准 B站视频页。GET `/api/web/danmu/resolve?q=...` 通过固定视频元数据接口获取真实标题、分P、时长，网址只保留公开 BV和正整数 p；不请求用户传入的主机，不将任意查询参数发送到上游。当前直达支持普通 BV投稿视频，包括 www/m/无www 的 bilibili.com 视频页；不解析短链接。
@@ -205,6 +213,8 @@ POST /api/catalog/import/{sid} 校验本机会话/同源及动画条目后只保
 
 
 ## 项目知识与提交
+
+页面打开速度为持续验收项，见 [页面性能要求与可运行检查](PAGE-PERFORMANCE.md)。改动共享 JS、页面数据 API、字幕/成品观看接入后，执行封面/并发/批量读取隔离回归，并运行 `node scripts/check_page_performance.cjs --extended`；计入真实正文和首屏封面，不以空壳或单个 API 延迟替代。报告写入私有 data/diagnostics，部署继续沿原 supervisor。
 
 长期文档入口为 [文档目录](README.md)、[当前规则](PROJECT-RULES.md)、[项目经验](PROJECT-EXPERIENCE.md) 和 [任务方式](AUTOMATION.md)。旧章节包含历史实现，下载器优先序、字幕首版门槛、两阶段版本、已看保护及周期以当前规则为准。
 

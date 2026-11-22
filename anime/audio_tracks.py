@@ -77,7 +77,9 @@ class AudioTracks:
         data = self.probe(item)
         if not any(t['index'] == index for t in data['tracks']):
             raise ValueError('该音轨不存在，请重新选择')
-        return f'{data["fingerprint"]}-{index}', data
+        # Version the playback profile: older AAC caches may still contain 5.1
+        # channels that decode but produce no usable output on browser devices.
+        return f'{data["fingerprint"]}-{index}-stereo-v2', data
 
     def status(self, item, index):
         key, _ = self.identity(item, index)
@@ -129,15 +131,16 @@ class AudioTracks:
         target = self.cache / f'{key}.mp4'
         partial = self.cache / f'{key}.part.mp4'
         track = next(t for t in data['tracks'] if t['index'] == index)
+        convert = track['codec'] not in ('aac', 'mp3') or track['channels'] > 2
         process = None
         try:
             partial.unlink(missing_ok=True)
             args = [self.tools.tool('ffmpeg'), '-nostdin', '-v', 'error', '-n',
                     '-protocol_whitelist', 'file,pipe', '-i', item['path'],
                     '-map', '0:v:0', '-map', f'0:{index}', '-c:v', 'copy',
-                    '-c:a', 'copy' if track['codec'] in ('aac', 'mp3') else 'aac']
-            if track['codec'] not in ('aac', 'mp3'):
-                args += ['-b:a', '256k' if track['channels'] <= 2 else '512k']
+                    '-c:a', 'aac' if convert else 'copy']
+            if convert:
+                args += ['-ac', '2', '-b:a', '256k']
             if data['video_codec'] == 'hevc':
                 args += ['-tag:v', 'hvc1']
             args += ['-map_metadata', '-1', '-map_chapters', '-1',

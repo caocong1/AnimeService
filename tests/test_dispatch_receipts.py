@@ -102,7 +102,7 @@ def test_not_created_never_clears_a_responsible_thread_and_resume_tickets_confir
     scheduler.record_dispatch_receipt(intent['ticket'], 'created', thread_id='chat-1')
     scheduler.record_blocked(identity, 'chat-1', ['owner paused'], owner_stopped=True)
     row = scheduler.get(identity)
-    lease = scheduler.resume(identity, 'chat-1', 'test-owner', row['revision'])
+    lease = scheduler.resume(identity, 'chat-1', 'test-owner', row['revision'], manual_recovery=True)
     resumed = scheduler.begin_dispatch(identity, 'test-owner', lease['lease_token'], lease['revision'])
     ticket = resumed['ticket']
     assert ticket['dispatch_action'] == 'reuse' and ticket['thread_id'] == 'chat-1'

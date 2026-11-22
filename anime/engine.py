@@ -1,8 +1,10 @@
 import base64,datetime,hashlib,json,os,re,shutil,threading,time
 import psutil
+from functools import lru_cache
 from pathlib import Path
 from .db import ROOT,STATES
 from .net import safe_error,NetworkError,RequestDeferred
+from .diagnostics import record_event
 from .qbit import Qbit
 from .download_policy import require_submission_ready,fallback_receipt,Refusal
 from .fidelity import fidelity_blocker
@@ -17,6 +19,13 @@ GATE_SETTINGS=('downloader_preference','thunder_ui_enabled','qbit_fallback_enabl
                'subtitle_studio_enabled','native_indexes_enabled','general_indexes_enabled','source_publisher_blacklist',
                'viewing_workflow_policy','source_fidelity')
 
+
+@lru_cache(maxsize=8192)
+def observed_release_episodes(title,mapping_json):
+    """Pure title interpretation only; live scope, airings and files stay outside."""
+    try:return tuple(validate_title(title,json.loads(mapping_json),{},False))
+    except Rejected:return ()
+
 def release_priority(candidate):
     title=norm(candidate['title'][:150])
     group=next((i for i,g in enumerate(RELIABLE_GROUPS) if norm(g) in title),len(RELIABLE_GROUPS))
@@ -25,10 +34,12 @@ def release_priority(candidate):
 class Engine:
     def __init__(self,db,qbit=None,sources=None,library=None):
         self.db=db;self.qb=qbit or Qbit();self.sources=sources or Sources(db);self.catalog=Catalog(db)
-        self.library=Path(library or 'D:/MediaLibrary/Anime');self.cache=db.path.parent/'torrents';self.cache.mkdir(exist_ok=True)
+        from .download_storage import download_roots
+        default_library, self.incomplete = download_roots()
+        self.library=Path(library or default_library);self.cache=db.path.parent/'torrents';self.cache.mkdir(exist_ok=True)
         self.wake=threading.Event();self.stop_event=threading.Event();self.cycle_lock=threading.Lock()
         self.maintenance_lock=threading.Lock()
-        self.incomplete=Path('D:/MediaDownloads/Incomplete/AnimeService')
+        self.tracking_wake=threading.Event()
         from .thunder_bridge import ThunderBridge
         self.thunder=ThunderBridge(self)
         from .source_review import SourceReview
@@ -41,6 +52,7 @@ class Engine:
         with self.db.gate:
             sequence=self.db.get('check_requested',0)+1
             self.db.set('check_requested',sequence)
+            self.db.set('global_check_requested',sequence)
             self.db.set('check_requested_at',time.time())
         self.wake.set()
         return sequence
@@ -62,36 +74,89 @@ class Engine:
                 args=' '.join(p.info['cmdline'] or []).replace('\\','/').lower()
                 if '--profile=d:/mediaservice/qbit-profile' not in args:
                     raise NetworkError('旧qBittorrent实例及RSS规则可能同时接管订阅，已阻止提交；请先处理旧订阅所有权')
+    def tracking_status(self,sid):
+        row=self.db.one("""SELECT s.state,s.selected,q.state AS pending FROM shows s
+            LEFT JOIN tracking_requests q ON q.show_id=s.id WHERE s.id=?""",(sid,))
+        if not row:raise ValueError('条目不存在')
+        return row
+
+    def request_state(self,sid,state):
+        if not isinstance(state,str) or state not in STATES:raise ValueError('未知追番状态')
+        with self.db.connect(timeout=1) as c:
+            if not c.execute("""INSERT INTO tracking_requests(show_id,state)
+                    SELECT id,? FROM shows WHERE id=? ON CONFLICT(show_id) DO UPDATE SET state=excluded.state""",
+                    (state,sid)).rowcount:raise ValueError('条目不存在')
+        # The inbox survives restart. A slow downloader holding the safety gate
+        # cannot tie up request threads. A newer click replaces a waiting click.
+        if self.db.gate.acquire(blocking=False):
+            try:self._apply_state(sid)
+            finally:self.db.gate.release()
+        self.tracking_wake.set()
+        return self.tracking_status(sid)
+
     def state(self,sid,state):
         if state not in STATES:raise ValueError('未知追番状态')
-        with self.db.gate:
-            previous=self.db.show(sid)
+        with self.db.gate:self._apply_state(sid,state)
+
+    def _apply_state(self,sid,state=None):
+        with self.db.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            if state is None:
+                pending=c.execute('SELECT state FROM tracking_requests WHERE show_id=?',(sid,)).fetchone()
+                if not pending:return
+                state=pending['state']
+            previous=c.execute('SELECT state,selected,cleanup_hold FROM shows WHERE id=?',(sid,)).fetchone()
             if not previous:raise ValueError('条目不存在')
-            self.db.execute('UPDATE shows SET selected=1,state=? WHERE id=?',(state,sid))
+            c.execute('DELETE FROM tracking_requests WHERE show_id=?',(sid,))
+            if previous['selected'] and previous['state']==state:return
+            c.execute('UPDATE shows SET selected=1,state=? WHERE id=?',(state,sid))
             if state in ('watching','trial'):
-                self.db.execute("UPDATE candidates SET status='discovered' WHERE show_id=? AND status IN ('covered','reserved')",(sid,))
-            self.db.event('show:'+str(sid),'用户将状态设置为 '+state)
-            # State is durable BEFORE stop request. Reconciliation retries even if qB is offline.
-            if not self.db.eligible(sid):
-                for t in self.db.rows("SELECT * FROM tasks WHERE show_id=? AND status NOT IN ('cleaned','linked')",(sid,)):
-                    try:self.hold(t)
-                    except Exception as e:self.db.event('task:'+t['hash'],safe_error(e),'error')
-            if self.db.review_wanted(sid) and (not previous['selected'] or previous['state']!=state):
-                # Persist the user's request, including clicks during an active cycle.
-                # Preparation still verifies scope, mapping, inventory and authorization.
-                self.db.set('auto_retry_'+str(sid),0)
-                if hasattr(self,'enroll_source_reviews'):self.enroll_source_reviews(sid=sid)
-                self.request_check()
-            self.wake.set()
+                c.execute("UPDATE candidates SET status='discovered' WHERE show_id=? AND status IN ('covered','reserved')",(sid,))
+            c.execute("INSERT INTO events(time,level,scope,message) VALUES(?,'info',?,?)",
+                      (time.time(),'show:'+str(sid),'用户将状态设置为 '+state))
+            enroll=not previous['cleanup_hold'] and state in ('wish','trial','watching')
+            if enroll:
+                c.execute('INSERT OR REPLACE INTO kv VALUES(?,?)',('auto_retry_'+str(sid),'0'))
+                c.execute("""INSERT INTO kv VALUES('check_requested','1') ON CONFLICT(key)
+                    DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)""")
+                c.execute("INSERT OR REPLACE INTO kv VALUES('check_requested_at',?)",(str(time.time()),))
+                c.execute("""INSERT OR REPLACE INTO kv SELECT ?,value FROM kv WHERE key='check_requested'""",
+                          ('show_check_'+str(sid),))
+        self.wake.set()
+        if enroll and hasattr(self,'enroll_source_reviews'):
+            self.step('season.enroll_source_reviews',lambda:self.enroll_source_reviews(sid=sid))
+        # Downloader reconciliation uses the durable state and the original
+        # ownership checks. No provider network call belongs on the click path.
+
+    def tracking_loop(self):
+        while not self.stop_event.is_set():
+            self.tracking_wake.clear()
+            try:
+                for row in self.db.rows('SELECT show_id FROM tracking_requests ORDER BY show_id'):
+                    if self.stop_event.is_set():return
+                    with self.db.gate:self._apply_state(row['show_id'])
+            except Exception as error:record_event(self.db,'tracking',safe_error(error),'error',error=error)
+            self.tracking_wake.wait(5)
+
     def hold(self,t):
         if t.get('provider')=='thunder':return self.thunder.hold(t)
         rows=self.qb.info(t['hash'])
+        if not rows and t['status']=='uncertain':
+            # A later change back to watching must still reconcile this exact
+            # submission. "held" alone would allow another POST for this hash.
+            return
         if not rows and t.get('acknowledged'):
             self.db.execute("UPDATE tasks SET status='review',error='已确认任务从下载器移除，不自动重下',updated=? WHERE hash=?",(time.time(),t['hash']));return
-        if rows and self.qb.owned(rows[0]):
-            if rows[0].get('progress',0)<1:self.qb.stop(t['hash'])
-        self.db.execute("UPDATE tasks SET status='held',updated=? WHERE hash=?",(time.time(),t['hash']))
-        self.db.execute("UPDATE episodes SET status='held' WHERE hash=? AND status NOT IN ('complete','file_missing','error')",(t['hash'],))
+        if rows:
+            qt=rows[0]
+            if not self.qb.owned(qt) or Path(qt['save_path']).resolve()!=Path(t['save_path']).resolve():
+                raise Rejected('下载任务所有权或目录不匹配，禁止操作')
+            if qt.get('progress',0)<1 and (t['status']!='held' or qt.get('state') not in ('stoppedDL','pausedDL')):
+                self.qb.stop(t['hash'])
+        with self.db.connect() as c:
+            c.execute("""UPDATE tasks SET status='held',acknowledged=max(acknowledged,?),updated=? WHERE hash=?
+                         AND (status!='held' OR acknowledged<?)""",(int(bool(rows)),time.time(),t['hash'],int(bool(rows))))
+            c.execute("UPDATE episodes SET status='held' WHERE hash=? AND status NOT IN ('held','complete','file_missing','error')",(t['hash'],))
     def gate_key(self,t):
         sid=t['show_id'];policy=self.db.one('SELECT config FROM source_policies WHERE show_id=?',(sid,))
         parts={k:self.db.get(k) for k in GATE_SETTINGS}
@@ -104,13 +169,15 @@ class Engine:
                          OR id IN (SELECT candidate_id FROM subtitle_samples WHERE hash=?)) ORDER BY id''',(sid,t['hash'],t['hash'],t['hash'])),
                      references=self.db.rows('SELECT evidence FROM subtitle_samples WHERE hash=? AND show_id=? ORDER BY candidate_id',(t['hash'],sid)))
         return hashlib.sha256(json.dumps(parts,sort_keys=True,default=str).encode()).hexdigest()
+    def check_for_show(self,sid):
+        return max(self.db.get('global_check_requested',0),self.db.get('show_check_'+str(sid),0))
     def refused(self,t):
         """A recorded refusal stands while its inputs are unchanged and its recheck time has not come; an explicit check overrides."""
         # Unknown/already acknowledged submissions must continue reconciliation.
         if t['status']=='uncertain' or t.get('acknowledged') or t.get('external_id'):return False
         record=self.db.get('task_failure_'+t['hash'],{})
         if not record.get('next') or time.time()>=record['next'] or record.get('gate_key')!=self.gate_key(t):return False
-        return self.db.get('check_requested',0)<=max(self.db.get('check_completed',0),record.get('checked_request',0))
+        return self.check_for_show(t['show_id'])<=max(self.db.get('check_completed',0),record.get('checked_request',0))
     def note_failure(self,h,t,error,message):
         """Keep one record per task: the reason, how often and since when; report repeats sparsely."""
         key='task_failure_'+h;prior=self.db.get(key,{});now=time.time();same=prior.get('reason')==message
@@ -126,7 +193,7 @@ class Engine:
         """Completed packages are re-verified hourly, at once on a downloader error state, or on an explicit check."""
         if qt.get('state') in ('error','missingFiles'):return True
         verified=self.db.get('task_verified_inputs_'+t['hash'],{})
-        if self.db.get('check_requested',0)>max(self.db.get('check_completed',0),verified.get('checked_request',0)):return True
+        if self.check_for_show(t['show_id'])>max(self.db.get('check_completed',0),verified.get('checked_request',0)):return True
         if verified.get('key')!=self.verification_key(t,qt):return True
         return time.time()-self.db.get('task_verified_'+t['hash'],0)>=3600
     def verification_key(self,t,qt):
@@ -146,7 +213,9 @@ class Engine:
         if not p.exists():return []
         m=mapping or self.db.mapping(sid);aliases=m.get('aliases',[])
         return [f for f in json.loads(p.read_text(encoding='utf-8')) if any(norm(a) in norm(f['path']) for a in aliases if len(norm(a))>=2)]
-    def ingest(self,candidate):
+    def ingest(self,candidate,*,explicit_material=False,verified_torrent=None):
+        from .subtitle_reference_intake import reference_only
+        if reference_only(candidate,self.db):raise Rejected('候选仅允许原逐集subtitle_reference入口取料')
         sid=candidate['show_id'];s=self.db.show(sid)
         if not self.db.eligible(sid):return
         m=candidate_mapping(json.loads(s['mapping']),candidate)
@@ -158,22 +227,36 @@ class Engine:
             if not decision['allowed']:
                 self.db.execute("UPDATE candidates SET status='source_wait',reason=? WHERE id=?",(decision['reason'],candidate['id']));return
             reviewed=self.source_review.policy(sid).get('mode')=='selected'
-            title_eps=validate_title(candidate['title'],m,self.settings(),quality=not reviewed)
+            title_eps=validate_title(candidate['title'],m,self.settings(),quality=not (reviewed or explicit_material))
+            episode_titles={}
+            if explicit_material:
+                from .viewing_workflow import production_wanted
+                from .native_indexes import clean_blocker
+                if not production_wanted(self.db,sid):raise Rejected('显式原片获取只用于在追字幕制作')
+                if clean_blocker(self.db,candidate):raise Rejected(clean_blocker(self.db,candidate))
+                for row in self.db.rows('SELECT episode,title FROM airings WHERE show_id=?',(sid,)):
+                    episode_titles.setdefault(row['episode'],[]).append(row['title'])
+                if any(self.db.one('SELECT 1 FROM watches WHERE show_id=? AND episode=? AND finished=1',(sid,ep)) for ep in title_eps):
+                    raise Rejected('已看集保持，不新增原片获取')
             wanted=[ep for ep in title_eps if self.db.allowed(sid,ep) and not self.db.one('SELECT 1 FROM episodes WHERE show_id=? AND episode=?',(sid,ep))]
             if not wanted:
                 self.db.execute("UPDATE candidates SET status='covered',reason='已有文件/任务或不在授权范围' WHERE id=?",(candidate['id'],));return
-            data=self.sources.torrent(candidate);h,files=bdecode(data)
+            data=verified_torrent if verified_torrent is not None else self.sources.torrent(candidate);h,files=bdecode(data)
             expected=re.search(r'(?i)([0-9a-f]{40})\.torrent',candidate['url'])
             magnet=re.search(r'(?i)urn:btih:([A-Z2-7]{32}|[0-9a-f]{40})(?:&|$)',candidate['url'])
             expected_hash=expected[1].lower() if expected else None
             if magnet:expected_hash=base64.b32decode(magnet[1].upper()).hex() if len(magnet[1])==32 else magnet[1].lower()
             if expected_hash and expected_hash!=h:raise Rejected('种子infohash与来源标识不符')
-            selected,ids=select_files(files,m,wanted,title_eps)
+            selected,ids=select_files(files,m,wanted,title_eps,episode_titles=episode_titles)
             blocked=fidelity_blocker(self.db,candidate['title'],{'files':files,'ids':ids})
             if blocked:raise Rejected(blocked)
             with self.db.gate:
                 # Network fetch happened outside the gate. Re-read current intent and reservations now.
                 if not self.db.eligible(sid):return
+                if explicit_material:
+                    if not production_wanted(self.db,sid):raise Rejected('个人在追状态已改变')
+                    if any(self.db.one('SELECT 1 FROM watches WHERE show_id=? AND episode=? AND finished=1',(sid,ep)) for ep in title_eps):
+                        raise Rejected('已看状态已改变，停止原片获取')
                 decision=self.source_review.decision(candidate,ordinary=True)
                 if not decision['allowed']:
                     self.db.execute("UPDATE candidates SET status='source_wait',reason=? WHERE id=?",(decision['reason'],candidate['id']));return
@@ -188,7 +271,7 @@ class Engine:
                     if prior['show_id']!=sid or prior['status']=='review':raise Rejected('此hash已属于其他作品或待核查任务')
                     # An explicitly expanded episode range can reuse the same batch, never add it twice.
                     old=json.loads(prior['selection']);union=sorted(set(wanted)|{int(ep) for ep in old['selected']})
-                    expanded,expanded_ids=select_files(files,m,union,title_eps)
+                    expanded,expanded_ids=select_files(files,m,union,title_eps,episode_titles=episode_titles)
                     selection={'files':files,'ids':expanded_ids,'selected':{str(k):v for k,v in expanded.items()}}
                     with self.db.connect() as con:
                         con.execute('UPDATE tasks SET selection=? WHERE hash=?',(json.dumps(selection,ensure_ascii=False),h))
@@ -201,9 +284,12 @@ class Engine:
                 if not existing and not thunder:existing=self.qb.info(h)
                 if existing:
                     raise Rejected('下载器已有此hash；不接管其他任务，请关联已有文件')
-                selected,ids=select_files(files,m,wanted,title_eps)
-                if shutil.disk_usage(self.library.anchor or self.library.parent).free<sum(f['size'] for f in selected.values())+self.db.get('minimum_free_gb',10)*1024**3:
-                    raise NetworkError('磁盘可用空间不足，保留至少10GiB')
+                selected,ids=select_files(files,m,wanted,title_eps,episode_titles=episode_titles)
+                free=shutil.disk_usage(self.library.anchor or self.library.parent).free
+                reserve=self.db.get('minimum_free_gb',10)
+                needed=sum(f['size'] for f in selected.values())
+                if free<needed+reserve*2**30:
+                    raise NetworkError(f'磁盘可用空间不足，剩余 {free/2**30:.1f} GiB，本次需要 {needed/2**30:.1f} GiB，需保留 {reserve} GiB')
                 safe_title=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',s['title']).strip('. ')[:80] or str(sid)
                 save=self.library/(safe_title+f' [bgm-{sid}]')/f'Season {m.get("season",1):02}'
                 self.library.mkdir(parents=True,exist_ok=True);save.mkdir(parents=True,exist_ok=True)
@@ -226,7 +312,8 @@ class Engine:
         except Exception as e:
             message=safe_error(e);key='candidate_retry_'+str(candidate['id']);prior=self.db.get(key,{})
             attempts=prior.get('attempts',0)+1 if prior.get('reason')==message else 1
-            self.db.set(key,{'reason':message,'attempts':attempts,'next':time.time()+min(21600,300*2**min(attempts-1,7))})
+            self.db.set(key,{'reason':message,'attempts':attempts,'next':time.time()+min(21600,300*2**min(attempts-1,7)),
+                             'dependency':getattr(e,'code','')})
             self.db.execute("UPDATE candidates SET status='retry',reason=? WHERE id=?",(message,candidate['id']))
             if attempts in EVENT_FAILURE_MARKS or attempts%100==0:self.db.event('candidate:'+str(candidate['id']),message,'error')
     def dispatch(self,t):
@@ -259,14 +346,25 @@ class Engine:
             if not self.qb.owned(qbtask):raise Rejected('任务分类/标签不匹配，禁止修改')
             self.db.execute('UPDATE tasks SET acknowledged=1 WHERE hash=?',(h,))
             if Path(qbtask['save_path']).resolve()!=Path(t['save_path']).resolve():raise Rejected('下载目录发生变化，禁止自动操作')
+            from .download_storage import torrent_staging
+            stage = torrent_staging(t['save_path'])
+            if stage and Path(qbtask.get('download_path') or '.').resolve() != stage.resolve():
+                raise Rejected('下载器未确认新任务的 C 盘暂存路径，保留停写状态')
             files=self.qb.files(h)
             try:self.verify_qbit_files(t,files)
             except Rejected:
                 self.qb.stop(h);raise
             indices={f['name'].replace('\\','/'):f['index'] for f in files}
             wanted_ids=[]
+            desired_names={f['name'] for f in desired.values()}
             for f in selection['files']:
                 if f['index'] in selection['ids']:
+                    # The durable selection already binds each video to its
+                    # verified local episode. Re-parsing a scene filename can
+                    # lose a numeric episode title after a restart/reconcile.
+                    if f['name'] in desired_names:
+                        wanted_ids.append(indices[f['name']]);continue
+                    if Path(f['name']).suffix.lower() not in ('.ass','.ssa','.srt','.sup'):continue
                     try:
                         from .releases import mapped_episodes
                         eps=mapped_episodes(Path(f['name']).name,self.db.mapping(sid))
@@ -376,7 +474,8 @@ class Engine:
         if not self.cycle_lock.acquire(blocking=False):return
         try:
             requested=self.db.get('check_requested',0)
-            force=force or requested>self.db.get('check_completed',0)
+            completed=self.db.get('check_completed',0)
+            force=force or self.db.get('global_check_requested',0)>completed
             self.db.set('check_started_at',time.time())
             self.db.set('heartbeat',{'time':time.time(),'phase':'checking'})
             # Enrol personally wanted new series before ordinary ingestion.
@@ -392,7 +491,7 @@ class Engine:
                     WHEN shows.selected=1 THEN 1 ELSE 2 END,sources.next_attempt,sources.id"""):
                 if not self.db.eligible(source['show_id']):continue
                 self.db.set('heartbeat',{'time':time.time(),'phase':'source','source':source['id']})
-                if force or source['next_attempt']<=time.time():
+                if force or self.db.get('show_check_'+str(source['show_id']),0)>completed or source['next_attempt']<=time.time():
                     ok=self.sources.rss(source)
                     if ok and (force or source['failures'] or not source['archive_success'] or time.time()-source['archive_success']>21600):self.sources.archive(source)
                     if ok and source['show_id'] not in refreshed:refreshed.append(source['show_id'])
@@ -421,6 +520,8 @@ class Engine:
         candidates=self.db.rows("SELECT * FROM candidates WHERE show_id=? AND status IN ('discovered','retry','source_wait') ORDER BY source_id,id DESC",(sid,))
         now=time.time()
         candidates=[c for c in candidates if c['status']!='retry' or self.db.get('candidate_retry_'+str(c['id']),{}).get('next',0)<=now]
+        from .subtitle_reference_intake import reference_only
+        candidates=[c for c in candidates if not reference_only(c,self.db)]
         candidates.sort(key=lambda c:(self.source_review.priority(c),release_priority(c)))
         for c in candidates[:300]:
             if self.stop_event.is_set():break
@@ -438,7 +539,8 @@ class Engine:
         # Some client versions retain finished data in the configured temporary folder.
         # Publish an NTFS alias without changing qB paths, globals or other torrents.
         root=Path(qt.get('download_path','')).resolve()
-        if root!=self.incomplete.parent.resolve():return
+        from .download_storage import stage_for
+        if root!=stage_for(self.incomplete,root).parent or root.drive != destination.resolve().drive:return
         source=(root/f['name']).resolve()
         if not source.is_relative_to(root) or not source.is_file() or source.stat().st_size!=f['size']:return
         content=Path(qt.get('content_path','')).resolve()
@@ -461,6 +563,8 @@ class Engine:
     def maintenance(self):
         if not self.maintenance_lock.acquire(blocking=False):return
         try:
+            from .qbit_recovery import maintain_original
+            self.step('qbit.restore_original',lambda:maintain_original(self))
             from .download_recovery import recover_downloads
             recover_downloads(self)
             for t in self.db.rows("SELECT * FROM tasks WHERE provider='qbit' AND status='review' AND error IN ('下载器实际文件与种子清单不一致','无可安全选择文件')"):
@@ -483,15 +587,20 @@ class Engine:
         finally:self.maintenance_lock.release()
     def maintain_loop(self):
         while not self.stop_event.wait(30):
-            try:self.maintenance()
-            except Exception as error:self.db.event('recovery',safe_error(error),'error')
+            try:
+                # Process recovery must still run while the main reconciliation
+                # holds maintenance_lock for a large history batch.
+                from .qbit_recovery import maintain_original
+                self.step('qbit.restore_original',lambda:maintain_original(self))
+                self.maintenance()
+            except Exception as error:record_event(self.db,'recovery',safe_error(error),'error',error=error)
     def run(self):
-        self.db.event('service','后台启动，立即查询下载器与订阅并补查历史')
+        record_event(self.db,'service','后台启动，立即查询下载器与订阅并补查历史')
         threading.Thread(target=self.maintain_loop,daemon=True,name='download-maintenance').start()
         force=True
         while not self.stop_event.is_set():
             try:self.cycle(force)
-            except Exception as e:self.db.event('service',safe_error(e),'error')
+            except Exception as e:record_event(self.db,'service',safe_error(e),'error',error=e)
             force=False;self.wake.wait(30);self.wake.clear()
     def gaps(self,sid,*,snapshot=None):
         s=snapshot.shows[sid] if snapshot is not None else self.db.show(sid)
@@ -507,10 +616,10 @@ class Engine:
         candidates=snapshot.candidates[sid] if snapshot is not None else self.db.rows('SELECT title FROM candidates WHERE show_id=?',(sid,))
         from .source_blacklist import KEY,blacklist_blocker
         blacklist=self.db.get(KEY,[]) if snapshot is None else []
+        mapping_json=json.dumps(m,sort_keys=True,separators=(',',':'))
         for r in candidates:
             if blacklist_blocker(blacklist,r['title']):continue
-            try:observed.extend(ep for ep in validate_title(r['title'],m,settings,False) if m.get('start',1)<=ep<=limit)
-            except Rejected:pass
+            observed.extend(ep for ep in observed_release_episodes(r['title'],mapping_json) if m.get('start',1)<=ep<=limit)
         # A release title (including ambiguous cumulative cour numbering) must
         # not advance the airing schedule past the next dated future episode.
         next_future=min((a['episode'] for a in airings if a['airdate'] and a['airdate']>today),default=limit+1)

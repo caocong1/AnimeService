@@ -31,6 +31,8 @@ run([npm,'ci','--ignore-scripts','--no-audit','--no-fund'])
 target=ROOT/'static/vendor';target.mkdir(exist_ok=True)
 for package in ('artplayer','artplayer-plugin-danmuku'):
     shutil.copyfile(ROOT/f'node_modules/{package}/dist/{package}.js',target/f'{package}.js')
+from patch_artplayer_buffered import patch as patch_artplayer_buffered
+patch_artplayer_buffered()
 from setup_subtitles import install as install_subtitles
 install_subtitles()
 from setup_audio_alignment import install as install_audio_alignment

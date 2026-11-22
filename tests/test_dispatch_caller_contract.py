@@ -27,9 +27,9 @@ def caller(delivery, monkeypatch, capsys):
 
     identity = scheduler.episode_id(42, 1)
 
-    def begin():
+    def begin(*extra):
         row = scheduler.get(identity)
-        result = invoke('begin', identity, '--owner', 'synthetic-dispatcher', '--revision', str(row['revision']))
+        result = invoke('begin', identity, '--owner', 'synthetic-dispatcher', '--revision', str(row['revision']), *extra)
         ticket_path = Path(result['ticket_path'])
         assert ticket_path.is_file() and ticket_path.parent == db.path.parent / 'subtitle-delivery-tickets'
         ticket = validate_ticket(json.loads(ticket_path.read_text(encoding='utf-8')))
@@ -81,6 +81,27 @@ def test_caller_passes_original_ticket_and_optional_host_ref_and_replays(caller,
     assert ticket['dispatch_token'] not in json.dumps(ledger)
 
 
+def test_cli_automatic_recovery_marks_only_after_original_ticket_verification(caller):
+    db, scheduler, identity, cli, invoke, begin, host, calls = caller
+    result, path, ticket = begin()
+    thread = host(result)
+    invoke('confirm', identity, '--thread-id', thread, '--ticket', path)
+    scheduler.record_blocked(identity, thread, ['synthetic system stop'], owner_stopped=True,
+                             recovery_class='system', recovery_turn='origin-turn-cli')
+    resumed, ticket_path, ticket = begin('--auto-recovery-turn', 'origin-turn-cli')
+    assert resumed['dispatch_action'] == 'resume'
+    assert resumed['input_key'] in resumed['session_prompt']
+    assert f"r{ticket['revision']}" in resumed['session_prompt']
+    assert 'SUBTITLE-SESSION-PROMPT.txt' in resumed['session_prompt']
+    assert len(resumed['session_prompt']) < 512 < len(result['session_prompt'])
+    assert resumed['auto_recovery']['automatic_recovery_recorded']
+    events = db.rows("SELECT * FROM subtitle_delivery_events WHERE kind='owner-auto-recovery'")
+    assert len(events) == 1
+    payload = json.loads(events[0]['payload'])
+    assert payload['owner_thread_id'] == thread and payload['turn_id'] == 'origin-turn-cli'
+    assert ticket['dispatch_action'] == 'reuse' and ticket['thread_id'] == thread
+
+
 def test_lost_response_only_records_interrupted_and_keeps_committing(caller):
     db, scheduler, identity, cli, invoke, begin, host, calls = caller
     result, path, ticket = begin()
@@ -110,7 +131,7 @@ def test_reuse_diagnostics_and_invalid_confirmation_never_clear_the_owner(caller
     thread = host(result)
     invoke('confirm', identity, '--thread-id', thread, '--ticket', path)
     scheduler.record_blocked(identity, thread, ['synthetic stopped writer'], owner_stopped=True)
-    result, path, ticket = begin()
+    result, path, ticket = begin('--manual-recovery')
     assert result['dispatch_action'] == 'resume' and ticket['dispatch_action'] == 'reuse'
     before = scheduler.get(identity)
     invoke('failed', identity, '--ticket', path, '--note', 'synthetic resume failure')

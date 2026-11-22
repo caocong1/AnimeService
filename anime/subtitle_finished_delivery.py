@@ -43,6 +43,11 @@ def verify_release(project, release, player_report, sid, ep, target):
         if (not path.is_relative_to(root) or not path.is_file()
                 or path.stat().st_size != record['bytes'] or digest(path) != record['sha256']):
             raise ValueError('Release file hash/ownership changed')
+    from .subtitle_coverage import validate_release
+    coverage = validate_release(project, root, r)
+    from .subtitle_display_rows import validate as validate_display_rows
+    for subtitle in ('bilingual.ass', 'static.ass'):
+        validate_display_rows(root / subtitle)
     movies = [name for name in files if name.endswith('.mp4')]
     if len(movies) != 1:
         raise ValueError('One complete movie required')
@@ -79,7 +84,8 @@ def verify_release(project, release, player_report, sid, ep, target):
         extra['baseline_release_id'] = r.get('baseline_release_id')
         extra['refinement_review'] = validate_review(project, root / 'refinement-review.json', sid, ep,
                                                      r['source_media_sha256'], r.get('baseline_release_id'))
-    return {**extra, 'release_id': r['id'], 'delivery_status': 'finished', 'accepted': False,
+    return {**extra, 'chinese_coverage_review': coverage,
+            'release_id': r['id'], 'delivery_status': 'finished', 'accepted': False,
             'formal_review_complete': r.get('formal_review_complete') is True,
             'manifest_sha256': digest(manifest), 'release': str(root),
             'player_report': {'path': str(proof), 'sha256': digest(proof)},

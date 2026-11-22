@@ -64,7 +64,10 @@ def reconcile(db, sid=None):
     result = {'policies_added': [], 'requests_added': 0, 'skipped': []}
     if not enabled(db):
         return result
-    for show in queue_snapshot(db)['queues']['watching']:
+    from .read_projection import read_projection
+    with read_projection(db.path) as snapshot:
+        watching = queue_snapshot(snapshot, sid)['queues']['watching']
+    for show in watching:
         identity = show['id']
         if sid is not None and sid != identity:
             continue
@@ -91,10 +94,10 @@ def reconcile(db, sid=None):
     return result
 
 
-def coverage(db):
+def coverage(db, snapshot=None):
     """Expose drift separately from legitimate authorization/material blockers."""
     missing, protected = [], []
-    for show in queue_snapshot(db)['queues']['watching']:
+    for show in (snapshot or queue_snapshot(db))['queues']['watching']:
         if show['source_mode'] not in RESEARCH_MODES:
             target = missing if show['source_mode'] is None and db.allowed(show['id'], 1) else protected
             target.append({'show_id': show['id'], 'title': show['title'],

@@ -99,6 +99,8 @@ class ProductionTargets:
         item=items[0]
         task=self.db.one('SELECT * FROM tasks WHERE hash=?',(item.get('hash'),))
         if not task or task['status'] not in ('complete','linked'):raise ValueError('母片任务未完成或归属待核')
+        from .subtitle_reference_intake import reference_hash
+        if reference_hash(self.db,task['hash']):raise ValueError('本片只获准对轴参考，不可改绑制作母片')
         selected=json.loads(task['selection'])['selected'].get(str(ep))
         if not selected or selected['size']!=item['size']:raise ValueError('母片单集manifest不符')
         expected=(Path(task['save_path'])/selected['name']).resolve()

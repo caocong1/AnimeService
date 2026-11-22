@@ -85,8 +85,12 @@ class Subtitles:
 
     def tracks(self, item):
         embedded = self.embedded_tracks(item)
-        sidecars = [{k:v for k,v in t.items() if k != '_path'} for t in self.sidecars(item)]
+        sidecars = [{k:v for k,v in t.items() if k != '_path'} for t in self.playback_sidecars(item)]
         return sorted(embedded + sidecars, key=lambda t: (t['rank'], t['index']))
+
+    def playback_sidecars(self, item):
+        from .playback_subtitle_selection import selected_sidecars
+        return self.sidecars(item) + selected_sidecars(self.db, item)
 
     def embedded_tracks(self, item):
         with self.lock:
@@ -108,7 +112,8 @@ class Subtitles:
                 supported = stream['codec_name'] in self.TEXT_CODECS
                 chinese = simplified or traditional or language.lower() in ('chi', 'zho', 'zh')
                 result.append({'index': stream['index'], 'codec': stream['codec_name'],
-                               'label': label, 'language': language, 'supported': supported,
+                               'label': label, 'language': language, 'title': title,
+                               'declared_language': tags.get('language', ''), 'supported': supported,
                                'rank': 0 if simplified else 1 if chinese else 2 if stream.get('disposition', {}).get('default') else 3})
             result.sort(key=lambda x: (x['rank'], x['index']))
             if len(self.probes) >= 200:
@@ -125,7 +130,7 @@ class Subtitles:
             raise ValueError('该轨道不支持原样式字幕')
         with self.lock:
             key = self.fingerprint(item)
-            sidecar = next((t for t in self.sidecars(item) if t['index'] == index), None)
+            sidecar = next((t for t in self.playback_sidecars(item) if t['index'] == index), None)
             if index <= -20000 and not sidecar:
                 raise ValueError('随包字幕已变化，请重新打开')
             if sidecar:
@@ -145,7 +150,7 @@ class Subtitles:
                 raise ValueError('字幕内容无效或过大，请用弹弹play打开')
             expected = self.fingerprint(item)
             if sidecar:
-                current = next((t for t in self.sidecars(item) if t['index'] == index), None)
+                current = next((t for t in self.playback_sidecars(item) if t['index'] == index), None)
                 if not current:raise ValueError('随包字幕已变化，请重新打开')
                 expected += '-' + hashlib.sha256(Path(current['_path']).read_bytes()).hexdigest()
             if key != expected:

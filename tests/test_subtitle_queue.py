@@ -30,6 +30,22 @@ def test_ready_episodes_queue_in_snapshot_order_while_the_slot_is_free(delivery)
     assert production_queue(db, now=now[0], show=43)['items'] == [i for i in queue['items'] if i['show_id'] == 43]
 
 
+def test_future_episode_waits_for_release_instead_of_protection_or_dispatch(delivery):
+    db, scheduler, _, now = delivery
+    db.set('airing_sort_offset_42', 13)
+    db.execute("INSERT INTO airings(show_id,episode,airdate,title) VALUES(42,14,'2999-01-24','future local E1')")
+    queue = production_queue(db, now=now[0])
+    future = item(queue, 42, 1)
+    assert future['status'] == 'unreleased' and future['release_date'] == '2999-01-24'
+    assert queue['summary']['unreleased'] == 1
+    row = scheduler.get('episode:42:1')
+    with pytest.raises(ValueError, match='not yet released'):
+        scheduler.reserve(row['id'], 'owner', row['revision'])
+    db.execute("DELETE FROM subtitle_delivery_jobs WHERE id='episode:42:1'")
+    scheduler.refresh()
+    assert not db.one("SELECT id FROM subtitle_delivery_jobs WHERE id='episode:42:1'")
+
+
 def test_dispatched_episode_occupies_the_slot_and_the_rest_wait_behind_it(delivery, monkeypatch):
     db, scheduler, ready, now = delivery
     identity, intent = begin(scheduler)
@@ -104,6 +120,7 @@ def test_delivered_v0_shows_its_v1_follow_up(delivery):
     refining = item(queue, 42, 1)
     assert refining['status'] == 'v0_ready' and refining['refinement']['status'] == 'producing' and refining['refinement']['edition'] == 'v1'
     assert queue['slot']['occupied'] and queue['slot']['item']['edition'] == 'v1' and queue['slot']['item']['episode'] == 1
+    assert queue['summary']['producing'] == 0 and queue['work_summary']['producing'] == 1
     assert queued(queue)[0] == (43, 1, 1, 1)
     db.set('subtitle_delivery_finished_42_1', {'release_id': 'example-s01e01-v1', 'edition': 'v1', 'delivery_status': 'finished',
                                                'manifest_sha256': 'e' * 64, 'accepted': False})
@@ -115,7 +132,9 @@ def test_api_route_filters_by_show_and_exposes_nothing_private(delivery):
     identity, intent = begin(scheduler)
     scheduler.reconcile_dispatch(identity, intent['dispatch_token'], thread_id='actual-fixture-chat')
     scheduler.record_blocked(identity, 'actual-fixture-chat', ['encoder missing at C:\\tools\\ffmpeg.exe'], owner_stopped=True)
-    client = TestClient(create_app(db, Mock(), start_worker=False), base_url='http://127.0.0.1:4871')
+    engine = Mock()
+    engine.db = engine.subtitle_studio.db = db
+    client = TestClient(create_app(db, engine, start_worker=False), base_url='http://127.0.0.1:4871')
     page = client.get('/subtitle-queue')
     assert page.status_code == 200 and page.headers['content-type'].startswith('text/html')
     everything = client.get('/api/subtitle-queue').json()
@@ -123,8 +142,14 @@ def test_api_route_filters_by_show_and_exposes_nothing_private(delivery):
     assert {i['show_id'] for i in everything['items']} == {42, 43} and {i['show_id'] for i in only['items']} == {43}
     blocked = item(everything, 42, 1)
     assert blocked['status'] == 'blocked' and blocked['reasons'] == ['production_blocked']
+    progress = client.get('/api/subtitle-progress')
+    assert progress.status_code == 200 and progress.json()['live'] is True
+    public_job = next(j for j in progress.json()['jobs'] if j['job_id'] == identity)
+    assert public_job['work']['status'] == blocked['status']
+    assert public_job['work']['stop_class'] == blocked['stop_class'] == 'protected'
     assert not everything['slot']['occupied']  # a stopped owner frees the slot
     text = json.dumps(everything, ensure_ascii=False)
+    text += progress.text
     for private in ('actual-fixture-chat', 'test-owner', 'thread_id', 'lease_owner', 'lease_token', 'dispatch_token',
                     str(db.path.parent), 'ffmpeg.exe'):
         assert private not in text
@@ -208,6 +233,17 @@ def test_changed_before_control_is_not_a_stuck_owner_verdict(delivery):
     assert row['owner_state'] == 'unknown' and not row['stalled']
 
 
+def test_parallel_capacity_changes_queue_ahead_and_capacity_projection(delivery):
+    db, scheduler, _, now = delivery
+    db.set('subtitle_delivery_policy', {'max_active_productions': 3})
+    identity, intent = begin(scheduler)
+    scheduler.reconcile_dispatch(identity, intent['dispatch_token'], thread_id='actual-fixture-chat')
+    queue = production_queue(db, now=now[0])
+    assert queue['capacity'] == {'limit': 3, 'occupied': 1, 'available': 2}
+    assert queued(queue) == [(43, 1, 1, 0), (42, 2, 2, 0), (43, 2, 3, 1)]
+    assert all(i['capacity_available'] == 2 for i in queue['items'] if i['status'] == 'queued')
+
+
 def test_ready_v1_refinement_waits_in_the_same_line(delivery):
     db, scheduler, ready, now = delivery
     db.set('subtitle_delivery_finished_42_1', {'release_id': 'example-s01e01-v0', 'edition': 'v0', 'delivery_status': 'finished',
@@ -249,3 +285,112 @@ def test_projection_uses_one_database_snapshot(delivery,monkeypatch):
     result=production_queue(db,now=now[0])
     assert len(calls)==1 and str(calls[0]).endswith('?mode=ro')
     assert result['summary']['queued']==4
+
+
+def test_nested_recovery_monitor_health_is_projected_without_private_details(delivery):
+    db, _, _, now = delivery
+    path = db.path.parent.parent / 'data/diagnostics/codex-dispatch-guard/status.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({'at': now[0], 'error': None, 'threads': [],
+        'preparation_recovery': {'checked_at': now[0] - 4000, 'error': 'private path must not be exported',
+                                 'execution': {'status': 'stalled'}}}), encoding='utf-8')
+    health = production_queue(db, now=now[0])['scheduler']
+    assert health['recovery_ok'] is False and health['recovery_stale'] is True
+    assert health['recovery_execution_stalled'] is True
+    assert 'private path' not in json.dumps(health)
+
+
+@pytest.mark.parametrize('raw', ['[]', '{broken', '{"at":1000,"threads":"invalid"}',
+    '{"at":1000,"threads":[],"preparation_recovery":"invalid"}',
+    '{"at":1000,"threads":[],"preparation_recovery":{"checked_at":1000,"execution":"invalid"}}'])
+def test_malformed_guard_health_is_visible_and_does_not_crash_pages(delivery, raw):
+    db, _, _, now = delivery
+    path = db.path.parent.parent / 'data/diagnostics/codex-dispatch-guard/status.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(raw, encoding='utf-8')
+    health = production_queue(db, now=now[0])['scheduler']
+    assert health is not None and (health['ok'] is False or health.get('recovery_ok') is False)
+
+
+def test_unowned_scope_protection_is_not_a_production_pause(delivery):
+    db, _, _, now = delivery
+    db.execute('UPDATE shows SET authorized=0 WHERE id=42')
+    queue = production_queue(db, now=now[0])
+    protected = item(queue, 42, 1)
+    assert protected['status'] == 'protected' and protected['reasons'] == ['scope_protected']
+    assert queue['summary']['protected'] == 2 and not queue['slot']['occupied']
+
+
+def test_scope_change_also_protects_a_stopped_owner(delivery):
+    db, scheduler, _, now = delivery
+    identity, intent = begin(scheduler)
+    scheduler.reconcile_dispatch(identity, intent['dispatch_token'], thread_id='actual-fixture-chat')
+    scheduler.record_blocked(identity, 'actual-fixture-chat', ['stopped before scope change'], owner_stopped=True)
+    db.execute('UPDATE shows SET authorized=0 WHERE id=42')
+    protected = item(production_queue(db, now=now[0]), 42, 1)
+    assert protected['status'] == 'protected' and protected['reasons'] == ['scope_protected']
+
+
+def test_v0_and_refinement_recovery_are_bound_to_their_own_jobs(delivery):
+    db, _, _, now = delivery
+    db.set('subtitle_delivery_finished_42_1', {'release_id': 'example-s01e01-v0', 'edition': 'v0', 'delivery_status': 'finished',
+                                               'manifest_sha256': 'f' * 64, 'accepted': False})
+    payload = {'assessment': {'ready': True, 'reasons': []}, 'edition': 'v1', 'baseline_release_id': 'example-s01e01-v0',
+               'owner_stopped_writing': True, 'recovery_class': 'system', 'recovery_turn': 'v1-turn'}
+    db.execute('''INSERT INTO subtitle_delivery_jobs(id,show_id,episode,kind,state,input_key,payload,dispatch_state,thread_id,created,updated)
+                  VALUES(?,42,1,'refinement','blocked','refinement-input',?,'blocked-stopped','actual-fixture-chat',?,?)''',
+               ('refinement:42:1:fixture', json.dumps(payload), now[0], now[0]))
+    v0 = item(production_queue(db, now=now[0]), 42, 1)
+    assert v0['status'] == 'v0_ready' and 'recovery' not in v0
+    assert v0['refinement']['status'] == 'blocked'
+    assert v0['refinement']['recovery']['domain'] == 'owner_recovery'
+    assert '_job_id' not in v0['refinement'] and '_job_id' not in v0
+    db.execute("UPDATE subtitle_delivery_jobs SET dispatch_state='unknown',updated=0 WHERE id='refinement:42:1:fixture'")
+    late = production_queue(db, now=now[0] + 22000)
+    assert late['summary']['reconciling'] == 1
+    db.execute("DELETE FROM subtitle_delivery_jobs WHERE id='refinement:42:1:fixture'")
+    original = db.one("SELECT payload FROM subtitle_delivery_jobs WHERE id='episode:42:1'")
+    payload = json.loads(original['payload'])
+    payload.update(refinement_pending=True, owner_stopped_writing=True,
+                   recovery_class='system', recovery_turn='same-job-turn')
+    db.execute("UPDATE subtitle_delivery_jobs SET state='blocked',dispatch_state='unknown',payload=?,updated=0 WHERE id='episode:42:1'",
+               (json.dumps(payload),))
+    same = item(production_queue(db, now=now[0] + 22000), 42, 1)
+    assert same['recovery']['status'] == 'reconciling'
+    assert same['refinement']['recovery']['status'] == 'reconciling'
+    assert production_queue(db, now=now[0] + 22000)['summary']['reconciling'] == 1
+
+
+def test_preparation_header_excludes_real_overdue_and_blocked_recovery(delivery, tmp_path, monkeypatch):
+    from anime.subtitle_recovery import record_attempt
+    from test_subtitle_preparation import media
+    db, scheduler, ready, now = delivery
+    media(db, tmp_path)
+    now[0] = 2000
+    monkeypatch.setattr('anime.subtitle_recovery.time.time', lambda: now[0])
+    ready.values[(42, 1)] = {**ready(db, 42, 1, {}), 'capability_ready': False,
+                            'reasons': ['needs_verified_local_finished_output_tools']}
+    scheduler.refresh()
+    # This fixture supplies material already, so refresh conservatively blocks
+    # the incomplete capability assessment. Exercise a preparation-stage job,
+    # as persisted by the real material-preparation path.
+    db.execute("UPDATE subtitle_delivery_jobs SET state='preparing' WHERE id='episode:42:1'")
+    initial = production_queue(db, now=now[0])
+    assert item(initial, 42, 1)['recovery']['status'] == 'actionable'
+    assert initial['work_summary']['active_preparation'] == 1
+    now[0] += 22000
+    overdue = production_queue(db, now=now[0])
+    assert item(overdue, 42, 1)['recovery']['status'] == 'overdue'
+    assert overdue['work_summary']['preparing'] == 1  # Original job state remains available.
+    assert overdue['work_summary']['active_preparation'] == 0
+    evidence = db.path.parent / 'subtitle-studio' / 'fixture-output-blocked.json'
+    evidence.parent.mkdir(exist_ok=True)
+    evidence.write_text('{"output":"fixture dependency missing"}', encoding='utf-8')
+    record_attempt(db, scheduler.snapshot()['recovery'], 'episode:42:1', 'verify_output',
+                   'blocked', [evidence], now=now[0])
+    before = {t: db.rows(f'SELECT * FROM {t}') for t in
+              ('subtitle_delivery_jobs', 'episodes', 'watches', 'tasks')}
+    blocked = production_queue(db, now=now[0])
+    assert item(blocked, 42, 1)['recovery']['status'] == 'repair_blocked'
+    assert blocked['work_summary']['active_preparation'] == 0
+    assert all(db.rows(f'SELECT * FROM {t}') == value for t, value in before.items())

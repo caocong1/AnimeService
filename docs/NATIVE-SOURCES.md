@@ -49,6 +49,6 @@ RSS、详情、种子请求及重定向共用持久请求预算。短 SQLite 事
 
 首集仍走`source_sample`，后续实际单集走`subtitle_sample`，沿每集12研究族/20GiB预算和本机后台qB。跨站同hash不重复提交。软字幕声明仅作取样依据，实际轨道及画面仍须核验；默认字幕仍要求整集语义、原声/时轴、片内文字和实际播放接受。
 
-2026-10-11按用户明确要求修复qB：确认无qB进程/4870监听后，一次性隐藏恢复既有`D:/MediaService/qbit-profile`实例。未改默认实例、凭据、全局目录或其它任务；平时不自动启动/切换实例的政策继续。运行中的现有qB由自身继续下载，停止后不因查源失败自行再启动。
+2026-10-11历史修复为一次性隐藏恢复既有`D:/MediaService/qbit-profile`。2026-11-18用户已授权原后台在确认退出后自动恢复同配置，当前按[原实例恢复规则](QBIT-CONNECTION-RECOVERY.md)执行；不改默认实例、凭据、全局目录或其它任务，不启动第二实例、不重投未知下载。
 
 验证使用临时数据库、假下载器及模拟RSS；实际下载属于用户已授权的运行任务，不能拿生产提交做测试。上游RSS格式依据[Nyaa原项目模板](https://github.com/nyaadevs/nyaa/blob/master/nyaa/templates/rss.xml)，qB接口依据[qBittorrent官方API文档](https://github.com/qbittorrent/wiki/blob/master/WebUI-API-(qBittorrent-5.0).md)。

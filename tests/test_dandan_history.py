@@ -140,6 +140,46 @@ def test_history_api_requires_local_token_for_sync_and_confirm(tmp_path):
     assert client.post('/api/history/dandan/confirm',headers={'x-anime-token':token},json={'media_ids':['a']}).json()['confirmed']==1
 
 
+def test_exact_watched_history_link_for_unlisted_file_is_durable(tmp_path):
+    import hashlib, pytest
+    db,h,media,data,t=sample(tmp_path)
+    h.merge(data,{})
+    assert not db.rows('SELECT * FROM dandan_history')
+    mid=hashlib.sha256(media['a']['path'].lower().encode()).hexdigest()[:32]
+    h.link(mid,42,2,data=data)
+    h.merge(data,{})
+    assert db.one('SELECT * FROM watches')['finished']==1
+    assert db.one('SELECT * FROM dandan_history')['show_id']==42
+    db.execute('DELETE FROM watches')
+    h.merge(data,{})
+    assert db.show(42)['watched']==1 and db.show(42)['authorized']==0
+    with pytest.raises(ValueError, match='其它作品或集数'):
+        h.link(mid,42,1,data=data)
+    data['seen']=[]
+    with pytest.raises(ValueError, match='明确已看标记'):
+        h.link('f' * 32, 42, 2, data=data)
+
+
+def test_history_link_api_uses_existing_token_and_cached_source(tmp_path):
+    import hashlib
+    from fastapi.testclient import TestClient
+    from anime.app import create_app
+    from unittest.mock import Mock
+    db,h,media,data,t=sample(tmp_path)
+    app=create_app(db=db,engine=Mock(),start_worker=False)
+    client=TestClient(app,base_url='http://127.0.0.1:4871')
+    token=client.get('/api/bootstrap').json()['token']
+    mid=hashlib.sha256(media['a']['path'].lower().encode()).hexdigest()[:32]
+    signature=[['fixture',1]]
+    app.state.dandan_history._source_data=data
+    app.state.dandan_history._source_signature=signature
+    app.state.dandan_history.source_signature=lambda:signature
+    result=client.post('/api/history/dandan/link',headers={'x-anime-token':token},
+                       json={'media_id':mid,'show_id':42,'episode':2})
+    assert result.status_code==200 and result.json()['ok'] and result.json()['sync']['ok']
+    assert db.one('SELECT * FROM watches')['finished']==1
+
+
 def test_sync_skips_copying_and_reading_when_the_player_history_is_unchanged(tmp_path):
     from unittest.mock import Mock
     db,h,media,data,t=sample(tmp_path)

@@ -1,22 +1,23 @@
 """Opt-out quarterly collection; downloading never implies a personal watch state."""
-import datetime,time,re
+import datetime,json,time,re
 from .net import safe_error
 from .download_policy import submission_blocker,require_submission_ready,status as downloader_status
 
 
 def install_season(app,db,engine,list_shows,prepare,save_mapping):
-    def review_cohort(start,horizon,include_current=False):
+    def review_cohort(start,horizon,include_current=False,sid=None):
         quarter=f'{horizon.year}-{((horizon.month-1)//3)*3+1:02}'
         cohorts={r['quarter'] for r in db.rows('SELECT DISTINCT quarter FROM shows WHERE quarter>=? AND quarter<=?',(start,quarter))}
         cohorts|={r['quarter'] for r in db.rows('SELECT DISTINCT quarter FROM quarter_members WHERE quarter>=? AND quarter<=?',(start,quarter))}
         if include_current:cohorts.add(quarter)
-        shows={s['id']:s for q in sorted(cohorts) for s in list_shows(quarter=q,scope='catalog',q='',kind='series')}
+        only = {'sid':sid} if sid is not None else {}
+        shows={s['id']:s for q in sorted(cohorts) for s in list_shows(quarter=q,scope='catalog',q='',kind='series',**only)}
         # Explicitly imported current new series have no catalog quarter yet.
         # Use the verified subject's date/type/region without changing its metadata or intent.
         from .discovery import visible
         import json
-        for s in db.rows("SELECT * FROM shows WHERE quarter='' AND selected=1 AND air_date>=? AND air_date<=?",
-                         (start+'-01',horizon.isoformat())):
+        query = "SELECT * FROM shows WHERE quarter='' AND selected=1 AND air_date>=? AND air_date<=?"
+        for s in db.rows(query+(' AND id=?' if only else ''), (start+'-01',horizon.isoformat(),*only.values())):
             meta=json.loads(s['metadata'])
             try:datetime.date.fromisoformat(s['air_date'])
             except ValueError:continue
@@ -33,7 +34,8 @@ def install_season(app,db,engine,list_shows,prepare,save_mapping):
         start=db.get('auto_quarter_start','')
         if not start:return
         horizon=(today or datetime.date.today())+datetime.timedelta(days=21)
-        for s in review_cohort(start,horizon).values():
+        if sid is not None and (not db.review_wanted(sid) or not db.show(sid)['authorized']):return
+        for s in review_cohort(start,horizon,sid=sid).values():
             if sid is not None and s['id']!=sid:continue
             # The watching path above preserves explicit policy holds.
             from .viewing_workflow import enabled as split_enabled
@@ -107,6 +109,10 @@ def install_season(app,db,engine,list_shows,prepare,save_mapping):
     engine.auto_tick=tick
     @app.get('/api/season')
     def status():
+        from .read_projection import read_projection
+        with read_projection(db.path) as snapshot:
+            return season_status(snapshot)
+    def season_status(db):
         blocker=submission_blocker(db)
         if not blocker:
             try:engine.check_legacy_owner()
@@ -116,8 +122,11 @@ def install_season(app,db,engine,list_shows,prepare,save_mapping):
             'poll_seconds':db.get('poll_seconds',180),
             'scope':'日本TV/网络季度新番；不含电影、特别篇；一集一版',
             'shows':[{**{k:s[k] for k in ('id','title','state','authorized','auto_download','cleanup_hold')},
-                      'error':db.get('auto_error_'+str(s['id']),''),'preview':db.get('auto_preview_'+str(s['id']))}
-                     for s in db.rows('SELECT * FROM shows WHERE quarter>=? OR authorized=1 OR id IN (SELECT show_id FROM quarter_members WHERE quarter>=?)',
+                      'error':json.loads(s['error_json'] or '""'),'preview':json.loads(s['preview_json'] or 'null')}
+                     for s in db.rows("""SELECT s.id,s.title,s.state,s.authorized,s.auto_download,s.cleanup_hold,
+                         e.value error_json,p.value preview_json FROM shows s
+                         LEFT JOIN kv e ON e.key='auto_error_'||s.id LEFT JOIN kv p ON p.key='auto_preview_'||s.id
+                         WHERE s.quarter>=? OR s.authorized=1 OR s.id IN (SELECT show_id FROM quarter_members WHERE quarter>=?)""",
                                       (db.get('auto_quarter_start','2026-10'),db.get('auto_quarter_start','2026-10')))]}
     @app.post('/api/season')
     def settings(p:dict):

@@ -72,7 +72,10 @@ def dispatch_once(*, host, archive_preflight, begin, confirm, interrupted, journ
     if ticket['dispatch_action'] == 'reuse' and answer['thread_id'] != ticket['thread_id']:
         interrupted(path, 'host returned a different responsible identity')
         raise DispatchFailure('host identity mismatch; committing preserved')
-    # host_ref is passed only when actually supplied by the bridge.
+    # Keep the exact positive response tied to the verified archive before
+    # confirming. A crash during confirm must not require another dispatch.
+    journal({'phase': 'host_returned', 'job_id': ticket['job_id'], 'revision': ticket['revision'],
+             'ticket_sha256': digest, 'thread_id': answer['thread_id'], 'host_ref': answer.get('host_ref')})
     receipt = confirm(path, answer['thread_id'], answer.get('host_ref'))
     journal({'phase': 'confirmed' if receipt.get('receipt_accepted') else 'reconcile_required',
              'receipt_accepted': bool(receipt.get('receipt_accepted')), 'reason': receipt.get('reason')})

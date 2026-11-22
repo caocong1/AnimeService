@@ -27,8 +27,10 @@ def validate_url(url, api=False, proxy_dns=False):
         if (not allowed or u.scheme != 'https' or u.username or u.password
                 or u.port not in (None, 443) or u.fragment):
             raise Unavailable('bahamut_playlist')
-        if proxy_dns: validate_public_host(host, allow_proxy_dns=True)
-        else: validate_public_host(host)
+        # The explicitly configured loopback proxy resolves the allowlisted CONNECT
+        # hostname independently. Local DNS is only used for direct connections.
+        if not proxy_dns:
+            validate_public_host(host)
     except (ValueError, OSError):
         raise Unavailable('bahamut_playlist') from None
 

@@ -331,11 +331,16 @@ class Sources:
             items=checked
         with self.db.gate,self.db.connect() as c:
             if source['kind'] in KINDS and not eligible(self.db,source['show_id'],source['kind']):return []
+            from .subtitle_acquisition_declarations import preserve_acquisition_declaration
+            from .subtitle_reference_intake import preserve_reference_binding
             for e in items:
+                source_metadata=preserve_acquisition_declaration(c,source['id'],e['url'],e.get('source_metadata',{}))
+                source_metadata=preserve_reference_binding(c,source['id'],e,source_metadata)
+                if source_metadata is None:continue
                 c.execute('''INSERT INTO candidates(show_id,source_id,title,url,detail,discovered,published,source_metadata) VALUES(?,?,?,?,?,?,?,?)
                     ON CONFLICT(source_id,url) DO UPDATE SET published=coalesce(candidates.published,excluded.published),
                     source_metadata=excluded.source_metadata''',
-                    (source['show_id'],source['id'],e['title'],e['url'],e.get('detail',''),time.time(),e.get('published'),json.dumps(e.get('source_metadata',{}))))
+                    (source['show_id'],source['id'],e['title'],e['url'],e.get('detail',''),time.time(),e.get('published'),json.dumps(source_metadata)))
         return items
     def rss(self,source):
         if source['kind'] in KINDS and not eligible(self.db,source['show_id'],source['kind']):return False

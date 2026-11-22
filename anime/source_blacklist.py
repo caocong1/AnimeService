@@ -1,17 +1,24 @@
 """Persistent publisher exclusions, independent of scores and download authorization."""
 import json,re,unicodedata
+from functools import lru_cache
 from pathlib import Path
 
 KEY='source_publisher_blacklist'
 
 
 def publisher(text):
-    text=re.sub(r'^\s*(?:\[(?:搬运|搬運|转载|轉載)\]\s*)+(?=\[[^\]]+\])','',str(text))
+    return _publisher(str(text))
+
+
+@lru_cache(maxsize=16384)
+def _publisher(text):
+    text=re.sub(r'^\s*(?:\[(?:搬运|搬運|转载|轉載)\]\s*)+(?=\[[^\]]+\])','',text)
     match=re.match(r'^\s*[\[【]([^\]】]+)',text)
     return unicodedata.normalize('NFKC',match[1]).strip().casefold() if match else ''
 
 
 def blacklist_blocker(entries,title,selection=None):
+    if not entries:return ''
     titles=[title]
     if selection:
         selection=json.loads(selection) if isinstance(selection,str) else selection

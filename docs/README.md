@@ -4,6 +4,12 @@
 
 ## 阅读顺序
 
+本轮整合入口：[端到端契约与历史问题复盘](PROJECT-CONSISTENCY.md)，对应前后端状态、恢复轮次和自动任务一致性。
+
+全项目持续验收：[页面打开速度与回归检查](PAGE-PERFORMANCE.md)，新增功能必须保持正文和首屏封面打开速度。
+
+下载器断线复盘：[qBittorrent 本机接口与恢复退避](QBIT-CONNECTION-RECOVERY.md)，区分本机依赖退出和候选故障，恢复后及时接续且不重复提交。
+
 1. [README](../README.md)：能力、隔离开发和安装边界。
 2. [当前项目规则](PROJECT-RULES.md)：当前工作约束和新旧政策优先序。
 3. [项目经验](PROJECT-EXPERIENCE.md)：为什么这样做、哪些证据不能互相替代。

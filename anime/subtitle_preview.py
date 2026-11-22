@@ -49,7 +49,8 @@ def verified_target(db, sid, ep, task_hash):
     if db.get('thunder_dialog_hold_' + task_hash, {}).get('unconfirmed'):
         raise ValueError('Unconfirmed submission/dialog remains protected')
     queue = db.one('SELECT committing,lease,state FROM thunder_queue WHERE hash=?', (task_hash,))
-    if queue and (queue['committing'] or queue['lease'] or queue['state'] in ('claimed', 'review')):
+    from .download_receipts import pending_receipt
+    if pending_receipt(task, queue):
         raise ValueError('Media task has an unresolved downloader lease or receipt')
     root = Path(task['save_path']).resolve()
     media = (root / selected['name']).resolve()

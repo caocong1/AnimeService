@@ -6,6 +6,11 @@ here. Discovery still belongs to the normal rate-limited source scheduler.
 import time
 from .native_indexes import candidate_mapping
 from .releases import validate_title,Rejected
+from .net import safe_error
+
+def qbit_retry(record):
+    # Exact legacy diagnostic only; unrelated site failures keep their cooldown.
+    return record.get('dependency')=='qbit_unavailable' or record.get('reason')=='qBittorrent请求超时或连接不可达'
 
 
 def inspect_missing(engine,sid):
@@ -33,7 +38,16 @@ def inspect_missing(engine,sid):
                 except Rejected as exc:d={'allowed':False,'code':'quality_required','reason':str(exc)}
             if d['allowed']:
                 if c['status'] in ('discovered','retry','source_wait'):
-                    retry=db.get('candidate_retry_'+str(c['id']),{}).get('next',0)
+                    record=db.get('candidate_retry_'+str(c['id']),{})
+                    retry=record.get('next',0)
+                    health=db.get('qbit_health',{})
+                    fresh=0<=now-health.get('time',0)<90
+                    uses_qbit=db.get('downloader_preference','qbit')=='qbit'
+                    if uses_qbit and fresh and health.get('ok') is False:
+                        d={'allowed':False,'code':'downloader_unavailable',
+                           'reason':health.get('error') or 'qBittorrent本机接口不可用；任务与回执已保留'}
+                        choices.append({**d,'candidate_id':c['id']});continue
+                    if uses_qbit and fresh and health.get('ok') is True and qbit_retry(record):retry=0
                     if retry>now:
                         d={'allowed':False,'code':'download_retry','reason':c['reason'] or '获取种子失败，等待自动重试','retry_at':retry}
                     else:eligible.append(c)
@@ -46,7 +60,7 @@ def inspect_missing(engine,sid):
         elif choices:
             # A matching primary/provisional candidate's actual failure is more
             # useful than a generic refusal for an unrelated publisher.
-            best=next((d for d in choices if d['code'] in ('download_retry','candidate_review','quality_required','primary_window')),choices[0])
+            best=next((d for d in choices if d['code'] in ('downloader_unavailable','download_retry','candidate_review','quality_required','primary_window')),choices[0])
         else:
             best={'code':'source_not_found','reason':'尚未发现本集资源；后台继续查源'}
             errors=[s['error'] for s in sources if s['enabled'] and s['error']]
@@ -61,6 +75,15 @@ def inspect_missing(engine,sid):
 def reconcile_missing(engine):
     """Bounded maintenance, independent of the long outbound feed scan."""
     started=time.monotonic();db=engine.db;reports={};attempts=0
+    health=db.get('qbit_health',{})
+    if db.get('downloader_preference','qbit')=='qbit' and health and not 0<=time.time()-health.get('time',0)<90:
+        # Full reconciliation can outlast the freshness window on a large library.
+        # Sample once for this batch, never once per show or from a page request.
+        try:
+            tasks=engine.qb.info()
+            db.set('qbit_health',{'ok':True,'time':time.time(),'tasks':len(tasks),'standby':False})
+        except Exception as error:
+            db.set('qbit_health',{'ok':False,'time':time.time(),'error':safe_error(error)})
     for show in db.rows("SELECT id FROM shows WHERE selected=1 AND cleanup_hold=0 AND authorized=1 AND state IN ('wish','trial','watching') ORDER BY id"):
         sid=show['id']
         if not db.eligible(sid):continue

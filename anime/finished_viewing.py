@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import re
+import stat
 import time
 from fastapi import HTTPException
 from .db import ROOT
@@ -15,29 +16,58 @@ class FinishedViewing:
             session TEXT PRIMARY KEY, media_id TEXT NOT NULL, sequence INTEGER NOT NULL, updated REAL NOT NULL)''')
 
     def catalog(self):
+        return self._catalog()
+
+    def _catalog(self, identity=None):
         path = self.root / 'static/finished-media/index.json'
         if not path.exists(): return []
-        rows = []
+        releases = []
         for r in json.loads(path.read_text(encoding='utf-8-sig')).get('releases', []):
+            if identity is not None and r.get('id') != identity: continue
             if (r.get('status') != 'finished' or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,79}', str(r.get('id', '')))
                 or not re.fullmatch(r'[a-f0-9]{64}', str(r.get('video_sha256', '')))
                 or any(type(r.get(k)) is not int or r[k] < 1 for k in ('show_id', 'season', 'episode'))): continue
-            show = self.db.show(r['show_id'])
-            if not show or int(self.db.mapping(r['show_id']).get('season') or 1) != r['season']: continue
+            key = 'finished:' + hashlib.sha256((r['id'] + ':' + r['video_sha256']).encode()).hexdigest()[:32]
+            releases.append({**r, 'media_id': key})
+        if not releases: return []
+
+        # Join current viewing state once, rather than opening four SQLite
+        # connections per release. Bound batches also support older SQLite
+        # builds with a 999-parameter limit; one read snapshot spans all batches.
+        records = {}
+        with self.db.connect() as c:
+            c.execute('BEGIN')
+            for start in range(0, len(releases), 200):
+                batch = releases[start:start + 200]
+                values = ','.join('(?,?,?,?)' for _ in batch)
+                params = [value for i, r in enumerate(batch, start)
+                          for value in (i, r['show_id'], r['episode'], r['media_id'])]
+                records.update((row['ordinal'], dict(row)) for row in c.execute(f'''
+                    WITH requested(ordinal,show_id,episode,media_id) AS (VALUES {values})
+                    SELECT r.ordinal,s.mapping,s.state,w.finished,p.media_id progress_id,
+                           p.position,p.duration,p.last_played,p.updated
+                    FROM requested r JOIN shows s ON s.id=r.show_id
+                    LEFT JOIN watches w ON w.show_id=r.show_id AND w.episode=r.episode
+                    LEFT JOIN web_progress p ON p.media_id=r.media_id''', params))
+
+        rows = []
+        for i, r in enumerate(releases):
+            record = records.get(i)
+            if not record or int(json.loads(record['mapping']).get('season') or 1) != r['season']: continue
             media = self.root / 'static/finished-media' / r['id'] / 'episode.mp4'
             try:
-                if not media.is_file() or not media.stat().st_size: continue
+                media_stat = media.stat()
+                if not stat.S_ISREG(media_stat.st_mode) or not media_stat.st_size: continue
             except OSError: continue
-            key = 'finished:' + hashlib.sha256((r['id'] + ':' + r['video_sha256']).encode()).hexdigest()[:32]
-            progress = self.db.one('SELECT position,duration,last_played,updated FROM web_progress WHERE media_id=?', (key,))
-            watch = self.db.one('SELECT finished FROM watches WHERE show_id=? AND episode=?', (r['show_id'], r['episode']))
+            progress = ({k: record[k] for k in ('position', 'duration', 'last_played', 'updated')}
+                        if record['progress_id'] is not None else None)
             rows.append({'id': r['id'], 'show_id': r['show_id'], 'season': r['season'], 'episode': r['episode'],
-                         'video_sha256': r['video_sha256'], 'media_id': key, 'progress': progress,
-                         'finished': bool(watch and watch['finished']), 'show_state': show['state']})
+                         'video_sha256': r['video_sha256'], 'media_id': r['media_id'], 'progress': progress,
+                         'finished': bool(record['finished']), 'show_state': record['state']})
         return rows
 
     def item(self, identity):
-        row = next((r for r in self.catalog() if r['id'] == identity), None)
+        row = next((r for r in self._catalog(identity) if r['id'] == identity), None)
         if row is None: raise HTTPException(404, '成品不存在或作品季集归属已变化')
         return row
 

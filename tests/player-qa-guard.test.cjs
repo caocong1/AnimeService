@@ -1,6 +1,25 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),http=require('node:http');
 const {checkedBase,safeRead,guardedContext}=require('../scripts/player_qa_guard.cjs');
+test('denied CONNECT retains 403 and records a late socket reset',async t=>{
+  let firewall;
+  const create=http.createServer;
+  const intercept=t.mock.method(http,'createServer',(...args)=>{firewall=create(...args);return firewall;});
+  const context={routeWebSocket:async()=>{},route:async()=>{}};
+  const browser={newContext:async()=>context};
+  const guard=await guardedContext(browser,{base:'http://127.0.0.1:4871',mode:'readonly'});
+  intercept.mock.restore();
+  try {
+    const socket=new (require('node:events').EventEmitter)();let response='';
+    socket.end=value=>{response=value;};
+    firewall.emit('connect',{},socket);
+    assert.match(response,/^HTTP\/1\.1 403 Forbidden/);
+    socket.emit('error',Object.assign(new Error('peer reset'),{code:'ECONNRESET'}));
+    assert.deepEqual(guard.ledger.transport_blocked,[{reason:'denied_connect_socket_error',code:'ECONNRESET'}]);
+    assert.equal(guard.ledger.transport_reads,0);
+    assert.equal(guard.ledger.transport_fixture_writes,0);
+  } finally {await guard.closeNetwork();}
+});
 test('fixture origin rejects production, credentials and external hosts',()=>{
   for(const base of ['http://127.0.0.1:4871','http://localhost:4871','https://example.com','http://x@127.0.0.1:4879','http://127.0.0.1:4879/path'])
     assert.throws(()=>checkedBase(base,'fixture'));

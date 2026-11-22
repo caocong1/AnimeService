@@ -60,6 +60,16 @@ def test_segments_stay_on_public_allowlisted_hosts(monkeypatch):
     with pytest.raises(audio.Unavailable): baha.validate_url('https://bahamut.akamaized.net/a')
 
 
+def test_proxy_resolves_allowlisted_hosts_without_local_dns(monkeypatch):
+    dns = Mock(side_effect=audio.Unavailable())
+    monkeypatch.setattr(baha, 'validate_public_host', dns)
+    baha.validate_url(SOURCE, api=True, proxy_dns=True)
+    baha.validate_url(BASE, proxy_dns=True)
+    with pytest.raises(audio.Unavailable):
+        baha.validate_url('https://127.0.0.1/list.m3u8', proxy_dns=True)
+    dns.assert_not_called()
+
+
 def test_fake_dns_requires_explicit_loopback_proxy_and_never_allows_private_network(monkeypatch):
     def dns(address):
         monkeypatch.setattr(audio.socket,'getaddrinfo',lambda *_args,**_kw:[(0,0,0,'',(address,443))])
