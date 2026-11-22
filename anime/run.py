@@ -69,6 +69,8 @@ def main():
     (ROOT/'logs').mkdir(exist_ok=True)
     handler=logging.handlers.RotatingFileHandler(ROOT/'logs/service.log',maxBytes=2_000_000,backupCount=4,encoding='utf-8')
     handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s %(message)s'))
+    for stream in (sys.stdout,sys.stderr):  # process.log is UTF-8, not the ANSI code page
+        if hasattr(stream,'reconfigure'):stream.reconfigure(encoding='utf-8',errors='backslashreplace')
     logging.basicConfig(handlers=[handler],level=logging.INFO);install_log_hygiene()
     import uvicorn
     from .deployment import load as load_deployment

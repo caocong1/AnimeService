@@ -55,6 +55,11 @@ def log(message,path=None):
     with path.open('a',encoding='utf-8') as f:f.write(time.strftime('%Y-%m-%d %H:%M:%S')+' '+message+'\n')
 
 
+def start_marker(out):
+    """Separate each child's stdout/stderr in process.log, so a traceback can be matched to its restart."""
+    out.write(time.strftime('%Y-%m-%d %H:%M:%S')+f' --- start anime.run (supervisor pid={os.getpid()}) ---\n');out.flush()
+
+
 def watch(process,base,stop=STOP,prober=probe,sleep=time.sleep,now=time.time,terminate=None,
           interval=PROBE_INTERVAL,failures=PROBE_FAILURES,grace=GRACE):
     """Follow one child until it exits, hangs or is asked to stop; returns 'exited', 'hung' or 'stopped'."""
@@ -110,7 +115,7 @@ def main():
         if state=='other':log('port 4871 occupied by another service');time.sleep(30);continue
         rotate(ROOT/'logs/process.log')
         with (ROOT/'logs/process.log').open('a',encoding='utf-8') as out:
-            started=time.time()
+            started=time.time();start_marker(out)
             process=subprocess.Popen([str(ROOT/'.venv/Scripts/pythonw.exe'),'-m','anime.run'],cwd=ROOT,
                  creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0),stdout=out,stderr=out)
             log(f'started anime.run pid={process.pid}')

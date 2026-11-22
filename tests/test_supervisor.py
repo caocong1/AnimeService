@@ -85,3 +85,11 @@ def test_backoff_and_log_rotation(tmp_path):
     assert not path.exists() and (tmp_path/'supervisor.log.1').read_bytes()==b'x'*11
     supervisor.log('hello',path=path)
     assert path.read_text(encoding='utf-8').endswith(' hello\n')
+
+
+def test_start_marker_separates_children_in_process_log(tmp_path):
+    path=tmp_path/'process.log'
+    with path.open('a',encoding='utf-8') as out:
+        out.write('previous child output\n');supervisor.start_marker(out)
+    last=path.read_text(encoding='utf-8').splitlines()[-1]
+    assert last.endswith(f' --- start anime.run (supervisor pid={supervisor.os.getpid()}) ---') and last[:4].isdigit()
