@@ -1,4 +1,4 @@
-import contextlib,datetime,ipaddress,json,os,secrets,subprocess,threading,time
+import asyncio,contextlib,datetime,ipaddress,json,os,secrets,subprocess,threading,time
 from pathlib import Path
 from urllib.parse import urlencode,urlparse
 import requests
@@ -57,6 +57,8 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
     @contextlib.asynccontextmanager
     async def lifespan(app):
         lifetime=contextlib.ExitStack()
+        from .loop_hygiene import install
+        install(asyncio.get_running_loop())  # Windows Proactor client-reset cleanup; no-op elsewhere
         if start_worker:
             # An idle connection keeps WAL open between short-lived requests.
             # Finish the statement immediately so no read snapshot pins the WAL.
