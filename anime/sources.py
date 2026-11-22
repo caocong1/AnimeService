@@ -19,7 +19,7 @@ SITE_HOSTS={'tokyotosho':('www.tokyotosho.info','www.tokyotosho.se','www.tokyo-t
 HOST_SITE={host:site for site,hosts in SITE_HOSTS.items() for host in hosts}
 HOST_SITE.update({'tokyotosho.info':'tokyotosho','tokyotosho.se':'tokyotosho','tokyo-tosho.net':'tokyotosho',
                   'bt4g.org':'bt4g','bt4gprx.com':'bt4g','1337x.to':'1337x','www.1337x.to':'1337x'})  # one site, one health record
-SITE_MIN_INTERVAL={'tokyotosho':10,'nyaa.si':5}  # seconds between requests to one site; other sites are not spaced
+SITE_MIN_INTERVAL={'tokyotosho':10,'nyaa.si':5,'bt4g':20}  # seconds between requests to one site; other sites are not spaced
 EVENT_FAILURE_MARKS=(1,5,20,100)
 # TokyoTosho answers a search without matches with this fragment (served as text/html): a legitimate empty feed.
 EMPTY_RESULT=re.compile(rb'^\s*</channel>\s*</rss>\s*$')
