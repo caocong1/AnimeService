@@ -1,5 +1,5 @@
 """Isolated HTTPS listener. Never reloads or edits the user's shared nginx."""
-import json,os,subprocess,time,psutil
+import json,logging,os,subprocess,time,psutil
 from pathlib import Path
 from .db import ROOT
 from .deployment import load as load_deployment
@@ -30,35 +30,42 @@ def maintain_https(stop):
     args=[str(binary),'-p',str(config.parent)+'/', '-c','nginx.conf','-g','daemon off;']
     flags=getattr(subprocess,'CREATE_NO_WINDOW',0)
     def record(**fields):
-        health.update(fields);(ROOT/'data/https-health.json').write_text(json.dumps(health))
+        health.update(fields)
+        try:(ROOT/'data/https-health.json').write_text(json.dumps(health))
+        except OSError:pass  # a locked health file must not skip this iteration's reload decision
     try:
         while not stop.is_set() and not (ROOT/'data/stop.request').exists():
-            alive=bool(proc and proc.poll() is None)
-            if not alive:
-                try:
-                    existing=psutil.Process(int((ROOT/'data/edge.pid').read_text()))
-                    alive=existing.is_running() and existing.exe().lower()==str(binary).lower() and str(config.parent).lower() in existing.cwd().lower()
-                except (OSError,ValueError,psutil.Error):alive=False
-            if not alive:
-                with (ROOT/'logs/https-process.log').open('ab') as log:
-                    proc=subprocess.Popen(args,cwd=config.parent,stdout=log,stderr=log,creationflags=flags)
-                (ROOT/'data/edge.pid').write_text(str(proc.pid))
-            now=time.time()
-            if now-last_map>1800:
-                last_map=now
-                mapping='config_missing' if not private.exists() else outcome(
-                    [POWERSHELL,'-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',str(ROOT/'scripts/https_upnp.ps1'),'-ConfigPath',str(private)],
-                    MAPPING_TIMEOUT,MAPPING,flags)
-                record(mapped=now,mapping=mapping)
-            if now-last_renew>86400:
-                last_renew=now
-                before=certificate.stat().st_mtime
-                renewal='config_missing' if not private.exists() else outcome(
-                    [str(ROOT/'.venv/Scripts/python.exe'),str(ROOT/'scripts/https_renew.py')],RENEWAL_TIMEOUT,RENEWAL,flags)
-                ok=renewal=='ok'
-                record(checked=now,renew_ok=ok,renewal=renewal)
-                if ok and certificate.stat().st_mtime!=before:
-                    subprocess.run([str(binary),'-p',str(config.parent)+'/', '-c','nginx.conf','-s','reload'],capture_output=True,creationflags=flags)
+            try:
+                alive=bool(proc and proc.poll() is None)
+                if not alive:
+                    try:
+                        existing=psutil.Process(int((ROOT/'data/edge.pid').read_text()))
+                        alive=existing.is_running() and existing.exe().lower()==str(binary).lower() and str(config.parent).lower() in existing.cwd().lower()
+                    except (OSError,ValueError,psutil.Error):alive=False
+                if not alive:
+                    with (ROOT/'logs/https-process.log').open('ab') as log:
+                        proc=subprocess.Popen(args,cwd=config.parent,stdout=log,stderr=log,creationflags=flags)
+                    (ROOT/'data/edge.pid').write_text(str(proc.pid))
+                now=time.time()
+                if now-last_map>1800:
+                    last_map=now
+                    mapping='config_missing' if not private.exists() else outcome(
+                        [POWERSHELL,'-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',str(ROOT/'scripts/https_upnp.ps1'),'-ConfigPath',str(private)],
+                        MAPPING_TIMEOUT,MAPPING,flags)
+                    record(mapped=now,mapping=mapping)
+                if now-last_renew>86400:
+                    last_renew=now
+                    before=certificate.stat().st_mtime
+                    renewal='config_missing' if not private.exists() else outcome(
+                        [str(ROOT/'.venv/Scripts/python.exe'),str(ROOT/'scripts/https_renew.py')],RENEWAL_TIMEOUT,RENEWAL,flags)
+                    ok=renewal=='ok'
+                    record(checked=now,renew_ok=ok,renewal=renewal)
+                    if ok and certificate.stat().st_mtime!=before:
+                        subprocess.run([str(binary),'-p',str(config.parent)+'/', '-c','nginx.conf','-s','reload'],capture_output=True,creationflags=flags)
+            except Exception as error:
+                # Keep the owned listener; the next iteration re-checks or respawns it. Type only, nothing private.
+                health['last_error']={'type':type(error).__name__,'time':time.time()}
+                logging.getLogger(__name__).warning('https_edge_iteration_failed error=%s',type(error).__name__)
             stop.wait(20)
     finally:
         if proc and proc.poll() is None:
