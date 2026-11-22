@@ -6,6 +6,7 @@ import requests
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from .db import ROOT
+from .media_response import MediaFileResponse
 from .subtitles import Subtitles
 from .audio_tracks import AudioTracks
 from .browser_media import BrowserMedia
@@ -324,7 +325,7 @@ def register_webplayer(app,db):
     @app.get('/api/web/media/{key}/stream')
     def stream(key:str):
         r=player.item(key)
-        return FileResponse(player.browser_media.file(r),media_type='video/mp4' if Path(r['path']).suffix.lower()=='.mp4' else 'video/x-matroska',headers={'Cross-Origin-Resource-Policy':'same-origin'})
+        return MediaFileResponse(player.browser_media.file(r),media_type='video/mp4' if Path(r['path']).suffix.lower()=='.mp4' else 'video/x-matroska',headers={'Cross-Origin-Resource-Policy':'same-origin'})
     @app.get('/api/web/media/{key}/audio-tracks')
     def audio_tracks(key:str):
         d=player.audio.probe(player.item(key))
@@ -340,7 +341,7 @@ def register_webplayer(app,db):
         return player.audio.status(player.item(key),index)
     @app.get('/api/web/media/{key}/audio-tracks/{index}/stream')
     def audio_stream(key:str,index:int):
-        return FileResponse(player.audio.file(player.item(key),index),media_type='video/mp4',
+        return MediaFileResponse(player.audio.file(player.item(key),index),media_type='video/mp4',
                             headers={'Cross-Origin-Resource-Policy':'same-origin'})
     @app.post('/api/web/media/{key}/progress')
     def progress(key:str,p:dict):

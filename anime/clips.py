@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from fastapi import HTTPException
-from fastapi.responses import FileResponse
+from .media_response import MediaFileResponse
 
 
 def number(value, label, integer=False):
@@ -325,5 +325,5 @@ def register_clips(app, player):
     @app.get('/api/web/media/{key}/clips/{jid}/file')
     def file(key: str, jid: str, download: bool = False):
         path, job = clips.file(key, jid)
-        return FileResponse(path, media_type='video/mp4' if job['options']['format'] == 'mp4' else 'image/gif',
+        return MediaFileResponse(path, media_type='video/mp4' if job['options']['format'] == 'mp4' else 'image/gif',
                             filename=job['name'], content_disposition_type='attachment' if download else 'inline')
