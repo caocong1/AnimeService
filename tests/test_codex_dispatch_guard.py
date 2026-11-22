@@ -1,12 +1,28 @@
 import pytest
 import importlib.util
 import json
+import os
+import tempfile
 from pathlib import Path
 import sqlite3
 
-SPEC = importlib.util.spec_from_file_location('guard', Path(__file__).resolve().parents[1] / 'scripts/codex_dispatch_guard.py')
-guard = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(guard)
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location('guard', ROOT / 'scripts/codex_dispatch_guard.py')
+# The module reads its config at import; give it a synthetic one so the tests never
+# depend on the deployment file's thread ids or its Windows-only owner_db path.
+SYNTHETIC_CONFIG = Path(tempfile.mkdtemp(prefix='dispatch-guard-tests-')) / 'codex_dispatch.json'
+SYNTHETIC_CONFIG.write_text(json.dumps({'cwd': 'D:/AnimeService', 'targets': {'thread-a': 'automation-3', 'thread-b': 'automation-2'},
+                                        'recovery_turns': {'thread-a': 'turn-recovery-a'}, 'wait_seconds': 1200,
+                                        'owner_guard_enabled': False}), encoding='utf-8')
+_previous = os.environ.get('ANIMESERVICE_DISPATCH_CONFIG')
+os.environ['ANIMESERVICE_DISPATCH_CONFIG'] = str(SYNTHETIC_CONFIG)
+try:
+    guard = importlib.util.module_from_spec(SPEC)
+    SPEC.loader.exec_module(guard)
+finally:
+    if _previous is None:os.environ.pop('ANIMESERVICE_DISPATCH_CONFIG')
+    else:os.environ['ANIMESERVICE_DISPATCH_CONFIG'] = _previous
+assert guard.CONFIG_ERROR is None, guard.CONFIG_ERROR
 TID = next(iter(guard.TARGETS))
 TURN = {'status': 'inProgress', 'started_at': 1}
 USER = {'type': 'userMessage', 'content': [{'type': 'text', 'text': '<heartbeat><automation_id>automation-3</automation_id></heartbeat>'}]}
@@ -102,6 +118,12 @@ def test_only_exact_registered_recovery_is_guarded():
     turn = {**TURN, 'turn_id': guard.RECOVERY_TURNS[TID]}
     assert guard.decide(TID, 'D:/AnimeService', turn, [user], 50, 1300) == 'interrupt_stale_model_wait'
     assert guard.decide(TID, 'D:/AnimeService', {**turn, 'turn_id': 'another-user-turn'}, [user], 50, 1300) == 'not_scheduled_turn'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='deployment config uses Windows drive paths')
+def test_deployment_config_is_valid():
+    cfg = guard.load_config(ROOT / 'scripts/codex_dispatch.json')
+    assert cfg['targets'] and cfg['owner_guard_enabled'] is True
 
 
 def test_config_file_defines_scope_and_timing(tmp_path):

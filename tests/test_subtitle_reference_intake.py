@@ -145,6 +145,7 @@ def candidate(context, receipt):
     return context.db.one('SELECT * FROM candidates WHERE id=?', (receipt['candidate_id'],))
 
 
+@pytest.mark.requires_lab
 def test_dryrun_leaves_every_table_and_original_material_unchanged(material):
     c = material; before = facts(c.db); original = c.mother.read_bytes()
     result = register_reference_candidate(c.db, c.path, now=c.now)
@@ -156,6 +157,7 @@ def test_dryrun_leaves_every_table_and_original_material_unchanged(material):
     assert not (c.root/'reference-intake-proofs').exists()
 
 
+@pytest.mark.requires_lab
 def test_apply_is_idempotent_and_changes_only_new_source_candidate_and_receipt(material):
     c = material; before = facts(c.db); old = c.mother.read_bytes()
     first = apply(c); second = apply(c)
@@ -174,6 +176,7 @@ def test_apply_is_idempotent_and_changes_only_new_source_candidate_and_receipt(m
     require_reference_candidate(c.db, current, 'subtitle_reference', c.files, now=c.now)
 
 
+@pytest.mark.requires_lab
 @pytest.mark.parametrize('field', ['title', 'url', 'detail', 'hash', 'id', 'source_id', 'show_id'])
 def test_mapping_rejects_any_candidate_identity_substitution(material, field):
     c = material; row = candidate(c, apply(c)); changed = dict(row)
@@ -181,12 +184,14 @@ def test_mapping_rejects_any_candidate_identity_substitution(material, field):
     with pytest.raises(ValueError): candidate_mapping(c.db.mapping(42), changed)
 
 
+@pytest.mark.requires_lab
 @pytest.mark.parametrize('external', [1, 2, 13, 15, 24])
 def test_scoped_mapping_rejects_all_other_external_episodes(material, external):
     c = material; row = candidate(c, apply(c)); mapping = candidate_mapping(c.db.mapping(42), row)
     with pytest.raises(ValueError): validate_title(row['title'].replace(' - 14 ', f' - {external} '), mapping, {}, False)
 
 
+@pytest.mark.requires_lab
 def test_regular_rss_keeps_binding_and_exclusive_source_discards_other_episodes(material):
     c = material; result = apply(c); row = candidate(c, result)
     source = c.db.one('SELECT * FROM sources WHERE id=?', (result['source_id'],))
@@ -200,6 +205,7 @@ def test_regular_rss_keeps_binding_and_exclusive_source_discards_other_episodes(
     require_reference_candidate(c.db, current, 'subtitle_reference', now=c.now)
 
 
+@pytest.mark.requires_lab
 @pytest.mark.parametrize('conflict', ['title', 'detail', 'hash', 'hard', 'raw', 'binding'])
 def test_conflicting_rss_never_erases_reference_only_or_unlocks_ordinary_use(material, conflict):
     c = material; result = apply(c); source = c.db.one('SELECT * FROM sources WHERE id=?', (result['source_id'],))
@@ -216,6 +222,7 @@ def test_conflicting_rss_never_erases_reference_only_or_unlocks_ordinary_use(mat
     assert json.loads(candidate(c, result)['source_metadata'])['reference_binding_conflict']
 
 
+@pytest.mark.requires_lab
 @pytest.mark.parametrize('change', ['watched', 'owner', 'input', 'lease', 'unknown', 'production', 'user_stop',
     'finished', 'unauthorized', 'unselected', 'hold', 'season', 'mapping', 'future', 'mother_bytes',
     'mother_target', 'mother_receipt', 'scope', 'reference_limit', 'space', 'budget', 'new_task', 'dialog'])
@@ -254,6 +261,7 @@ def test_live_guards_reject_without_changing_any_original_row(material, change, 
     assert facts(db) == before
 
 
+@pytest.mark.requires_lab
 @pytest.mark.parametrize('change', ['sha', 'torrent_manifest', 'hash', 'title', 'new_season_title',
     'file', 'subject', 'catalogue_ep', 'catalogue_sort', 'abema', 'nfo', 'cue_count', 'jimaku',
     'expired', 'foreign_source', 'disabled_source', 'blacklist', 'fidelity'])
@@ -287,6 +295,7 @@ def test_evidence_and_source_identity_are_exact(material, change):
     assert facts(c.db) == before
 
 
+@pytest.mark.requires_lab
 def test_only_original_queue_can_create_exact_reference_sample_and_all_normal_routes_refuse(material, tmp_path):
     c = material; registered = apply(c); row = candidate(c, registered)
     before = facts(c.db)
@@ -326,6 +335,7 @@ def test_only_original_queue_can_create_exact_reference_sample_and_all_normal_ro
         targets.eligible_media(42, 2, 'reference-fp')
 
 
+@pytest.mark.requires_lab
 def test_expired_or_tampered_registered_proofs_cannot_be_used_to_queue(material):
     c = material; row = candidate(c, apply(c)); before = facts(c.db)
     with pytest.raises(ValueError): require_reference_candidate(c.db, row, 'subtitle_reference', now=c.now + MAX_AGE + 61)
@@ -335,6 +345,7 @@ def test_expired_or_tampered_registered_proofs_cannot_be_used_to_queue(material)
     assert facts(c.db) == before
 
 
+@pytest.mark.requires_lab
 def test_default_cli_runs_without_initialization_or_mutation(material):
     import subprocess
     import sys
@@ -347,6 +358,7 @@ def test_default_cli_runs_without_initialization_or_mutation(material):
     assert facts(c.db) == before and not (c.root/'reference-intake-proofs').exists()
 
 
+@pytest.mark.requires_lab
 def test_apply_rechecks_owner_inside_transaction(material, monkeypatch):
     import anime.subtitle_reference_intake as module
     c = material; original = module._load
@@ -362,6 +374,7 @@ def test_apply_rechecks_owner_inside_transaction(material, monkeypatch):
     assert c.db.one("SELECT thread_id FROM subtitle_delivery_jobs WHERE id='episode:42:2'")['thread_id'] == 'different-owner'
 
 
+@pytest.mark.requires_lab
 def test_apply_rechecks_source_bytes_before_any_registration(material, monkeypatch):
     import anime.subtitle_reference_intake as module
     c = material; original = module._load; before = facts(c.db)
@@ -375,6 +388,7 @@ def test_apply_rechecks_source_bytes_before_any_registration(material, monkeypat
     assert facts(c.db) == before
 
 
+@pytest.mark.requires_lab
 def test_existing_exact_enabled_source_is_reused_without_modifying_it(material):
     c = material; source = c.request['source']
     cid = c.db.execute('INSERT INTO sources(show_id,kind,url,archive_url,enabled) VALUES(42,?,?,?,1)',
@@ -385,6 +399,7 @@ def test_existing_exact_enabled_source_is_reused_without_modifying_it(material):
     assert c.db.one('SELECT source_exclusive FROM subtitle_reference_intakes')['source_exclusive'] == 0
 
 
+@pytest.mark.requires_lab
 @pytest.mark.parametrize('metadata', ['', '{}', '{broken', '{"reference_only":false}'])
 def test_durable_receipt_prevents_unmarking_a_reference(material, metadata):
     c = material; result = apply(c)
@@ -399,6 +414,7 @@ def test_durable_receipt_prevents_unmarking_a_reference(material, metadata):
     assert facts(c.db) == before
 
 
+@pytest.mark.requires_lab
 def test_unregistered_metadata_cannot_create_a_reference_task(material):
     c = material; row = candidate(c, apply(c)); metadata = json.loads(row['source_metadata'])
     c.db.execute('DELETE FROM subtitle_reference_intakes')

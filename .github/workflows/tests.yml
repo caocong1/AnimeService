@@ -5,6 +5,7 @@ permissions:
 jobs:
   python:
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -12,14 +13,20 @@ jobs:
           python-version: '3.14'
       - run: python -m pip install -r requirements-dev.txt
       - name: Install ffmpeg for media tests
+        # requires_ffmpeg tests are skipped with a visible reason if this install fails.
+        continue-on-error: true
         run: choco install ffmpeg -y --no-progress
       # Tests marked requires_lab need the private subtitle core and are reported as skipped here;
       # the original machine runs them. Anything else failing is a real regression.
-      - run: python -m pytest -q -rs
-      - uses: actions/setup-node@v4
+      # -rfEs lists failures and errors as well as skip reasons in the short summary.
+      - run: python -m pytest -q -rfEs --durations=25
+      # The frontend checks still run (and report) when pytest is red; the job still fails.
+      - if: ${{ !cancelled() }}
+        uses: actions/setup-node@v4
         with:
           node-version: '22'
       - name: Frontend behavior regressions
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $nodeTests = @(Get-ChildItem tests -Filter '*.test.cjs' | ForEach-Object { $_.FullName })
@@ -27,7 +34,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/subtitle-delivery-model.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - shell: pwsh
+      - name: Static JS syntax
+        if: ${{ !cancelled() }}
+        shell: pwsh
         run: |
           Get-ChildItem static/*.js | ForEach-Object {
             node --check $_.FullName

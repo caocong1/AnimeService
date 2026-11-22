@@ -100,8 +100,10 @@ def test_new_release_cannot_bypass_with_player_boolean(tmp_path):
         validate_release(tmp_path, tmp_path, {'files': {}, 'complete_chinese_coverage_checked': True})
 
 
-def test_encoding_rejects_missing_report_before_creating_output(tmp_path):
-    from scripts.finish_subtitle_episode import build
+def test_encoding_rejects_missing_report_before_creating_output(tmp_path, monkeypatch):
+    from scripts import finish_subtitle_episode
+    monkeypatch.setattr(finish_subtitle_episode, 'PROJECT', tmp_path)  # never the project's real DB
+    build = finish_subtitle_episode.build
     output = tmp_path / 'new-release'
     config = tmp_path / 'config.json'
     config.write_text(json.dumps({'output': str(output), 'ass': str(tmp_path / 'not-needed.ass'),

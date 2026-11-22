@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from unittest.mock import Mock
 import concurrent.futures
@@ -127,6 +128,7 @@ def test_windows_delayed_connection_refusal_is_distinct_from_timeout(monkeypatch
     assert recovery.absence()=='absent'
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Windows process creation flags')
 def test_hidden_launch_uses_only_original_program_profile_and_port(monkeypatch):
     popen=Mock(return_value=Mock(pid=123));startup=Mock()
     monkeypatch.setattr(recovery.subprocess,'Popen',popen)

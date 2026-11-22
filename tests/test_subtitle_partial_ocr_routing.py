@@ -2,7 +2,8 @@
 import pytest
 import anime.subtitle_chinese as chinese
 
-@pytest.mark.parametrize('stage,expected', [('recovered_cues_corrected','review_chinese_ocr'),
+@pytest.mark.parametrize('stage,expected', [('in_progress','review_chinese_ocr'),
+                                           ('recovered_cues_corrected','align_chinese_source'),
                                            ('complete','align_chinese_source')])
 def test_source_completion_controls_next_route(monkeypatch, stage, expected):
     draft={'sha256':'fixture','estimated':True,'mixed':False,
@@ -14,6 +15,8 @@ def test_source_completion_controls_next_route(monkeypatch, stage, expected):
     plan=chinese.chinese_preparation(None,42,2)
     assert plan['action']==expected
     assert plan['production_ready_claimed'] is False
-    if stage!='complete':
+    if stage=='in_progress':
         assert 'review_chinese_ocr' in plan['actions']
         assert 'align_chinese_source' not in plan['actions']
+    else:  # a verified correction advances to alignment instead of repeating OCR review
+        assert 'review_chinese_ocr' not in plan['actions']

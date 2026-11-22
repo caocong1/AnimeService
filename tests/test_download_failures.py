@@ -26,7 +26,7 @@ def test_policy_refusal_is_explained_once_and_not_retried_until_inputs_change(se
     assert task['status']=='intent' and task['error']==THUNDER_PENDING and q.adds==1
     record=db.get('task_failure_'+h)
     assert record['attempts']==1 and record['next']>time.time() and record['gate_key'] and len(task_events(db,h))==1
-    db.set('check_requested',db.get('check_completed',0)+1)  # an explicit check retries once, with the same answer
+    e.request_check()  # an explicit check retries once, with the same answer
     e.reconcile();db.set('check_completed',db.get('check_requested'))
     assert db.get('task_failure_'+h)['attempts']==2 and len(task_events(db,h))==1
     db.set('downloader_preference','qbit')  # changed inputs: the refusal no longer stands
