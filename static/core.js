@@ -88,7 +88,7 @@ function boot() {
     Object.assign(App, { token: b.token, local: b.local, settings: b.settings, quarters: b.quarters || [], catalog_years: b.catalog_years || [],
       capabilities: capabilityWhitelist(b.capabilities), coverCache: b.cover_cache_version === 1 });
     return App;
-  });
+  }).catch(e => { App.ready = null; throw e; });  // a failed bootstrap is fetched again by the next caller
   return App.ready;
 }
 
@@ -179,7 +179,7 @@ function shell(active) {
     toast(r.blocker ? '已检查新集，下载暂时无法开始' : '已请求检查新集');
   }));
   const poll = () => health(active === 'manage');  // only the management page needs the full status
-  boot().then(() => { poll(); setInterval(() => { if (!document.hidden) poll(); }, 60000); }).catch(e => toast(e.message));
+  boot().catch(e => toast(e.message)).finally(() => { poll(); setInterval(() => { if (!document.hidden) poll(); }, 60000); });
   addEventListener('pageshow', e => { if (e.persisted) poll(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 }
