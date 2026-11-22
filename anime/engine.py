@@ -157,7 +157,13 @@ class Engine:
             c.execute("""UPDATE tasks SET status='held',acknowledged=max(acknowledged,?),updated=? WHERE hash=?
                          AND (status!='held' OR acknowledged<?)""",(int(bool(rows)),time.time(),t['hash'],int(bool(rows))))
             c.execute("UPDATE episodes SET status='held' WHERE hash=? AND status NOT IN ('held','complete','file_missing','error')",(t['hash'],))
+    def snapshot_reader(self,snapshot_db):
+        """Read-only gate inputs on one snapshot instead of a connection per lookup."""
+        reader=object.__new__(type(self));reader.db=snapshot_db;return reader
     def gate_key(self,t):
+        if not hasattr(self.db,'con'):
+            from .read_projection import read_projection
+            with read_projection(self.db.path) as snapshot_db:return self.snapshot_reader(snapshot_db).gate_key(t)
         sid=t['show_id'];policy=self.db.one('SELECT config FROM source_policies WHERE show_id=?',(sid,))
         parts={k:self.db.get(k) for k in GATE_SETTINGS}
         parts.update(policy=policy['config'] if policy else None,review_wanted=self.db.review_wanted(sid),
@@ -192,6 +198,9 @@ class Engine:
     def recheck_due(self,t,qt):
         """Completed packages are re-verified hourly, at once on a downloader error state, or on an explicit check."""
         if qt.get('state') in ('error','missingFiles'):return True
+        if not hasattr(self.db,'con'):
+            from .read_projection import read_projection
+            with read_projection(self.db.path) as snapshot_db:return self.snapshot_reader(snapshot_db).recheck_due(t,qt)
         verified=self.db.get('task_verified_inputs_'+t['hash'],{})
         if self.check_for_show(t['show_id'])>max(self.db.get('check_completed',0),verified.get('checked_request',0)):return True
         if verified.get('key')!=self.verification_key(t,qt):return True
