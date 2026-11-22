@@ -347,6 +347,41 @@ def test_cleanup_foreign_task_and_changed_file_refused(setup):
     with pytest.raises(ValueError):cleaner.preview(42)
 
 
+@pytest.mark.parametrize('hold',['acknowledged','committing','unknown','lease','production','studio','finished','publication'])
+def test_cleanup_refuses_media_with_subtitle_production_or_release(setup,hold):
+    from anime.cleanup import Cleanup
+    from anime.webplayer import WebPlayer
+    from anime.subtitle_delivery import SubtitleDelivery
+    from anime.subtitle_targets import tables
+    db,q,e,c=setup;WebPlayer(db);e.ingest(c());h=next(iter(q.tasks))
+    p=Path(q.tasks[h]['save_path'])/q.fs[h][0]['name'];p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'x'*100)
+    q.fs[h][0]['progress']=1;e.reconcile();e.state(42,'dropped');cleaner=Cleanup(db,e)
+    SubtitleDelivery(db);tables(db)
+    db.execute('CREATE TABLE IF NOT EXISTS subtitle_studio_jobs(show_id INTEGER,episode INTEGER,state TEXT,payload TEXT,error TEXT DEFAULT \'\',updated REAL,PRIMARY KEY(show_id,episode))')
+    plan=cleaner.preview(42);assert plan
+    now=time.time();job="INSERT INTO subtitle_delivery_jobs(id,show_id,episode,kind,state,input_key,payload,lease_expires,dispatch_state,created,updated) VALUES('j',42,1,'episode',?,'k','{}',?,?,?,?)"
+    if hold in ('acknowledged','committing','unknown'):db.execute(job,('preparing',0,hold,now,now))
+    elif hold=='lease':db.execute(job,('ready',now+600,'',now,now))
+    elif hold=='production':db.execute(job,('production',0,'',now,now))
+    elif hold=='studio':db.execute("INSERT INTO subtitle_studio_jobs(show_id,episode,state,payload,updated) VALUES(42,1,'production','{}',?)",(now,))
+    elif hold=='finished':db.set('subtitle_delivery_finished_42_1',{'delivery_status':'finished','release_id':'r'})
+    else:db.execute("INSERT INTO subtitle_publications(show_id,episode,target_id,build_id,previous_episode,payload,created) VALUES(42,1,'t','b','{}','{}',?)",(now,))
+    with pytest.raises(ValueError,match='字幕'):cleaner.preview(42)
+    with pytest.raises(ValueError,match='字幕'):cleaner.confirm(42,plan['fingerprint'])
+    assert p.exists() and not db.show(42)['cleanup_hold'] and db.one('SELECT status FROM tasks')['status']!='cleaned'
+
+
+def test_cleanup_ignores_expired_undispatched_subtitle_lease(setup):
+    from anime.cleanup import Cleanup
+    from anime.webplayer import WebPlayer
+    from anime.subtitle_delivery import SubtitleDelivery
+    db,q,e,c=setup;WebPlayer(db);e.ingest(c());h=next(iter(q.tasks))
+    p=Path(q.tasks[h]['save_path'])/q.fs[h][0]['name'];p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'x'*100)
+    q.fs[h][0]['progress']=1;e.reconcile();e.state(42,'dropped');SubtitleDelivery(db);now=time.time()
+    db.execute("INSERT INTO subtitle_delivery_jobs(id,show_id,episode,kind,state,input_key,payload,lease_expires,dispatch_state,created,updated) VALUES('j',42,1,'episode','blocked','k','{}',?,'not_created',?,?)",(now-1,now,now))
+    assert Cleanup(db,e).preview(42)['bytes']==100
+
+
 def test_danmu_selection_pins_public_url_not_transient_id(setup,monkeypatch):
     from anime.app import create_app
     from anime.webplayer import WebPlayer

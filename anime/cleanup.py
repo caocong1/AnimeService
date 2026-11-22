@@ -3,6 +3,18 @@ import hashlib,json,time,os
 from pathlib import Path
 
 
+def subtitle_hold(db,sid,ep,now):
+    """Subtitle production facts that keep this episode's media out of cleanup."""
+    from .subtitle_targets import exists
+    # In-flight owner, live lease or unknown/committing receipt: never reclaimed by time.
+    if exists(db,'subtitle_delivery_jobs') and db.one("""SELECT 1 FROM subtitle_delivery_jobs WHERE show_id=? AND episode=?
+        AND (dispatch_state IN ('committing','unknown','acknowledged') OR lease_expires>? OR state='production') LIMIT 1""",(sid,ep,now)):return True
+    if exists(db,'subtitle_studio_jobs') and db.one("SELECT 1 FROM subtitle_studio_jobs WHERE show_id=? AND episode=? AND state IN ('production','finished','accepted')",(sid,ep)):return True
+    # A finished delivery or published build binds this exact source media.
+    if db.get(f'subtitle_delivery_finished_{sid}_{ep}'):return True
+    return exists(db,'subtitle_publications') and bool(db.one('SELECT 1 FROM subtitle_publications WHERE show_id=? AND episode=?',(sid,ep)))
+
+
 class Cleanup:
     def __init__(self,db,engine):self.db=db;self.engine=engine
     def preview(self,sid,now=None):
@@ -24,6 +36,7 @@ class Cleanup:
         from .download_storage import library_for,stage_for
         files=[];hashes=set()
         for e in episodes:
+            if subtitle_hold(self.db,sid,e['episode'],now):raise ValueError('字幕制作在途、回执未知或已有成品/发布依赖此集，不能自动清理')
             p=Path(e['path']);resolved=p.resolve()
             root=library_for(self.engine.library,resolved)
             task=self.db.one('SELECT * FROM tasks WHERE hash=? AND show_id=?',(e['hash'],sid))
