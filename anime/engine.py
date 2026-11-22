@@ -3,7 +3,7 @@ import psutil
 from functools import lru_cache
 from pathlib import Path
 from .db import ROOT,STATES
-from .net import safe_error,NetworkError,RequestDeferred
+from .net import safe_error,NetworkError,RequestDeferred,SubmissionUnconfirmed
 from .diagnostics import record_event
 from .qbit import Qbit
 from .download_policy import require_submission_ready,fallback_receipt,Refusal
@@ -309,6 +309,8 @@ class Engine:
             self.db.execute("UPDATE candidates SET status='review',reason=? WHERE id=?",(str(e)[:300],candidate['id']))
         except RequestDeferred:
             self.db.execute("UPDATE candidates SET status='retry',reason=? WHERE id=?",('站点请求等待下一时隙',candidate['id']))
+        except SubmissionUnconfirmed:
+            pass  # the candidate stays reserved on its durable 'uncertain' task; reconcile confirms by hash
         except Exception as e:
             message=safe_error(e);key='candidate_retry_'+str(candidate['id']);prior=self.db.get(key,{})
             attempts=prior.get('attempts',0)+1 if prior.get('reason')==message else 1
@@ -341,10 +343,14 @@ class Engine:
                 self.db.execute("UPDATE tasks SET status='uncertain',updated=? WHERE hash=?",(time.time(),h))
                 self.qb.add(h,(self.cache/(h+'.torrent')).read_bytes(),t['save_path'])
                 rows=self.qb.info(h)
-                if not rows:raise NetworkError('提交后尚未确认入队，下一轮先按hash查询')
+                if not rows:
+                    message='提交后尚未确认入队，下一轮先按hash查询'
+                    self.db.execute('UPDATE tasks SET error=?,updated=? WHERE hash=?',(message,time.time(),h))
+                    self.db.event('task:'+h,'已提交，等待下载器按hash确认；不重复提交','info')
+                    raise SubmissionUnconfirmed(message)
             qbtask=rows[0]
             if not self.qb.owned(qbtask):raise Rejected('任务分类/标签不匹配，禁止修改')
-            self.db.execute('UPDATE tasks SET acknowledged=1 WHERE hash=?',(h,))
+            self.db.execute("UPDATE tasks SET acknowledged=1,error=CASE WHEN error='提交后尚未确认入队，下一轮先按hash查询' THEN '' ELSE error END WHERE hash=?",(h,))
             if Path(qbtask['save_path']).resolve()!=Path(t['save_path']).resolve():raise Rejected('下载目录发生变化，禁止自动操作')
             from .download_storage import torrent_staging
             stage = torrent_staging(t['save_path'])
@@ -463,6 +469,8 @@ class Engine:
                         self.db.set('task_verified_inputs_'+h,{'key':self.verification_key({**t,'status':status},qt),
                             'checked_request':self.db.get('check_requested',0)})
                     self.clear_failure(h)
+            except SubmissionUnconfirmed:
+                continue  # recorded by dispatch; the next pass looks it up by hash
             except Exception as e:
                 message=str(e) if isinstance(e,Rejected) else safe_error(e)
                 if isinstance(e,Rejected):

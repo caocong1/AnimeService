@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from .db import Store,ROOT,DEFAULTS
 from .engine import Engine
-from .net import safe_error
+from .net import safe_error,SubmissionUnconfirmed
 from .diagnostics import record_event
 from .download_policy import status as downloader_status
 from .sources import Catalog,parse_rss
@@ -148,6 +148,10 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
         return JSONResponse({'error':'播放进度需要新的写入会话','reason':e.reason},status_code=409)
     @app.exception_handler(ValueError)
     async def value_error(request,e):return JSONResponse({'error':str(e)[:400]},status_code=400)
+    @app.exception_handler(SubmissionUnconfirmed)
+    async def submission_unconfirmed(request,e):
+        # A sent add awaiting confirmation by hash is an expected state, not a fault.
+        return JSONResponse({'ok':True,'pending_confirmation':True,'message':str(e)},status_code=202)
     @app.exception_handler(Exception)
     async def unexpected(request,e):
         await run_in_threadpool(record_event,db,'api',safe_error(e),'error',error=e)
@@ -513,9 +517,9 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
             if (existing['show_id']!=sid or candidate['hash']!=expected or
                     sorted(int(ep) for ep in json.loads(existing['selection'])['selected'])!=episodes):
                 raise ValueError('已有hash归属或选集不同，保留原任务')
-            # Reconcile this exact existing request, including lost add replies;
-            # dispatch never re-adds an uncertain/acknowledged absent torrent.
-            if existing['status'] in ('intent','uncertain','downloading','held'):
+            # Reconcile this exact existing request. An 'uncertain' add is left to the
+            # background lookup by hash; dispatch never re-adds an absent torrent.
+            if existing['status'] in ('intent','downloading','held'):
                 engine.dispatch(existing)
             return {'task':db.one('SELECT hash,status,error,acknowledged FROM tasks WHERE hash=?',(expected,)),
                     'candidate':db.one('SELECT status,reason FROM candidates WHERE id=?',(candidate['id'],))}

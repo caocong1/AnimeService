@@ -16,6 +16,10 @@ class NetworkError(RuntimeError):
         self.site_wide=site_wide if site_wide is not None else (status is None or status in SITE_WIDE_STATUSES)
 
 
+class SubmissionUnconfirmed(NetworkError):
+    """The add was sent and the task is durably 'uncertain'; only a lookup by hash continues it, never another add."""
+
+
 class RequestDeferred(RuntimeError):
     """A request has not been sent. The caller should resume after this deadline."""
     safe_message=True  # fixed project text, no URL
