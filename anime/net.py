@@ -1,4 +1,4 @@
-import datetime,math,re,sqlite3,time
+import datetime,errno,math,re,sqlite3,time
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -16,8 +16,13 @@ class NetworkError(RuntimeError):
         self.site_wide=site_wide if site_wide is not None else (status is None or status in SITE_WIDE_STATUSES)
 
 
+class SubmissionUnconfirmed(NetworkError):
+    """The add was sent and the task is durably 'uncertain'; only a lookup by hash continues it, never another add."""
+
+
 class RequestDeferred(RuntimeError):
     """A request has not been sent. The caller should resume after this deadline."""
+    safe_message=True  # fixed project text, no URL
     def __init__(self,until,target):
         super().__init__('站点请求等待下一时隙');self.until=until;self.target=target
 
@@ -41,7 +46,17 @@ def safe_error(e):
             return '本地数据库正忙，请稍后重试'
     # Never retain request URLs, headers, response bodies, or auth-bearing exception strings.
     if isinstance(e,NetworkError) or getattr(e,'safe_message',False):return str(e)
-    return type(e).__name__+'：请求失败，请检查网络或本机接口'+where(e)
+    name=type(e).__name__
+    # requests exceptions subclass OSError: keep this branch before the OSError one.
+    if isinstance(e,(requests.RequestException,ConnectionError,TimeoutError)):
+        return name+'：请求失败，请检查网络或本机接口'+where(e)
+    if isinstance(e,sqlite3.Error):
+        code=getattr(e,'sqlite_errorname','') or ''
+        return name+'：本地数据库操作失败'+(f'（{code}）' if code else '')+where(e)
+    if isinstance(e,OSError):
+        code=errno.errorcode.get(e.errno,'') if isinstance(e.errno,int) else ''
+        return name+'：本机文件或系统操作失败'+(f'（{code}）' if code else '')+where(e)
+    return name+'：内部处理失败'+where(e)
 
 def where(e):
     """Innermost frame of this package as module.function:line; no paths, arguments or values."""

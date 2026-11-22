@@ -95,5 +95,5 @@ def test_safe_error_keeps_refusal_text_and_adds_only_a_code_location(tmp_path):
     assert safe_error(Refusal('理由'))=='理由'
     try:Store(tmp_path/'x.db').rows('SELECT secret FROM nowhere')
     except Exception as e:message=safe_error(e)
-    assert message.startswith('OperationalError：请求失败') and '（db.' in message and 'secret' not in message and 'nowhere' not in message
-    assert safe_error(KeyError('jobs'))=='KeyError：请求失败，请检查网络或本机接口'
+    assert message.startswith('OperationalError：本地数据库操作失败（SQLITE_ERROR）') and '（db.' in message and 'secret' not in message and 'nowhere' not in message
+    assert safe_error(KeyError('jobs'))=='KeyError：内部处理失败'

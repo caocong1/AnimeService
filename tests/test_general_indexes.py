@@ -161,3 +161,34 @@ def test_scope_change_during_rss_request_prevents_candidate_insert(setup):
         db.execute('UPDATE shows SET selected=0 WHERE id=42');return response(bt_rss())
     web.fetch.side_effect=fetch;Sources(db,web).rss(source)
     assert not db.rows('SELECT * FROM candidates WHERE source_id=?',(source['id'],)) and q.adds==0
+
+
+def two_bt4g(db):
+    first=db.one("SELECT * FROM sources WHERE kind='bt4g'")
+    sid=db.execute('INSERT INTO sources(show_id,kind,url,archive_url) VALUES(?,?,?,?)',(42,'bt4g',first['url'].replace('q=','q=Second+'),''))
+    return first,db.one('SELECT * FROM sources WHERE id=?',(sid,))
+
+
+def test_bt4g_feeds_are_spaced_instead_of_polled_in_a_burst(setup):
+    import time
+    db,q,e=ready(setup);first,second=two_bt4g(db);web=Mock();web.fetch.return_value=response(bt_rss())
+    assert Sources(db,web).rss(first) and not Sources(db,web).rss(second)
+    assert web.fetch.call_count==1
+    assert web.fetch.call_args.kwargs['retries']==1  # spaced sites do not retry within one call
+    assert 15<db.one('SELECT next_attempt FROM sources WHERE id=?',(second['id'],))['next_attempt']-time.time()<=20
+
+
+def test_one_feed_error_does_not_pause_the_whole_bt4g_family(setup):
+    db,q,e=ready(setup);first,_=two_bt4g(db);web=Mock();web.fetch.side_effect=NetworkError('bt4gprx.com HTTP 404',404)
+    assert not Sources(db,web).rss(first)
+    assert db.get('general_site_backoff_bt4g') is None
+    assert db.one('SELECT failures FROM sources WHERE id=?',(first['id'],))['failures']==1
+
+
+def test_bt4g_429_honours_a_longer_retry_after(setup):
+    import time
+    db,q,e=ready(setup);first,second=two_bt4g(db);web=Mock()
+    web.fetch.side_effect=NetworkError('bt4gprx.com HTTP 429',429,retry_after=7200)
+    assert not Sources(db,web).rss(first)
+    assert db.get('general_site_backoff_bt4g')['next_attempt']>=time.time()+7100
+    assert not Sources(db,web).rss(second) and web.fetch.call_count==1

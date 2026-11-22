@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from .download_policy import require_submission_ready
 from .fidelity import fidelity_blocker,processing_flags,preference_blocker
 from .source_blacklist import KEY as BLACKLIST_KEY,blacklist_blocker,media_blocker
-from .net import safe_error
+from .net import safe_error,SubmissionUnconfirmed
 from .releases import Rejected,bdecode,validate_title,select_files,norm
 from .subtitles import Subtitles
 from .subtitle_history import SubtitleHistory,validate_findings
@@ -278,6 +278,7 @@ class SourceReview:
                     self.db.execute('INSERT INTO source_samples(candidate_id,show_id,family,state,updated) VALUES(?,?,?,\'preparing\',?)',
                         (c['id'],sid,c['family']['key'],time.time()))
             try:self.queue(c)
+            except SubmissionUnconfirmed:pass  # sample stays queued on its 'uncertain' task; reconcile confirms by hash
             except Exception as e:
                 self.db.execute("UPDATE source_samples SET state='error',error=?,updated=? WHERE candidate_id=?",
                     (str(e)[:300] if isinstance(e,ValueError) else safe_error(e),time.time(),c['id']))

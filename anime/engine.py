@@ -3,13 +3,13 @@ import psutil
 from functools import lru_cache
 from pathlib import Path
 from .db import ROOT,STATES
-from .net import safe_error,NetworkError,RequestDeferred
+from .net import safe_error,NetworkError,RequestDeferred,SubmissionUnconfirmed
 from .diagnostics import record_event,report_loop_error,backoff
-from .qbit import Qbit
+from .qbit import Qbit,QbitUnavailable
 from .download_policy import require_submission_ready,fallback_receipt,Refusal
 from .fidelity import fidelity_blocker
 from .research_tasks import is_sample,sample_episode,sample_table,sample_allowed
-from .sources import Sources,Catalog,EVENT_FAILURE_MARKS
+from .sources import Sources,Catalog,EVENT_FAILURE_MARKS,site_backoff_seconds
 from .native_indexes import candidate_mapping
 from .releases import Rejected,validate_title,bdecode,select_files,norm,episodes_of,season_of
 
@@ -317,6 +317,8 @@ class Engine:
             self.db.execute("UPDATE candidates SET status='review',reason=? WHERE id=?",(str(e)[:300],candidate['id']))
         except RequestDeferred:
             self.db.execute("UPDATE candidates SET status='retry',reason=? WHERE id=?",('站点请求等待下一时隙',candidate['id']))
+        except SubmissionUnconfirmed:
+            pass  # the candidate stays reserved on its durable 'uncertain' task; reconcile confirms by hash
         except Exception as e:
             message=safe_error(e);key='candidate_retry_'+str(candidate['id']);prior=self.db.get(key,{})
             attempts=prior.get('attempts',0)+1 if prior.get('reason')==message else 1
@@ -349,10 +351,14 @@ class Engine:
                 self.db.execute("UPDATE tasks SET status='uncertain',updated=? WHERE hash=?",(time.time(),h))
                 self.qb.add(h,(self.cache/(h+'.torrent')).read_bytes(),t['save_path'])
                 rows=self.qb.info(h)
-                if not rows:raise NetworkError('提交后尚未确认入队，下一轮先按hash查询')
+                if not rows:
+                    message='提交后尚未确认入队，下一轮先按hash查询'
+                    self.db.execute('UPDATE tasks SET error=?,updated=? WHERE hash=?',(message,time.time(),h))
+                    self.db.event('task:'+h,'已提交，等待下载器按hash确认；不重复提交','info')
+                    raise SubmissionUnconfirmed(message)
             qbtask=rows[0]
             if not self.qb.owned(qbtask):raise Rejected('任务分类/标签不匹配，禁止修改')
-            self.db.execute('UPDATE tasks SET acknowledged=1 WHERE hash=?',(h,))
+            self.db.execute("UPDATE tasks SET acknowledged=1,error=CASE WHEN error='提交后尚未确认入队，下一轮先按hash查询' THEN '' ELSE error END WHERE hash=?",(h,))
             if Path(qbtask['save_path']).resolve()!=Path(t['save_path']).resolve():raise Rejected('下载目录发生变化，禁止自动操作')
             from .download_storage import torrent_staging
             stage = torrent_staging(t['save_path'])
@@ -471,6 +477,8 @@ class Engine:
                         self.db.set('task_verified_inputs_'+h,{'key':self.verification_key({**t,'status':status},qt),
                             'checked_request':self.db.get('check_requested',0)})
                     self.clear_failure(h)
+            except SubmissionUnconfirmed:
+                continue  # recorded by dispatch; the next pass looks it up by hash
             except Exception as e:
                 message=str(e) if isinstance(e,Rejected) else safe_error(e)
                 if isinstance(e,Rejected):
@@ -478,6 +486,11 @@ class Engine:
                         self.db.execute("UPDATE tasks SET status='review',error=?,updated=? WHERE hash=?",(message,time.time(),h))
                 elif message!=(t or {}).get('error'):self.db.execute('UPDATE tasks SET error=?,updated=? WHERE hash=?',(message,time.time(),h))
                 self.note_failure(h,t or {'hash':h,'show_id':sid,'title':'','status':'','selection':''},e,message)
+                if isinstance(e,QbitUnavailable) and (t or {}).get('provider')!='thunder':
+                    # qB went away mid-pass: this task records it once; the other qB tasks wait for the next
+                    # pass instead of each blocking on a timeout. Thunder tasks keep reconciling.
+                    qbit_available=False
+                    self.db.set('qbit_health',{'ok':False,'time':time.time(),'error':message})
     def cycle(self,force=False):
         if not self.cycle_lock.acquire(blocking=False):return
         try:
@@ -506,12 +519,7 @@ class Engine:
             for sid in refreshed:  # a show's pending candidates once per cycle, however many of its sources refreshed
                 if self.stop_event.is_set():break
                 self.ingest_show(sid)
-            # Air dates for every tracked show, not just downloading ones, so the board can tell aired from future.
-            for show in self.db.rows("SELECT id FROM shows WHERE selected=1 AND state IN ('trial','watching','wish','paused')"):
-                if self.stop_event.is_set():break
-                if time.time()-self.db.get('details_'+str(show['id']),0)>21600:
-                    try:self.catalog.details(show['id'])
-                    except Exception as e:self.db.event('airings',safe_error(e),'warning')
+            self.refresh_airings()
             if hasattr(self,'auto_tick'):self.step('season.auto_tick',lambda:self.auto_tick(force=force))
             self.step('source_review.tick',self.source_review.tick)
             self.step('source_review.publish_available',self.source_review.publish_available)
@@ -521,10 +529,48 @@ class Engine:
             self.db.set('check_completed',requested)
             self.db.set('check_finished_at',time.time())
         finally:self.cycle_lock.release()
+    def refresh_airings(self):
+        """Air dates for every tracked show, not just downloading ones, so the board can tell aired from future.
+        A Bangumi-wide failure pauses the pass with one shared backoff and is reported sparsely per outage;
+        one show's own failure backs off only that show."""
+        shows=[r['id'] for r in self.db.rows("SELECT id FROM shows WHERE selected=1 AND state IN ('trial','watching','wish','paused')")]
+        fresh={sid:self.db.get('details_'+str(sid),0) for sid in shows}
+        shared=self.db.get('airings_backoff',{})
+        if shared.get('at',0)<max(fresh.values(),default=0):shared={}  # a later success (e.g. a manual refresh) ended it
+        if shared.get('next',0)>time.time():return
+        for sid in shows:
+            if self.stop_event.is_set():break
+            if time.time()-fresh[sid]<=21600:continue
+            key='details_retry_'+str(sid);own=self.db.get(key,{})
+            if own.get('at',0)<fresh[sid]:own={}
+            if own.get('next',0)>time.time():continue
+            self.db.set('heartbeat',{'time':time.time(),'phase':'airings','show_id':sid})
+            try:self.catalog.details(sid)
+            except Exception as e:
+                message=safe_error(e);now=time.time();site_wide=isinstance(e,NetworkError) and e.site_wide
+                prior=shared if site_wide else own;failures=prior.get('failures',0)+1
+                wait=site_backoff_seconds(failures) if site_wide else min(3600,300*2**min(failures-1,4))
+                self.db.set('airings_backoff' if site_wide else key,{'failures':failures,'error':message,'at':now,
+                    'since':prior.get('since',now),'next':now+max(wait,getattr(e,'retry_after',0) or 0)})
+                if message!=prior.get('error') or failures in EVENT_FAILURE_MARKS or failures%100==0:
+                    self.db.event('airings',message,'warning')
+                if site_wide:break  # the other shows share the endpoint and would fail the same way
+            else:
+                for done in (key,'airings_backoff'):
+                    if self.db.get(done) is not None:self.db.execute('DELETE FROM kv WHERE key=?',(done,))
+                shared={}
+    def qbit_recently_down(self,window=90):
+        """qB is the downloader and a fresh probe found it unavailable; same rule as download_gaps."""
+        health=self.db.get('qbit_health',{})
+        return (self.db.get('downloader_preference','qbit')=='qbit' and health.get('ok') is False
+                and 0<=time.time()-health.get('time',0)<window)
     def ingest_show(self,sid):
         if self.db.review_wanted(sid) and self.source_review.policy(sid).get('mode')=='sampling':
             try:self.source_review.start(sid)
             except Exception as ex:self.db.event('source-review:'+str(sid),safe_error(ex),'warning')
+        # Do not fetch torrents from rate-limited sites only to fail on a downloader known to be down;
+        # candidates stay untouched and are tried again once qB answers.
+        if self.qbit_recently_down():return
         candidates=self.db.rows("SELECT * FROM candidates WHERE show_id=? AND status IN ('discovered','retry','source_wait') ORDER BY source_id,id DESC",(sid,))
         now=time.time()
         candidates=[c for c in candidates if c['status']!='retry' or self.db.get('candidate_retry_'+str(c['id']),{}).get('next',0)<=now]

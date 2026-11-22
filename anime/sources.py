@@ -19,7 +19,7 @@ SITE_HOSTS={'tokyotosho':('www.tokyotosho.info','www.tokyotosho.se','www.tokyo-t
 HOST_SITE={host:site for site,hosts in SITE_HOSTS.items() for host in hosts}
 HOST_SITE.update({'tokyotosho.info':'tokyotosho','tokyotosho.se':'tokyotosho','tokyo-tosho.net':'tokyotosho',
                   'bt4g.org':'bt4g','bt4gprx.com':'bt4g','1337x.to':'1337x','www.1337x.to':'1337x'})  # one site, one health record
-SITE_MIN_INTERVAL={'tokyotosho':10,'nyaa.si':5}  # seconds between requests to one site; other sites are not spaced
+SITE_MIN_INTERVAL={'tokyotosho':10,'nyaa.si':5,'bt4g':20}  # seconds between requests to one site; other sites are not spaced
 EVENT_FAILURE_MARKS=(1,5,20,100)
 # TokyoTosho answers a search without matches with this fragment (served as text/html): a legitimate empty feed.
 EMPTY_RESULT=re.compile(rb'^\s*</channel>\s*</rss>\s*$')
@@ -200,14 +200,14 @@ class Catalog:
             r=self.web.fetch('https://api.bgm.tv/v0/episodes?'+urlencode({'subject_id':sid,'type':0,'limit':100,'offset':offset})).json()
             rows=r.get('data');total=r.get('total')
             if not isinstance(rows,list) or type(total) is not int or total<0 or r.get('offset',offset)!=offset:
-                raise NetworkError('Bangumi章节分页响应无效，保留原分集资料')
+                raise NetworkError('Bangumi章节分页响应无效，保留原分集资料',site_wide=False)
             expected=max(expected,total)
             ids=[e.get('id') for e in rows]
             if any(type(i) is not int or i<=0 for i in ids) or len(set(ids))!=len(ids) or set(ids)&seen:
-                raise NetworkError('Bangumi章节分页重复或缺少ID，保留原分集资料')
+                raise NetworkError('Bangumi章节分页重复或缺少ID，保留原分集资料',site_wide=False)
             seen.update(ids);items+=rows;offset+=len(rows)
             if offset>=expected:break
-            if not rows or offset>10000:raise NetworkError('Bangumi章节分页不完整，保留原分集资料')
+            if not rows or offset>10000:raise NetworkError('Bangumi章节分页不完整，保留原分集资料',site_wide=False)
         self.db.set('bangumi_episodes_'+str(sid),{'time':time.time(),'items':items})
         with self.db.connect() as c:
             for e in items:

@@ -7,6 +7,8 @@ USER_AGENT = 'sorawatcher/AnimeService/2.0 (personal anime tracker)'
 
 
 class BangumiError(RuntimeError):
+    safe_message = True  # fixed project texts and status codes only
+
     def __init__(self, message, status=0, retry_after=0):
         super().__init__(message)
         self.status = status

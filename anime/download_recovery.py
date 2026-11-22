@@ -3,7 +3,7 @@ import json,re,time,shutil
 from pathlib import Path
 from .fidelity import fidelity_blocker
 from .releases import bdecode,validate_title,select_files
-from .net import safe_error
+from .net import safe_error,SubmissionUnconfirmed
 from .research_tasks import is_sample,sample_allowed
 
 UI_FAILURES=('computer use','computer-use','active request','screenshotid','helper','工具故障','工具不可用','枚举','激活超时')
@@ -88,6 +88,8 @@ def recover_downloads(engine,limit=4):
                 db.event('task:'+h,reason+'；保留原用途、文件选择及授权')
                 processed+=1
                 engine.dispatch(db.one('SELECT * FROM tasks WHERE hash=?',(h,)))
+        except SubmissionUnconfirmed:
+            continue  # the hand-off was sent and stays 'uncertain'; reconcile confirms it by hash
         except ValueError as error:
             # A bad manifest is local to this work item, not a downloader outage.
             # Keep its provider/intent and inspect the next safe item this round.

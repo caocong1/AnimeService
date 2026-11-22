@@ -9,7 +9,7 @@ from .source_blacklist import blacklist_blocker,KEY as BLACKLIST_KEY
 from .releases import bdecode,validate_title,select_files,Rejected
 from .source_review import family
 from .subtitles import Subtitles
-from .net import safe_error
+from .net import safe_error,SubmissionUnconfirmed
 from .diagnostics import record_event,record_subtitle_health
 from .native_indexes import candidate_mapping,clean_blocker,acquisition_priority
 from .viewing_workflow import (enabled as split_enabled,production_wanted,base_remaining,
@@ -197,6 +197,7 @@ class SubtitleStudio:
                 try:
                     before=self.db.one('SELECT count(*) n FROM subtitle_samples')['n'];self.queue(c)
                     count+=self.db.one('SELECT count(*) n FROM subtitle_samples')['n']>before
+                except SubmissionUnconfirmed:count+=1  # queued; reconcile confirms by hash
                 except Exception as ex:
                     self.db.set('subtitle_studio_discovery_'+str(c['id']),{'time':time.time(),'error':safe_error(ex)})
 
@@ -636,11 +637,18 @@ def register_subtitle_studio(app,engine):
             raise ValueError('每批须明确选择一到两个已登记候选')
         available={c['id']:c for c in studio.candidates(sid) if c['episode']==ep}
         if set(ids)-available.keys():raise ValueError('候选身份、季集、来源或授权不符')
-        for cid in dict.fromkeys(ids):
+        ids=list(dict.fromkeys(ids))
+        for n,cid in enumerate(ids):
             if (ep==1 and role=='clean_base'
                     and engine.source_review.policy(sid).get('mode')!='subtitle_only'):
                 engine.source_review.start(sid,[cid])
-            else:studio.queue(available[cid],role)
+                continue
+            try:studio.queue(available[cid],role)
+            except SubmissionUnconfirmed as e:
+                # Submitted and durably 'uncertain': the background confirms by hash and never adds again.
+                # Stop this batch conservatively; the caller may resend the rest after confirmation.
+                return JSONResponse({'ok':True,'show_id':sid,'episode':ep,'role':role,'pending_confirmation':True,
+                                     'candidate_id':cid,'not_processed':ids[n+1:],'message':str(e)},status_code=202)
         return {'ok':True,'show_id':sid,'episode':ep,'role':role}
     @app.get('/api/subtitle-studio')
     def overview():return studio.overview()

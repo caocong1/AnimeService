@@ -84,9 +84,10 @@ def site_backoff(db,source):
 
 
 def record_failure(db,source,error):
-    # A shared site outage must not stall every series in the sequential worker.
-    if isinstance(error,NetworkError):
-        db.set('general_site_backoff_'+source['kind'],{'next_attempt':time.time()+3600,'error':safe_error(error)})
+    # A shared site outage must not stall every series in the sequential worker. One feed's own
+    # error (bad feed, 404, HTML instead of RSS) keeps only that feed's backoff.
+    if isinstance(error,NetworkError) and error.site_wide:
+        db.set('general_site_backoff_'+source['kind'],{'next_attempt':time.time()+max(3600,error.retry_after or 0),'error':safe_error(error)})
 
 
 def parse_1337x(content,url):
