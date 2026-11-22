@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from .db import ROOT,STATES
 from .net import safe_error,NetworkError,RequestDeferred
-from .diagnostics import record_event
+from .diagnostics import record_event,report_loop_error,backoff
 from .qbit import Qbit
 from .download_policy import require_submission_ready,fallback_receipt,Refusal
 from .fidelity import fidelity_blocker
@@ -38,7 +38,7 @@ class Engine:
         default_library, self.incomplete = download_roots()
         self.library=Path(library or default_library);self.cache=db.path.parent/'torrents';self.cache.mkdir(exist_ok=True)
         self.wake=threading.Event();self.stop_event=threading.Event();self.cycle_lock=threading.Lock()
-        self.maintenance_lock=threading.Lock()
+        self.maintenance_lock=threading.Lock();self.cycle_errors_lock=threading.Lock()
         self.tracking_wake=threading.Event()
         from .thunder_bridge import ThunderBridge
         self.thunder=ThunderBridge(self)
@@ -129,14 +129,16 @@ class Engine:
         # ownership checks. No provider network call belongs on the click path.
 
     def tracking_loop(self):
+        failures=0
         while not self.stop_event.is_set():
             self.tracking_wake.clear()
             try:
                 for row in self.db.rows('SELECT show_id FROM tracking_requests ORDER BY show_id'):
                     if self.stop_event.is_set():return
                     with self.db.gate:self._apply_state(row['show_id'])
-            except Exception as error:record_event(self.db,'tracking',safe_error(error),'error',error=error)
-            self.tracking_wake.wait(5)
+                failures=0
+            except Exception as error:failures+=1;report_loop_error(self.db,'tracking',error)
+            self.tracking_wake.wait(backoff(failures,5))
 
     def hold(self,t):
         if t.get('provider')=='thunder':return self.thunder.hold(t)
@@ -201,13 +203,19 @@ class Engine:
     def step(self,name,action):
         """One scheduler step; its failure is recorded under cycle_errors and never takes the cycle or heartbeat down."""
         try:
-            action();errors=self.db.get('cycle_errors',{})
-            if name in errors:errors.pop(name);self.db.set('cycle_errors',errors)
+            action()
+            with self.cycle_errors_lock:  # several threads run steps; serialize the ledger's read-modify-write
+                errors=self.db.get('cycle_errors',{})
+                if name in errors:errors.pop(name);self.db.set('cycle_errors',errors)
         except Exception as e:
-            message=safe_error(e);errors=self.db.get('cycle_errors',{});prior=errors.get(name,{});same=prior.get('error')==message
-            errors[name]={'error':message,'count':prior.get('count',0)+1 if same else 1,'since':prior.get('since',time.time()) if same else time.time(),'last':time.time()}
-            self.db.set('cycle_errors',errors)
-            if errors[name]['count'] in EVENT_FAILURE_MARKS or errors[name]['count']%100==0:self.db.event('cycle:'+name,message,'error')
+            message=safe_error(e)
+            try:
+                with self.cycle_errors_lock:
+                    errors=self.db.get('cycle_errors',{});prior=errors.get(name,{});same=prior.get('error')==message
+                    errors[name]={'error':message,'count':prior.get('count',0)+1 if same else 1,'since':prior.get('since',time.time()) if same else time.time(),'last':time.time()}
+                    self.db.set('cycle_errors',errors)
+            except Exception:report_loop_error(self.db,'cycle:'+name,e);return  # the ledger is diagnostic; later steps still run
+            if errors[name]['count'] in EVENT_FAILURE_MARKS or errors[name]['count']%100==0:record_event(self.db,'cycle:'+name,message,'error',error=e)
     def inventory_matches(self,sid,mapping=None):
         p=self.db.path.parent/'inventory.json'
         if not p.exists():return []
@@ -586,22 +594,23 @@ class Engine:
             self.db.set('download_maintenance_at',time.time())
         finally:self.maintenance_lock.release()
     def maintain_loop(self):
-        while not self.stop_event.wait(30):
+        failures=0
+        while not self.stop_event.wait(backoff(failures,30)):
             try:
                 # Process recovery must still run while the main reconciliation
                 # holds maintenance_lock for a large history batch.
                 from .qbit_recovery import maintain_original
                 self.step('qbit.restore_original',lambda:maintain_original(self))
-                self.maintenance()
-            except Exception as error:record_event(self.db,'recovery',safe_error(error),'error',error=error)
+                self.maintenance();failures=0
+            except Exception as error:failures+=1;report_loop_error(self.db,'recovery',error)
     def run(self):
         record_event(self.db,'service','后台启动，立即查询下载器与订阅并补查历史')
         threading.Thread(target=self.maintain_loop,daemon=True,name='download-maintenance').start()
-        force=True
+        force=True;failures=0
         while not self.stop_event.is_set():
-            try:self.cycle(force)
-            except Exception as e:record_event(self.db,'service',safe_error(e),'error',error=e)
-            force=False;self.wake.wait(30);self.wake.clear()
+            try:self.cycle(force);failures=0
+            except Exception as e:failures+=1;report_loop_error(self.db,'service',e)
+            force=False;self.wake.wait(backoff(failures,30));self.wake.clear()
     def gaps(self,sid,*,snapshot=None):
         s=snapshot.shows[sid] if snapshot is not None else self.db.show(sid)
         active=self.db.show_eligible(s) if snapshot is not None else self.db.eligible(sid)

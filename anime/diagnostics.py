@@ -51,3 +51,20 @@ def record_subtitle_health(db, health, *, error=None):
         _recording_failed('kv:subtitle_studio_health', '字幕归档健康记录写入失败', error, recording_error)
         return False
     return True
+
+
+def report_loop_error(db, scope, error, level='error'):
+    """A background loop's failure report; it never raises, so the loop always reaches its wait."""
+    try:
+        return record_event(db, scope, safe_error(error), level, error=error)
+    except Exception:
+        try:
+            _LOG.error('loop_error_unrecorded scope=%s error=%s', scope, type(error).__name__)
+        except Exception:
+            pass
+        return False
+
+
+def backoff(failures, base, cap=300, after=2):
+    """Seconds a loop waits after `failures` consecutive failures: `base` for the first `after`, then doubling to `cap`."""
+    return base if failures <= after else min(cap, base * 2 ** min(failures - after, 10))
