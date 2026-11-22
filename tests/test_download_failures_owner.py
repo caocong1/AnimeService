@@ -4,17 +4,17 @@ import time
 from pathlib import Path
 from unittest.mock import Mock
 import pytest
-from test_reliability import setup
+from test_reliability import setup,encode,FakeSources
 from test_download_failures import intent_task,task_events
 from anime.download_policy import Refusal,THUNDER_PENDING
 
 
 def test_pending_manual_check_is_consumed_once_even_if_cycle_has_not_finished(setup):
     db,q,e,c=setup;h=intent_task(db,q,e,c);db.set('downloader_preference','thunder_first')
-    e.reconcile();db.set('check_requested',123)
+    e.reconcile();e.request_check()
     for _ in range(6):e.reconcile()
     assert db.get('task_failure_'+h)['attempts']==2 and q.adds==1
-    db.set('check_requested',124);e.reconcile()
+    e.request_check();e.reconcile()
     assert db.get('task_failure_'+h)['attempts']==3
 
 
@@ -54,7 +54,7 @@ def test_complete_cache_rechecks_policy_and_download_progress_immediately(setup)
     e.reconcile();assert q.files.call_count==0
     db.set('source_fidelity','original');e.reconcile();assert q.files.call_count==1
     q.tasks[h]['progress']=0.5;e.reconcile();assert q.files.call_count==2
-    db.set('check_requested',20)
+    e.request_check()
     for _ in range(4):e.reconcile()
     assert q.files.call_count==3
 
@@ -75,3 +75,56 @@ def test_candidate_backoff_reaches_six_hours(setup,monkeypatch):
     for _ in range(9):e.ingest(candidate)
     record=db.get('candidate_retry_'+str(candidate['id']))
     assert 21599<record['next']-time.time()<=21600
+
+
+def add_second_show(db,q,e):
+    """Show 43, configured like the fixture's show 42, with one synthetic task of its own."""
+    db.upsert_subject({'id':43,'name':'Other','total_episodes':12})
+    mapping={'aliases':['Other'],'season':1,'offset':0,'start':1,'end':12,'confirmed':True,'inventory_checked':True}
+    db.execute("UPDATE shows SET mapping=?,selected=1,state='watching',authorized=1 WHERE id=43",(json.dumps(mapping),))
+    cid=db.execute('INSERT INTO candidates(show_id,source_id,title,url,discovered) VALUES(43,1,?,?,?)',
+                   ('[Group] Other S01E01 [1080p][CHS]','https://mikanani.me/o.torrent',time.time()))
+    torrent=encode({b'announce':b'https://example.invalid/announce',b'info':{b'name':b'Other',b'piece length':16384,
+        b'pieces':b'y'*20,b'files':[{b'length':100,b'path':[b'Other S01E01.mkv']}]}})
+    before=set(q.tasks);original=e.sources;e.sources=FakeSources(torrent)
+    try:e.ingest(db.one('SELECT * FROM candidates WHERE id=?',(cid,)))
+    finally:e.sources=original
+    (h,)=set(q.tasks)-before
+    return h
+
+
+def test_tracking_click_retries_only_that_shows_cached_refusal(setup):
+    db,q,e,c=setup;h42=intent_task(db,q,e,c);h43=add_second_show(db,q,e)
+    db.execute("UPDATE tasks SET status='intent',acknowledged=0 WHERE hash=?",(h43,));q.tasks.pop(h43);q.fs.pop(h43)
+    adds=q.adds;db.set('downloader_preference','thunder_first')
+    attempts=lambda:(db.get('task_failure_'+h42)['attempts'],db.get('task_failure_'+h43)['attempts'])
+    for _ in range(3):e.reconcile()
+    assert attempts()==(1,1)
+    key=e.gate_key(db.one('SELECT * FROM tasks WHERE hash=?',(h42,)))
+    # A round trip leaves the gate inputs unchanged, so only the per-show check can lift the refusal.
+    e.state(42,'dropped');e.state(42,'watching')
+    assert e.gate_key(db.one('SELECT * FROM tasks WHERE hash=?',(h42,)))==key
+    for _ in range(3):e.reconcile()
+    assert attempts()==(2,1)
+    e.request_check()  # the global check still retries every show once
+    for _ in range(3):e.reconcile()
+    assert attempts()==(3,2) and q.adds==adds
+
+
+def test_tracking_click_reverifies_only_that_shows_completed_package(setup):
+    db,q,e,c=setup;e.ingest(c());h42=next(iter(q.tasks));h43=add_second_show(db,q,e)
+    for h in (h42,h43):
+        q.fs[h][0]['progress']=1
+        p=Path(q.tasks[h]['save_path'])/q.fs[h][0]['name'];p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'x'*100)
+    e.reconcile()
+    assert [db.one('SELECT status FROM tasks WHERE hash=?',(h,))['status'] for h in (h42,h43)]==['complete','complete']
+    calls=[];original=q.files
+    q.files=lambda h:(calls.append(h),original(h))[1]
+    for _ in range(3):e.reconcile()
+    assert calls==[]
+    e.state(42,'dropped');e.state(42,'watching')
+    for _ in range(3):e.reconcile()
+    assert calls==[h42]
+    e.request_check()
+    for _ in range(3):e.reconcile()
+    assert sorted(calls)==sorted([h42,h42,h43])
