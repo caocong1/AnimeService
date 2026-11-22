@@ -5,7 +5,7 @@ from pathlib import Path
 from .db import ROOT,STATES
 from .net import safe_error,NetworkError,RequestDeferred,SubmissionUnconfirmed
 from .diagnostics import record_event
-from .qbit import Qbit
+from .qbit import Qbit,QbitUnavailable
 from .download_policy import require_submission_ready,fallback_receipt,Refusal
 from .fidelity import fidelity_blocker
 from .research_tasks import is_sample,sample_episode,sample_table,sample_allowed
@@ -478,6 +478,11 @@ class Engine:
                         self.db.execute("UPDATE tasks SET status='review',error=?,updated=? WHERE hash=?",(message,time.time(),h))
                 elif message!=(t or {}).get('error'):self.db.execute('UPDATE tasks SET error=?,updated=? WHERE hash=?',(message,time.time(),h))
                 self.note_failure(h,t or {'hash':h,'show_id':sid,'title':'','status':'','selection':''},e,message)
+                if isinstance(e,QbitUnavailable) and (t or {}).get('provider')!='thunder':
+                    # qB went away mid-pass: this task records it once; the other qB tasks wait for the next
+                    # pass instead of each blocking on a timeout. Thunder tasks keep reconciling.
+                    qbit_available=False
+                    self.db.set('qbit_health',{'ok':False,'time':time.time(),'error':message})
     def cycle(self,force=False):
         if not self.cycle_lock.acquire(blocking=False):return
         try:
@@ -546,10 +551,18 @@ class Engine:
                 for done in (key,'airings_backoff'):
                     if self.db.get(done) is not None:self.db.execute('DELETE FROM kv WHERE key=?',(done,))
                 shared={}
+    def qbit_recently_down(self,window=90):
+        """qB is the downloader and a fresh probe found it unavailable; same rule as download_gaps."""
+        health=self.db.get('qbit_health',{})
+        return (self.db.get('downloader_preference','qbit')=='qbit' and health.get('ok') is False
+                and 0<=time.time()-health.get('time',0)<window)
     def ingest_show(self,sid):
         if self.db.review_wanted(sid) and self.source_review.policy(sid).get('mode')=='sampling':
             try:self.source_review.start(sid)
             except Exception as ex:self.db.event('source-review:'+str(sid),safe_error(ex),'warning')
+        # Do not fetch torrents from rate-limited sites only to fail on a downloader known to be down;
+        # candidates stay untouched and are tried again once qB answers.
+        if self.qbit_recently_down():return
         candidates=self.db.rows("SELECT * FROM candidates WHERE show_id=? AND status IN ('discovered','retry','source_wait') ORDER BY source_id,id DESC",(sid,))
         now=time.time()
         candidates=[c for c in candidates if c['status']!='retry' or self.db.get('candidate_retry_'+str(c['id']),{}).get('next',0)<=now]
