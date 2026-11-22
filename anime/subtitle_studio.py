@@ -9,8 +9,9 @@ from .source_blacklist import blacklist_blocker,KEY as BLACKLIST_KEY
 from .releases import bdecode,validate_title,select_files,Rejected
 from .source_review import family
 from .subtitles import Subtitles
-from .net import safe_error,SubmissionUnconfirmed
-from .diagnostics import record_event,record_subtitle_health
+from .net import safe_error,where,SubmissionUnconfirmed
+from .sources import EVENT_FAILURE_MARKS
+from .diagnostics import record_event,record_kv,record_subtitle_health
 from .native_indexes import candidate_mapping,clean_blocker,acquisition_priority
 from .viewing_workflow import (enabled as split_enabled,production_wanted,base_remaining,
                               require_base_slot,require_reference_slot,queue_snapshot,RESEARCH_MODES)
@@ -344,8 +345,11 @@ class SubtitleStudio:
                 for sidecar in same_video_sidecars(task,ep):
                     lang=sidecar['language']
                     if lang=='und':errors.append('sidecar '+str(sidecar['index'])+' language unverified');continue
-                    ids.extend(archive_text_source(archive,lab_core(),sid,season,ep,sidecar['path'],
+                    # A rejected sidecar is a fact about these bytes (its sha is in inventory_revision):
+                    # record it like an embedded track so the item is not retried until the input changes.
+                    try:ids.extend(archive_text_source(archive,lab_core(),sid,season,ep,sidecar['path'],
                         {**metadata,'track':100000+sidecar['index'],'language':lang,'origin':'original-sidecar'}))
+                    except ValueError as ex:errors.append(f"sidecar {sidecar['index']} {type(ex).__name__}: {str(ex)[:160]}")
         if item['fingerprint']!=lab_core().fingerprint(item['path'],item['size']):raise ValueError('字幕归档期间媒体发生变化')
         payload={'draft_ids':ids,'tracks':len(tracks),'errors':errors,'title':item['title'],'inventory_revision':item.get('inventory_revision')}
         self.db.execute('INSERT OR REPLACE INTO subtitle_studio_media VALUES(?,?,?,?,?,?)',
@@ -433,10 +437,25 @@ class SubtitleStudio:
                 for item in self.media():
                     if self.engine.stop_event.is_set():break
                     prior=self.db.one('SELECT payload FROM subtitle_studio_media WHERE fingerprint=?',(item['fingerprint'],))
-                    if prior and json.loads(prior['payload']).get('inventory_revision')==item['inventory_revision']:continue
-                    try:self.collect(item)
+                    prior=json.loads(prior['payload']) if prior else {}
+                    if prior.get('inventory_revision')==item['inventory_revision']:continue
+                    key_error='subtitle_studio_collect_error_'+item['fingerprint'];label=f"{item.get('show_id')} E{item.get('episode')} "
+                    failed=self.db.get(key_error) or {}
+                    retry=failed.get('revision')==item['inventory_revision']
+                    # A failed input waits out its backoff without taking one of this tick's slots.
+                    if retry and time.time()<failed.get('next',0):continue
+                    try:payload=self.collect(item)
                     except Exception as ex:
-                        record_event(self.db,'subtitle-studio',safe_error(ex),'warning',error=ex)
+                        message=label+(type(ex).__name__+'：字幕归档拒绝'+where(ex) if isinstance(ex,ValueError) else safe_error(ex))
+                        same=retry and failed.get('error')==message;n=failed.get('count',0)+1 if same else 1
+                        record_kv(self.db,key_error,{'revision':item['inventory_revision'],'error':message,'count':n,
+                            'since':failed.get('since') if same else time.time(),'next':time.time()+min(300*2**(n-1),6*3600)},error=ex)
+                        if n in EVENT_FAILURE_MARKS or n%100==0:record_event(self.db,'subtitle-studio',message,'warning',error=ex)
+                    else:
+                        if failed:self.db.execute('DELETE FROM kv WHERE key=?',(key_error,))
+                        errors=payload.get('errors') if isinstance(payload,dict) else None
+                        if errors and errors!=prior.get('errors'):
+                            record_event(self.db,'subtitle-studio',f'{label}字幕归档跳过 {len(errors)} 项输入，详见归档清单','warning')
                     count+=1
                     if count>=2:break
                 if self.db.get('subtitle_delivery_policy',{}).get('enabled'):

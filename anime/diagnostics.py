@@ -43,6 +43,16 @@ def record_event(db, scope, message, level='info', *, error=None):
     return True
 
 
+def record_kv(db, key, value, *, error=None):
+    """Attempt one diagnostic kv memo; a failed write must not stop the caller's loop."""
+    try:
+        db.set(key, value)
+    except Exception as recording_error:
+        _recording_failed('kv:' + key, str(value.get('error', '')), error, recording_error)
+        return False
+    return True
+
+
 def record_subtitle_health(db, health, *, error=None):
     """Only the archive's diagnostic health key may fail independently."""
     try:
