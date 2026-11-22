@@ -2,6 +2,7 @@ import contextlib, json, os, sqlite3, threading, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+WAL_LIMIT = 32*1024*1024  # bytes of WAL kept after a checkpoint; durability (synchronous=FULL) is unchanged
 STATES = {'wish','trial','watching','paused','dropped','completed'}
 DEFAULTS = {'poll_seconds':180,'resolution':'1080','subtitle':'any_zh','groups':[], 'qbit_auto_restore_enabled':False,
             'dandan_exe':str(Path.home()/'AppData/Roaming/弹弹play/dandanplay.exe'),
@@ -128,6 +129,7 @@ class Store:
         c=sqlite3.connect(self.path,timeout=timeout); c.row_factory=sqlite3.Row
         try:
             c.execute('PRAGMA foreign_keys=ON');c.execute('PRAGMA synchronous=FULL')
+            c.execute(f'PRAGMA journal_size_limit={WAL_LIMIT}')  # a reset WAL shrinks back instead of keeping its peak size
             yield c;c.commit()
         except Exception:
             c.rollback();raise
