@@ -15,12 +15,13 @@ def deployment_settings(monkeypatch):
 
 
 def test_health_is_cheap_and_reports_liveness_and_version(tmp_path):
-    db=Store(tmp_path/'data/test.db');app=create_app(db,Mock(),start_worker=False)
+    db=Store(tmp_path/'data/test.db');app=create_app(db,Mock(library=tmp_path),start_worker=False)
     client=TestClient(app,base_url='http://localhost:4871')
     h=client.get('/api/health').json()
     assert h['service']=='AnimeService' and h['ok'] is False and h['heartbeat']=={'phase':None,'age':None}
     assert h['code_version'] and h['pid']>0 and h['uptime']>=0 and h['worker_thread'] is False
     assert not {'tasks','sources','events','watch_counts'}&set(h)
+    assert h['download_storage']['library']==str(tmp_path) and h['download_storage']['free_gib']>0
     db.set('heartbeat',{'time':time.time()-5,'phase':'idle'});db.set('qbit_health',{'ok':True});db.set('download_maintenance_at',time.time()-7)
     h=client.get('/api/health').json()
     assert h['ok'] is True and h['heartbeat']['phase']=='idle' and 4<=h['heartbeat']['age']<=6 and h['qbit'] is True and 6<=h['maintenance_age']<=8
