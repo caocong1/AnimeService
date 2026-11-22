@@ -15,10 +15,10 @@ function setup() {
   writerLabel:()=> 'Synthetic',viewingSession:'synthetic-session-1234',writerKey:async()=>null,withTimeout:p=>p,
   $:name=>nodes[name]??(nodes[name]={hidden:true,textContent:''}),renderWriter(){},
   audioSwitching:false,played:true,art:{duration:100,currentTime:10,video:{paused:false}},
-  finishedEndpoint:null,moved:false,lastPosition:0,legacyFenced:false,id:KEY,progressQueue:Promise.resolve(),sequence:0,
+  finishedEndpoint:null,moved:false,lastPosition:0,legacyFenced:false,progressUnsaved:false,id:KEY,progressQueue:Promise.resolve(),sequence:0,
   tracking(){},console,Date,Number,JSON,Promise,
   fetch:async()=>{fetches++;return {status:200,ok:true,json:async()=>({})};}});
- vm.runInContext(body('openWriter')+'\n'+body('saveProgress'),context);
+ vm.runInContext('var post=(url,body,o)=>fetch(url,{method:\'POST\',keepalive:o?.keepalive===true,body:JSON.stringify(body)});\n'+body('openWriter')+'\n'+body('saveProgress'),context);
  return {context,nodes,get fetches(){return fetches;}};
 }
 test('v2 choice is sticky during lookup and after failed version verification: no legacy writes',async()=>{

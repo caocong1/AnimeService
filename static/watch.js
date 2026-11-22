@@ -7,17 +7,14 @@
   if (!id) return location.replace('/library');
   const finishedEndpoint = releaseId ? '/api/finished-viewing/' + encodeURIComponent(releaseId) : null;
   let releases = [], sourceBoard = null, sequence = 0, progressQueue = Promise.resolve(), moved = false;
-  let sourceOnly = false;
+  let sourceOnly = false, progressUnsaved = false;
   let alignmentSites = ['bilibili'];
   const tracking = text => { $('#tracking-status').textContent = text; };
   // Paused/background pages also keep the old media/build alive during publication.
   const viewingSession = crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(24)), x => x.toString(16).padStart(2, '0')).join('');
   let viewingLeaseTimer = null;
-  const viewingLease = (closed = false) => media?.viewing_session_supported ? fetch(finishedEndpoint ? finishedEndpoint + '/viewing-session' : `/api/web/media/${id}/viewing-session`, {
-    method: 'POST', keepalive: closed,
-    headers: { 'Content-Type': 'application/json', 'X-Anime-Token': App.token },
-    body: JSON.stringify({ session: viewingSession, closed }),
-  }).catch(() => {}) : Promise.resolve();
+  const viewingLease = (closed = false) => media?.viewing_session_supported ? post(finishedEndpoint ? finishedEndpoint + '/viewing-session' : `/api/web/media/${id}/viewing-session`,
+    { session: viewingSession, closed }, { keepalive: closed }).catch(() => {}) : Promise.resolve();
   window.addEventListener('pagehide', () => { clearInterval(viewingLeaseTimer); viewingLease(true); });
   window.addEventListener('pageshow', () => {
     clearInterval(viewingLeaseTimer);
@@ -289,7 +286,7 @@
       const run = async () => {
         if (legacyFenced) return;
         try {
-          const response = await fetch(finishedEndpoint + '/progress', {method:'POST',keepalive,headers:{'Content-Type':'application/json','X-Anime-Token':App.token},body:JSON.stringify(body)});
+          const response = await post(finishedEndpoint + '/progress', body, {keepalive});
           if (response.status === 409 && ['session_required','fenced'].includes((await response.json().catch(() => null))?.reason)) { legacyFenced = true; throw Error('进度未保存：需要新的播放会话或版本支持'); }
           if (!response.ok) throw Error('观看记录未同步，请稍后重试');
           tracking('续播进度已同步 · ' + clock(body.position));
@@ -301,14 +298,12 @@
     const delta = art.currentTime - lastPosition, playing = !art.video.paused && delta > 0 && delta < 35;
     lastPosition = art.currentTime;
     const body = { position: art.currentTime, duration: art.duration, playing, session: viewingSession, sequence: ++sequence };
-    const send = () => legacyFenced ? Promise.resolve() : fetch(`/api/web/media/${id}/progress`, {
-      method: 'POST', keepalive,
-      headers: { 'Content-Type': 'application/json', 'X-Anime-Token': App.token },
-      body: JSON.stringify(body),
-    }).then(async response => {
+    const unsaved = detail => { console.warn('进度未保存', detail); progressUnsaved = true; tracking('进度未保存'); };
+    const send = () => legacyFenced ? Promise.resolve() : post(`/api/web/media/${id}/progress`, body, {keepalive}).then(async response => {
       if (response.status === 409 && ['session_required','fenced'].includes((await response.json().catch(() => null))?.reason)) { legacyFenced = true; tracking('进度未保存：需要新的播放会话或版本支持'); }
-      else if (!response.ok) console.warn('进度未保存', response.status);
-    }).catch(e => console.warn('进度未保存', e.message));
+      else if (!response.ok) unsaved(response.status);
+      else if (progressUnsaved) { progressUnsaved = false; tracking(''); }  // a later save went through
+    }).catch(e => unsaved(e.message));
     if (keepalive) return send();
     progressQueue = progressQueue.then(send); return progressQueue;
   }
