@@ -1,4 +1,4 @@
-import contextlib, json, os, sqlite3, threading, time
+import contextlib, json, logging, os, sqlite3, threading, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +16,31 @@ def subject_episode_total(item):
             if field.get('key') in ('话数','話数') and str(field.get('value','')).isdigit():
                 total=int(field['value']);break
     return total or item.get('total_episodes') or 0
+
+# Process-local tally of SQLite storage failures (disk, space, corruption); /api/health reads it without I/O.
+DB_ERRORS={'count':0,'time':None,'code':None}
+STORAGE_ERRORS=('SQLITE_IOERR','SQLITE_FULL','SQLITE_CANTOPEN','SQLITE_CORRUPT','SQLITE_NOTADB','SQLITE_PROTOCOL')
+# Retried only while opening, before any caller statement ran. Never BUSY/LOCKED: the busy timeout already waited.
+RETRY_OPEN=('SQLITE_IOERR','SQLITE_CANTOPEN','SQLITE_PROTOCOL')
+
+def note_db_error(error):
+    code=getattr(error,'sqlite_errorname','') or ''
+    if isinstance(error,sqlite3.Error) and code.startswith(STORAGE_ERRORS):DB_ERRORS.update(count=DB_ERRORS['count']+1,time=time.time(),code=code)
+
+def _prepare(c):
+    c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');c.execute('PRAGMA synchronous=FULL')
+
+def open_connection(path,timeout,prepare,*,uri=False):
+    """Open and prepare one connection; a storage error before the caller's first statement is retried after 50 and 200 ms."""
+    for delay in (0.05,0.2,None):
+        c=None
+        try:
+            c=sqlite3.connect(path,timeout=timeout,uri=uri);prepare(c);return c
+        except sqlite3.Error as e:
+            if c is not None:c.close()
+            note_db_error(e);code=getattr(e,'sqlite_errorname','') or ''
+            if delay is None or not code.startswith(RETRY_OPEN):raise
+            logging.getLogger(__name__).warning('sqlite_open_retry code=%s',code);time.sleep(delay)
 
 class Store:
     def __init__(self, path=None):
@@ -125,12 +150,11 @@ class Store:
                 END;''')
     @contextlib.contextmanager
     def connect(self, *, timeout=20):
-        c=sqlite3.connect(self.path,timeout=timeout); c.row_factory=sqlite3.Row
+        c=open_connection(self.path,timeout,_prepare)
         try:
-            c.execute('PRAGMA foreign_keys=ON');c.execute('PRAGMA synchronous=FULL')
             yield c;c.commit()
-        except Exception:
-            c.rollback();raise
+        except Exception as e:
+            note_db_error(e);c.rollback();raise
         finally:c.close()
     def rows(self,sql,args=()):
         with self.connect() as c:return [dict(x) for x in c.execute(sql,args).fetchall()]

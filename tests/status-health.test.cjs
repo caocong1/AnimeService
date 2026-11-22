@@ -82,3 +82,13 @@ test('healthSummary renders the cheap /api/health answer with the same prioritie
   assert.equal(summary({ heartbeat: { age: 5 }, problems: { blocker: '迅雷优先', error: { scope: 'x' } } }).text, '下载受阻');
   assert.match(summary({ heartbeat: { age: 5 }, problems: {} }).title, /^心跳 /);
 });
+
+test('healthSummary warns about a full data volume after the download volume', () => {
+  const summary = (h) => context.healthSummary(h, 10000);
+  const low = { free_gib: 8.5, reserve_gib: 10, below_reserve: true };
+  const data = summary({ heartbeat: { age: 5 }, problems: { reviews: 2 }, data_storage: low });
+  assert.equal(data.state, 'warn'); assert.equal(data.text, '数据盘空间不足'); assert.match(data.title, /8\.5 GiB.*10 GiB/);
+  assert.equal(summary({ heartbeat: { age: 5 }, problems: {}, data_storage: low, download_storage: low }).text, '下载盘空间不足');
+  assert.equal(summary({ heartbeat: { age: 5 }, problems: {}, data_storage: { ...low, below_reserve: false } }).state, 'ok');
+  assert.equal(summary({ heartbeat: { age: 300 }, problems: {}, data_storage: low }).state, 'down');
+});

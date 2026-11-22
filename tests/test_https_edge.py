@@ -189,3 +189,48 @@ def test_child_launch_failure_is_private_and_does_not_stop_the_listener(listener
     else:
         assert health['mapping'] == 'mapping_ready' and health['renew_ok'] is False
     never_persisted(listener.root)
+
+
+def owned_spawn(listener, monkeypatch, failures):
+    """No pid on record: the loop starts and owns a fake nginx; the first `failures` launches raise."""
+    (listener.root / 'data/edge.pid').unlink()
+    spawned = []
+    def popen(args, **kw):
+        spawned.append(list(args))
+        if len(spawned) <= failures:
+            raise OSError(PRIVATE_TOKEN)
+        return SimpleNamespace(pid=4343, poll=lambda: None)
+    monkeypatch.setattr(edge.subprocess, 'Popen', popen)
+    return spawned
+
+
+def test_locked_health_file_neither_kills_the_loop_nor_quits_the_owned_listener(listener, monkeypatch):
+    spawned = owned_spawn(listener, monkeypatch, 0)
+    health_file = listener.root / 'data/https-health.json'
+    original, locked = Path.write_text, []
+    def write_text(self, *a, **k):
+        if self == health_file and not locked:
+            locked.append(self)
+            raise PermissionError(PRIVATE_TOKEN)
+        return original(self, *a, **k)
+    monkeypatch.setattr(Path, 'write_text', write_text)
+    stop = Stop(listener.clock, iterations=3, advance=2000)
+    quits_before_stop = []
+    wait = stop.wait
+    stop.wait = lambda seconds: quits_before_stop.append(len([c for c in listener.calls if c[0][-2:] == ['-s', 'quit']])) or wait(seconds)
+    edge.maintain_https(stop)
+    assert stop.waits == [20, 20, 20] and quits_before_stop == [0, 0, 0] and len(spawned) == 1
+    assert listener.health()['mapping'] == 'mapping_ready' and listener.health()['renewal'] == 'ok'
+    assert listener.calls[-1][0][-2:] == ['-s', 'quit']  # only the real shutdown quits it
+    never_persisted(listener.root)
+
+
+def test_failed_listener_launch_is_retried_next_iteration_and_records_only_the_type(listener, monkeypatch):
+    spawned = owned_spawn(listener, monkeypatch, 1)
+    stop = Stop(listener.clock, iterations=2)
+    edge.maintain_https(stop)
+    assert stop.waits == [20, 20] and len(spawned) == 2
+    assert (listener.root / 'data/edge.pid').read_text() == '4343'
+    health = listener.health()
+    assert health['last_error']['type'] == 'OSError' and health['mapping'] == 'mapping_ready'
+    never_persisted(listener.root)

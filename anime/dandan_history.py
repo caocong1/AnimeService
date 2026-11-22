@@ -166,7 +166,12 @@ class DandanHistory:
         finally:self.lock.release()
 
     def run(self,stop):
-        while not stop.is_set():self.sync();stop.wait(60)
+        from .diagnostics import report_loop_error,backoff
+        failures=0
+        while not stop.is_set():
+            try:self.sync();failures=0
+            except Exception as error:failures+=1;report_loop_error(self.db,'dandan-history',error)  # e.g. the health write itself failed
+            stop.wait(backoff(failures,60))
 
     def link(self, media_id, sid, episode, data=None):
         """Persist an exact watched-history association, including unlisted files.
