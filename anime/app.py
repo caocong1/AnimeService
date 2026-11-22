@@ -1,10 +1,9 @@
-import contextlib,datetime,ipaddress,json,os,secrets,subprocess,threading,time
+import asyncio,contextlib,datetime,ipaddress,json,os,secrets,subprocess,threading,time
 from pathlib import Path
 from urllib.parse import urlencode,urlparse
 import requests
 from fastapi import FastAPI,Request,HTTPException
 from fastapi.responses import FileResponse,JSONResponse,RedirectResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from .db import Store,ROOT,DEFAULTS
 from .engine import Engine
@@ -16,6 +15,7 @@ from .releases import episodes_of,Rejected,season_of,validate_title
 from .deployment import load as load_deployment
 from .board import episode_board
 from .runtime import health as runtime_health
+from .media_response import MediaStaticFiles
 
 def catalog_quarters(today=None):
     """The quarter that opens within three weeks and the one before it, oldest first."""
@@ -57,6 +57,8 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
     @contextlib.asynccontextmanager
     async def lifespan(app):
         lifetime=contextlib.ExitStack()
+        from .loop_hygiene import install
+        install(asyncio.get_running_loop())  # Windows Proactor client-reset cleanup; no-op elsewhere
         if start_worker:
             # An idle connection keeps WAL open between short-lived requests.
             # Finish the statement immediately so no read snapshot pins the WAL.
@@ -183,7 +185,7 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
     def season_page():return FileResponse(ROOT/'static/season.html')
     @app.get('/library')
     def library_page():return FileResponse(ROOT/'static/library.html')
-    app.mount('/static',StaticFiles(directory=ROOT/'static'),name='static')
+    app.mount('/static',MediaStaticFiles(directory=ROOT/'static'),name='static')
     @app.get('/api/bootstrap')
     def bootstrap(request:Request):
         with db.connect() as connection:

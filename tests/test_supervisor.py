@@ -126,3 +126,11 @@ def test_supervisor_survives_failed_launches_and_a_locked_log(tmp_path,monkeypat
     assert 'anime.run pid=4242 stopped' in text
     directory=tmp_path/'locked.log';directory.mkdir()
     supervisor.log('hello',path=directory)  # opening a directory raises; the log write is best-effort
+
+
+def test_start_marker_separates_children_in_process_log(tmp_path):
+    path=tmp_path/'process.log'
+    with path.open('a',encoding='utf-8') as out:
+        out.write('previous child output\n');supervisor.start_marker(out)
+    last=path.read_text(encoding='utf-8').splitlines()[-1]
+    assert last.endswith(f' --- start anime.run (supervisor pid={supervisor.os.getpid()}) ---') and last[:4].isdigit()

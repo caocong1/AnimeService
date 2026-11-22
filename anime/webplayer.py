@@ -1,11 +1,13 @@
 """Read-only local media streaming and an isolated danmu-api adapter."""
-import hashlib,json,math,subprocess,time,threading,shutil,secrets,re
+import hashlib,json,math,os,subprocess,time,threading,shutil,secrets,re
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 import requests
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from .db import ROOT
+from .media_response import MediaFileResponse
+from .log_files import bound_log
 from .subtitles import Subtitles
 from .audio_tracks import AudioTracks
 from .browser_media import BrowserMedia
@@ -31,8 +33,12 @@ def maintain_danmu(stop):
         except (OSError,ValueError,psutil.Error):alive=False
         if not alive:
             try:
-                with (ROOT/'logs/danmu-start.log').open('ab') as log:
-                    child=subprocess.Popen([node,'danmu_api/server.js'],cwd=repo,stdout=log,stderr=log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                # The adapter's stdout is per-request info chatter (over 1 GB); keep warnings,
+                # errors and crash traces on stderr, and bound the file at each spawn.
+                log_path=ROOT/'logs/danmu-start.log';bound_log(log_path)
+                env={**os.environ};env.setdefault('LOG_LEVEL','warn')
+                with log_path.open('ab') as log:
+                    child=subprocess.Popen([node,'danmu_api/server.js'],cwd=repo,stdout=subprocess.DEVNULL,stderr=log,env=env,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 pidfile.write_text(str(child.pid))
             except OSError:pass
         stop.wait(30)
@@ -324,7 +330,7 @@ def register_webplayer(app,db):
     @app.get('/api/web/media/{key}/stream')
     def stream(key:str):
         r=player.item(key)
-        return FileResponse(player.browser_media.file(r),media_type='video/mp4' if Path(r['path']).suffix.lower()=='.mp4' else 'video/x-matroska',headers={'Cross-Origin-Resource-Policy':'same-origin'})
+        return MediaFileResponse(player.browser_media.file(r),media_type='video/mp4' if Path(r['path']).suffix.lower()=='.mp4' else 'video/x-matroska',headers={'Cross-Origin-Resource-Policy':'same-origin'})
     @app.get('/api/web/media/{key}/audio-tracks')
     def audio_tracks(key:str):
         d=player.audio.probe(player.item(key))
@@ -340,7 +346,7 @@ def register_webplayer(app,db):
         return player.audio.status(player.item(key),index)
     @app.get('/api/web/media/{key}/audio-tracks/{index}/stream')
     def audio_stream(key:str,index:int):
-        return FileResponse(player.audio.file(player.item(key),index),media_type='video/mp4',
+        return MediaFileResponse(player.audio.file(player.item(key),index),media_type='video/mp4',
                             headers={'Cross-Origin-Resource-Policy':'same-origin'})
     @app.post('/api/web/media/{key}/progress')
     def progress(key:str,p:dict):

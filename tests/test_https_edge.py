@@ -234,3 +234,15 @@ def test_failed_listener_launch_is_retried_next_iteration_and_records_only_the_t
     health = listener.health()
     assert health['last_error']['type'] == 'OSError' and health['mapping'] == 'mapping_ready'
     never_persisted(listener.root)
+
+
+def test_oversized_process_log_is_bounded_before_a_spawn(listener, monkeypatch):
+    (listener.root / 'data/edge.pid').unlink()
+    log = listener.root / 'logs/https-process.log'
+    with log.open('wb') as f:
+        f.truncate(9 * 1024 * 1024); f.seek(-5, os.SEEK_END); f.write(b'TAIL\n')
+    monkeypatch.setattr(edge.subprocess, 'Popen', lambda args, **kw: SimpleNamespace(pid=4343, poll=lambda: None))
+    edge.maintain_https(Stop(listener.clock))
+    previous = log.with_name('https-process.log.1')
+    assert previous.stat().st_size == 1024 * 1024 and previous.read_bytes().endswith(b'TAIL\n')
+    assert log.stat().st_size == 0  # reopened for the new listener

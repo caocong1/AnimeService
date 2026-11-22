@@ -2,6 +2,7 @@ import contextlib, json, logging, os, sqlite3, threading, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+WAL_LIMIT = 32*1024*1024  # bytes of WAL kept after a checkpoint; durability (synchronous=FULL) is unchanged
 STATES = {'wish','trial','watching','paused','dropped','completed'}
 DEFAULTS = {'poll_seconds':180,'resolution':'1080','subtitle':'any_zh','groups':[], 'qbit_auto_restore_enabled':False,
             'dandan_exe':str(Path.home()/'AppData/Roaming/弹弹play/dandanplay.exe'),
@@ -29,6 +30,7 @@ def note_db_error(error):
 
 def _prepare(c):
     c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');c.execute('PRAGMA synchronous=FULL')
+    c.execute(f'PRAGMA journal_size_limit={WAL_LIMIT}')  # a reset WAL shrinks back instead of keeping its peak size
 
 def open_connection(path,timeout,prepare,*,uri=False):
     """Open and prepare one connection; a storage error before the caller's first statement is retried after 50 and 200 ms."""
