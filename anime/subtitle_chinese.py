@@ -7,9 +7,11 @@ import hashlib
 from contextlib import contextmanager
 from functools import lru_cache
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 import time
 
 from .download_receipts import pending_receipt
@@ -379,18 +381,39 @@ def archive_text_source(archive, core, sid, season, ep, path, metadata):
         body = 'WEBVTT\n\n' + '\n\n'.join(f'{core.vtt_time(c["start_ms"])} --> {core.vtt_time(c["end_ms"])}\n{c["text"]}' for c in selected) + '\n'
         dest = directory / (language + '.vtt')
         encoded = body.encode('utf-8')
-        if dest.exists() and dest.read_bytes() != encoded:
-            raise ValueError('Immutable separated source changed')
-        if not dest.exists():
-            dest.write_bytes(encoded)
-        ids.append(archive.add_base(sid, season, ep, dest, {**metadata, 'language': language,
+        derived = {**metadata, 'language': language,
             'track': str(metadata.get('track', 'source')) + '-' + language,
             'origin': 'explicit-ass-language-style', 'source_draft_id': ids[0],
             'source_raw_sha256': digest(raw), 'source_cue_ids': [c['id'] for c in selected],
             'source_styles': sorted({c['style'] for c in selected}),
             'extraction_method': 'explicit_CN_JP_ASS_style_preserve_text_and_timestamps',
-            'target_matching_status': metadata.get('target_matching_status', 'pending')}))
+            'target_matching_status': metadata.get('target_matching_status', 'pending')}
+        if dest.exists() and dest.read_bytes() != encoded:
+            # A parser change re-derives the same raw differently. The derivation
+            # already registered for this source stays canonical: reuse its id,
+            # never rewrite its file and never register a second derived draft.
+            kept = [b['id'] for b in archive.bases(sid, season, ep)
+                    if b['language'] == language and b['metadata'].get('source_raw_sha256') == derived['source_raw_sha256']
+                    and all(b['metadata'].get(k) == derived.get(k) for k in ('source_key', 'track', 'media_fingerprint'))]
+            if kept:
+                ids.append(kept[0])
+                continue
+            # Never registered for this source (torn or another episode's): keep it, stage beside it.
+            dest = directory / f'{language}-{digest(encoded)[:16]}.vtt'
+        if not dest.exists():
+            _write_new(dest, encoded)
+        ids.append(archive.add_base(sid, season, ep, dest, derived))
     return ids
+
+
+def _write_new(dest, data):
+    """Publish a staging file whole (temp + replace) so a crash cannot leave a torn derivation."""
+    temp = dest.with_name(f'.{dest.name}.{os.getpid()}.{threading.get_ident()}.tmp')
+    try:
+        temp.write_bytes(data)
+        os.replace(temp, dest)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def _embedded_track_language(track):
