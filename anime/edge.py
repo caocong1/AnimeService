@@ -2,6 +2,7 @@
 import json,os,subprocess,time,psutil
 from pathlib import Path
 from .db import ROOT
+from .log_files import bound_log
 from .deployment import load as load_deployment
 
 # The generic maintenance scripts print one fixed outcome token and nothing private; the
@@ -40,6 +41,7 @@ def maintain_https(stop):
                     alive=existing.is_running() and existing.exe().lower()==str(binary).lower() and str(config.parent).lower() in existing.cwd().lower()
                 except (OSError,ValueError,psutil.Error):alive=False
             if not alive:
+                bound_log(ROOT/'logs/https-process.log')
                 with (ROOT/'logs/https-process.log').open('ab') as log:
                     proc=subprocess.Popen(args,cwd=config.parent,stdout=log,stderr=log,creationflags=flags)
                 (ROOT/'data/edge.pid').write_text(str(proc.pid))

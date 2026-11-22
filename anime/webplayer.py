@@ -1,5 +1,5 @@
 """Read-only local media streaming and an isolated danmu-api adapter."""
-import hashlib,json,math,subprocess,time,threading,shutil,secrets,re
+import hashlib,json,math,os,subprocess,time,threading,shutil,secrets,re
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 import requests
@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from .db import ROOT
 from .media_response import MediaFileResponse
+from .log_files import bound_log
 from .subtitles import Subtitles
 from .audio_tracks import AudioTracks
 from .browser_media import BrowserMedia
@@ -32,8 +33,12 @@ def maintain_danmu(stop):
         except (OSError,ValueError,psutil.Error):alive=False
         if not alive:
             try:
-                with (ROOT/'logs/danmu-start.log').open('ab') as log:
-                    child=subprocess.Popen([node,'danmu_api/server.js'],cwd=repo,stdout=log,stderr=log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                # The adapter's stdout is per-request info chatter (over 1 GB); keep warnings,
+                # errors and crash traces on stderr, and bound the file at each spawn.
+                log_path=ROOT/'logs/danmu-start.log';bound_log(log_path)
+                env={**os.environ};env.setdefault('LOG_LEVEL','warn')
+                with log_path.open('ab') as log:
+                    child=subprocess.Popen([node,'danmu_api/server.js'],cwd=repo,stdout=subprocess.DEVNULL,stderr=log,env=env,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 pidfile.write_text(str(child.pid))
             except OSError:pass
         stop.wait(30)
