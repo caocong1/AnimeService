@@ -85,3 +85,44 @@ def test_backoff_and_log_rotation(tmp_path):
     assert not path.exists() and (tmp_path/'supervisor.log.1').read_bytes()==b'x'*11
     supervisor.log('hello',path=path)
     assert path.read_text(encoding='utf-8').endswith(' hello\n')
+
+
+def test_probe_reports_a_dead_worker_only_when_health_says_so():
+    assert supervisor.probe('http://x',opener_for({'health':{'service':'AnimeService','worker_thread':False}}))=='stalled'
+    assert supervisor.probe('http://x',opener_for({'health':{'service':'AnimeService','worker_thread':True}}))=='ours'
+    old=urllib.error.HTTPError('u',404,'nf',{},None)  # /api/status carries no worker_thread
+    assert supervisor.probe('http://x',opener_for({'health':old,'status':{'service':'AnimeService'}}))=='ours'
+
+
+def test_dead_worker_after_the_startup_grace_counts_as_hung(tmp_path):
+    clock=Clock();child=Child();child.clock=clock;terminate=Mock()
+    outcome=supervisor.watch(child,'http://x',stop=tmp_path/'stop.request',prober=lambda base:'stalled',sleep=clock.sleep,
+                             now=clock.time,terminate=terminate,worker_grace=180,worker=True)
+    # Probes inside the grace are healthy; six consecutive stalled probes after it are a hang.
+    assert outcome=='hung' and terminate.call_count==1 and 180+5*30<=clock.now-1000<=180+7*30
+
+
+def test_dead_worker_is_tolerated_when_the_worker_is_disabled_or_recovers(tmp_path):
+    clock=Clock();child=Child(exit_at=1000+3600);child.clock=clock;terminate=Mock()
+    assert supervisor.watch(child,'http://x',stop=tmp_path/'stop.request',prober=lambda base:'stalled',sleep=clock.sleep,
+                            now=clock.time,terminate=terminate,worker=False)=='exited'
+    clock=Clock();child=Child(exit_at=1000+3600);child.clock=clock
+    probes=iter((['stalled']*5+['ours'])*100)
+    assert supervisor.watch(child,'http://x',stop=tmp_path/'stop.request',prober=lambda base:next(probes),sleep=clock.sleep,
+                            now=clock.time,terminate=terminate,worker_grace=0,worker=True)=='exited'
+    assert terminate.call_count==0
+
+
+def test_supervisor_survives_failed_launches_and_a_locked_log(tmp_path,monkeypatch):
+    monkeypatch.setattr(supervisor,'ROOT',tmp_path);monkeypatch.setattr(supervisor,'STOP',tmp_path/'data/stop.request')
+    monkeypatch.setattr(supervisor,'acquire_mutex',lambda:1);monkeypatch.setattr(supervisor,'probe',lambda base:'down')
+    monkeypatch.setattr(supervisor.time,'sleep',lambda seconds:None)
+    child=Mock(pid=4242,returncode=0)
+    popen=Mock(side_effect=[FileNotFoundError('pythonw.exe'),FileNotFoundError('pythonw.exe'),child])
+    monkeypatch.setattr(supervisor.subprocess,'Popen',popen);monkeypatch.setattr(supervisor,'watch',lambda process,base:'stopped')
+    assert supervisor.main()==0 and popen.call_count==3
+    text=(tmp_path/'logs/supervisor.log').read_text(encoding='utf-8')
+    assert text.count('supervisor iteration failed FileNotFoundError')==2 and 'retry in 5s' in text and 'retry in 10s' in text
+    assert 'anime.run pid=4242 stopped' in text
+    directory=tmp_path/'locked.log';directory.mkdir()
+    supervisor.log('hello',path=directory)  # opening a directory raises; the log write is best-effort

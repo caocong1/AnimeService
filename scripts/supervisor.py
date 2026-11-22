@@ -11,6 +11,7 @@ ROOT=Path(__file__).resolve().parents[1]
 STOP=ROOT/'data/stop.request'
 PROBE_INTERVAL=30   # seconds between health probes while the child runs
 PROBE_FAILURES=6    # consecutive failed probes before the child counts as hung (about three minutes)
+WORKER_GRACE=180    # seconds after a launch during which a not-yet-running background worker is not a failure
 GRACE=30            # seconds the child gets to leave on its own after stop.request
 HEALTHY_RUN=600     # a child alive this long resets the restart backoff
 LOG_LIMIT=5*1024*1024
@@ -25,12 +26,14 @@ def authority(root=ROOT):
 
 
 def probe(base,opener=None):
-    """'ours' when AnimeService answers, 'other' when something else holds the port, 'down' otherwise."""
+    """'ours' when AnimeService answers, 'stalled' when it answers with a dead background worker,
+    'other' when something else holds the port, 'down' otherwise."""
     opener=opener or urllib.request.build_opener(urllib.request.ProxyHandler({})).open
     for path in ('/api/health','/api/status'):  # local health does not depend on outbound proxies
         try:
             with opener(base+path,timeout=3) as r:state=json.load(r)
-            return 'ours' if isinstance(state,dict) and state.get('service')=='AnimeService' else 'other'
+            if not isinstance(state,dict) or state.get('service')!='AnimeService':return 'other'
+            return 'stalled' if state.get('worker_thread') is False else 'ours'
         except urllib.error.HTTPError as error:
             if error.code!=404:return 'other'
         except (urllib.error.URLError,OSError,ValueError):return 'down'
@@ -52,13 +55,19 @@ def rotate(path,limit=LOG_LIMIT):
 
 def log(message,path=None):
     path=path or ROOT/'logs/supervisor.log';rotate(path)
-    with path.open('a',encoding='utf-8') as f:f.write(time.strftime('%Y-%m-%d %H:%M:%S')+' '+message+'\n')
+    try:
+        with path.open('a',encoding='utf-8') as f:f.write(time.strftime('%Y-%m-%d %H:%M:%S')+' '+message+'\n')
+    except OSError:pass  # a locked log must not end the only watchdog
 
 
 def watch(process,base,stop=STOP,prober=probe,sleep=time.sleep,now=time.time,terminate=None,
-          interval=PROBE_INTERVAL,failures=PROBE_FAILURES,grace=GRACE):
-    """Follow one child until it exits, hangs or is asked to stop; returns 'exited', 'hung' or 'stopped'."""
+          interval=PROBE_INTERVAL,failures=PROBE_FAILURES,grace=GRACE,worker_grace=WORKER_GRACE,worker=None):
+    """Follow one child until it exits, hangs or is asked to stop; returns 'exited', 'hung' or 'stopped'.
+
+    A child whose background worker stays dead after worker_grace counts as hung, unless the
+    worker was deliberately disabled (ANIMESERVICE_START_WORKER=0 is inherited by the child)."""
     terminate=terminate or terminate_tree;started=now();next_probe=started+interval;misses=0
+    worker=os.environ.get('ANIMESERVICE_START_WORKER','1')!='0' if worker is None else worker
     while process.poll() is None:
         if stop.exists():
             deadline=now()+grace
@@ -66,7 +75,9 @@ def watch(process,base,stop=STOP,prober=probe,sleep=time.sleep,now=time.time,ter
             if process.poll() is None:terminate(process)
             return 'stopped'
         if now()>=next_probe:
-            next_probe=now()+interval;misses=0 if prober(base)=='ours' else misses+1
+            state=prober(base);next_probe=now()+interval
+            healthy=state=='ours' or state=='stalled' and (not worker or now()-started<worker_grace)
+            misses=0 if healthy else misses+1
             if misses>=failures:terminate(process);return 'hung'
         sleep(2)
     return 'exited'
@@ -105,24 +116,31 @@ def main():
     STOP.unlink(missing_ok=True);(ROOT/'data/supervisor.pid').write_text(str(os.getpid()))
     base=authority();restarts=0;log(f'supervisor start pid={os.getpid()} probe={base}')
     while not STOP.exists():
-        state=probe(base)
-        if state=='ours':restarts=0;time.sleep(10);continue
-        if state=='other':log('port 4871 occupied by another service');time.sleep(30);continue
-        rotate(ROOT/'logs/process.log')
-        with (ROOT/'logs/process.log').open('a',encoding='utf-8') as out:
-            started=time.time()
-            process=subprocess.Popen([str(ROOT/'.venv/Scripts/pythonw.exe'),'-m','anime.run'],cwd=ROOT,
-                 creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0),stdout=out,stderr=out)
-            log(f'started anime.run pid={process.pid}')
-            outcome=watch(process,base)
-        log(f'anime.run pid={process.pid} {outcome} code={process.returncode}')
-        if outcome=='stopped':break
-        restarts=0 if time.time()-started>=HEALTHY_RUN else restarts+1
-        wait=backoff(restarts) if restarts else 5
-        log(f'restart in {wait}s (consecutive restarts {restarts})')
-        for _ in range(wait):
-            if STOP.exists():break
-            time.sleep(1)
+        try:
+            state=probe(base)
+            if state in ('ours','stalled'):restarts=0;time.sleep(10);continue  # a service this supervisor did not start is left alone
+            if state=='other':log('port 4871 occupied by another service');time.sleep(30);continue
+            rotate(ROOT/'logs/process.log')
+            with (ROOT/'logs/process.log').open('a',encoding='utf-8') as out:
+                started=time.time()
+                process=subprocess.Popen([str(ROOT/'.venv/Scripts/pythonw.exe'),'-m','anime.run'],cwd=ROOT,
+                     creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0),stdout=out,stderr=out)
+                log(f'started anime.run pid={process.pid}')
+                outcome=watch(process,base)
+            log(f'anime.run pid={process.pid} {outcome} code={process.returncode}')
+            if outcome=='stopped':break
+            restarts=0 if time.time()-started>=HEALTHY_RUN else restarts+1
+            wait=backoff(restarts) if restarts else 5
+            log(f'restart in {wait}s (consecutive restarts {restarts})')
+            for _ in range(wait):
+                if STOP.exists():break
+                time.sleep(1)
+        except Exception as error:
+            # A failed launch or log open must not end the only watchdog; retry with the restart backoff.
+            restarts+=1;wait=backoff(restarts);log(f'supervisor iteration failed {type(error).__name__}; retry in {wait}s')
+            for _ in range(wait):
+                if STOP.exists():break
+                time.sleep(1)
     log('supervisor exit')
     return 0
 
