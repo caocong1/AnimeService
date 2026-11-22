@@ -2,7 +2,17 @@
 (() => {
  shell('subtitles');
  let model={rows:[],history:[],counts:{}},selected='all',loading=false,loadRevision=0,archiveEntries=[],releaseEntries=[],progressData=null;
- let detailedArchive=false;
+ let detailedArchive=false,archive={status:'pending'},archiveRead=null,present=()=>{};
+ // One archive read at a time. A refresh while it runs reuses it instead of
+ // starting another full server read and discarding the earlier answer.
+ function readArchive(){
+  const full=detailedArchive;if(archiveRead&&archiveRead.full===full)return;
+  const read=archiveRead={full};archive={status:'pending'};
+  Promise.resolve(api('/subtitle-library' + (full?'':'?compact=true'))).then(value=>({status:'fulfilled',value}),reason=>({status:'rejected',reason})).then(result=>{
+   if(archiveRead!==read)return;  // superseded by the full read
+   archiveRead=null;archive=result;if(result.status==='fulfilled')archiveEntries=result.value.entries;present();
+  }).catch(e=>{$('#delivery-notice').hidden=false;$('#delivery-notice').textContent=e.message;});
+ }
  const chosen=new URLSearchParams(location.search).get('show')||'',labels={all:'全部',done:'可以观看',making:'制作中',preparing:'准备中',waiting:'待开始'};
  const duration=r=>{const n=Math.round(r.duration_seconds);return `${Math.floor(n/60)}:${String(n%60).padStart(2,'0')}`;};
  function row(j){
@@ -35,8 +45,8 @@
  async function load(){
   if(loading)return;loading=true;const revision=++loadRevision;
   try{
-   let archive={status:'pending'},releases={status:'pending'},view={status:'pending'};
-   function present(){
+   let releases={status:'pending'},view={status:'pending'};
+   present=function(){
    if(revision!==loadRevision)return;
    const results=[archive,releases,view],available=results.some(r=>r.status==='fulfilled');
    if(!available&&!model.rows.length){
@@ -52,11 +62,11 @@
    $('#updated-at').textContent=data?`${data.live?'实时制作状态':'准备快照'}更新于 ${new Date(data.generated_at*1000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}`:view.status==='pending'?'正在读取制作进度…':'制作进度暂不可用';
    $('#subtitle-retry').hidden=true;render();
    if(archive.status==='pending'){$('#history-count').textContent+=' · 读取中';if(!model.history.length)$('#subtitle-history').innerHTML='<li>正在读取历史材料…</li>';}
-   }
+   };
    const observe=(promise,accept)=>Promise.resolve(promise).then(value=>{if(revision===loadRevision){accept({status:'fulfilled',value});present();}},reason=>{if(revision===loadRevision){accept({status:'rejected',reason});present();}});
    // Each source can render independently; slow diagnostics and folded history
    // never hold verified play buttons behind their timeouts.
-   observe(api('/subtitle-library' + (detailedArchive?'':'?compact=true')),result=>{archive=result;if(result.status==='fulfilled')archiveEntries=result.value.entries;}).catch(e=>{if(revision===loadRevision){$('#delivery-notice').hidden=false;$('#delivery-notice').textContent=e.message;}});
+   readArchive();
    await Promise.all([
     observe(FinishedReleases.load({verifyMedia:true}),result=>{releases=result;if(result.status==='fulfilled')releaseEntries=result.value;}),
     observe(projection(),result=>{view=result;if(result.status==='fulfilled')progressData=result.value;})
@@ -68,8 +78,7 @@
    if(detailedArchive || !event.target.open || !event.target.matches?.('.history-archive,.subtitle-details'))return;
    detailedArchive=true;
    // Opening a record during the first read must still start the full read.
-   loading=false;
-   load();
+   readArchive();present();
  },true);
  $('#delivery-filters').addEventListener('click',e=>{const b=e.target.closest('button[data-filter]');if(b){selected=b.dataset.filter;render();}});
  $('#subtitle-show').addEventListener('change',()=>{const u=new URL(location.href);u.searchParams.delete('show');if($('#subtitle-show').value)u.searchParams.set('show',$('#subtitle-show').value);history.replaceState(null,'',u);render();});

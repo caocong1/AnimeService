@@ -126,7 +126,7 @@ def create_app(db=None,engine=None,start_worker=True,*,playback_writers=None):
                 and origin=='http://'+host and request.headers.get('sec-fetch-site')=='same-origin')
             if (origin and origin not in expected and not loopback_port_omitted) or (not local and not origin):
                 return JSONResponse({'error':'跨站请求被拒绝'},status_code=403)
-            if not login and not secrets.compare_digest(request.headers.get('x-anime-token',''),token):return JSONResponse({'error':'会话已更新，请刷新页面'},status_code=403)
+            if not login and not secrets.compare_digest(request.headers.get('x-anime-token',''),token):return JSONResponse({'error':'会话已更新，请刷新页面','reason':'token'},status_code=403)
         response=await call_next(request)
         if path.startswith('/api/') or path in ('/login','/manage'):response.headers['Cache-Control']='no-store'
         elif (response.headers.get('content-type','').startswith('text/html')

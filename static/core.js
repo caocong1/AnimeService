@@ -24,14 +24,36 @@ window.fetch = async (...args) => {
   return r;
 };
 
-async function api(path, body, options = {}) {
-  const init = body === undefined ? {} : {
+/* Every service start issues a new write token. The middleware refuses a stale token before any handler
+   runs, so that refusal, and only that one, is sent again once with a freshly bootstrapped token. Network
+   failures, timeouts, 5xx and every other 403 keep their unknown or final outcome and are never resent. */
+const TOKEN_REFUSED = '会话已更新，请刷新页面';
+let tokenRefresh = null;
+function refreshToken(stale) {
+  if (App.token !== stale) return Promise.resolve();  // another write already fetched the new token
+  return tokenRefresh ??= fetch('/api/bootstrap').then(async r => {
+    const b = await r.json();
+    if (!r.ok || typeof b?.token !== 'string' || !b.token) throw Error('bootstrap');
+    App.token = b.token;
+  }).finally(() => { tokenRefresh = null; });
+}
+async function post(url, body, options = {}) {
+  const send = () => fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Anime-Token': App.token },
     body: JSON.stringify(body),
     keepalive: options.keepalive === true,  // lets a last write survive page hide
-  };
-  const res = await fetch('/api' + path, init);
+  });
+  const token = App.token, res = await send();
+  if (res.status !== 403) return res;
+  const refusal = await res.clone().json().catch(() => null);
+  if (refusal?.reason !== 'token' && refusal?.error !== TOKEN_REFUSED) return res;
+  try { await refreshToken(token); } catch { return res; }
+  return send();
+}
+
+async function api(path, body, options = {}) {
+  const res = body === undefined ? await fetch('/api' + path, {}) : await post('/api' + path, body, options);
   let data = {};
   try { data = await res.json(); } catch {}
   if (!res.ok) throw Object.assign(Error(data.error || data.detail || '操作失败（' + res.status + '）'), {status: res.status});
@@ -66,7 +88,7 @@ function boot() {
     Object.assign(App, { token: b.token, local: b.local, settings: b.settings, quarters: b.quarters || [], catalog_years: b.catalog_years || [],
       capabilities: capabilityWhitelist(b.capabilities), coverCache: b.cover_cache_version === 1 });
     return App;
-  });
+  }).catch(e => { App.ready = null; throw e; });  // a failed bootstrap is fetched again by the next caller
   return App.ready;
 }
 
@@ -157,7 +179,7 @@ function shell(active) {
     toast(r.blocker ? '已检查新集，下载暂时无法开始' : '已请求检查新集');
   }));
   const poll = () => health(active === 'manage');  // only the management page needs the full status
-  boot().then(() => { poll(); setInterval(() => { if (!document.hidden) poll(); }, 60000); }).catch(e => toast(e.message));
+  boot().catch(e => toast(e.message)).finally(() => { poll(); setInterval(() => { if (!document.hidden) poll(); }, 60000); });
   addEventListener('pageshow', e => { if (e.persisted) poll(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 }

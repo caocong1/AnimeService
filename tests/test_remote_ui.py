@@ -239,6 +239,20 @@ def test_saved_device_pairing_survives_service_and_browser_restart(tmp_path):
     assert fresh_browser.get('/api/bootstrap').status_code==200
 
 
+def test_stale_token_refusal_is_marked_and_runs_no_handler(tmp_path):
+    # Pages resend a write once after this exact refusal, so it must provably precede every handler.
+    app,db=app_at(tmp_path)
+    old_token=TestClient(app,base_url='http://localhost:4871').get('/api/bootstrap').json()['token']
+    engine=Mock();engine.request_check.return_value=7
+    restarted=TestClient(create_app(Store(db.path),engine,start_worker=False),base_url='http://localhost:4871')
+    stale=restarted.post('/api/check',headers={'X-Anime-Token':old_token},json={})
+    assert stale.status_code==403 and stale.json()=={'error':'会话已更新，请刷新页面','reason':'token'}
+    assert engine.request_check.call_count==0
+    fresh=restarted.get('/api/bootstrap').json()['token']
+    assert restarted.post('/api/check',headers={'X-Anime-Token':fresh},json={}).json()['sequence']==7
+    assert engine.request_check.call_count==1
+
+
 @pytest.mark.parametrize('invalid',['expired','revoked','missing','wrong'])
 def test_login_restore_never_accepts_invalid_device_pairing(tmp_path,invalid):
     remote,db=paired_client(tmp_path)

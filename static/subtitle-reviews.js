@@ -34,5 +34,5 @@
       $('#coverage').innerHTML=result.shows.map(r=>`<p><a class="link" href="/show/${r.show_id}#source-review">${esc(r.title)}</a> · ${stages[r.stage] || '待核查'}<br><span class="muted">完成样本 ${r.ready_samples} · 已实评中文 ${r.reviewed_chinese_samples} · 待下载/分析 ${r.pending_samples}${r.errored_samples ? ' · 取样受阻 '+r.errored_samples : ''}</span>${r.primary ? '<br>主源：'+esc(r.primary) : ''}${r.backups.length ? '<br>替补：'+r.backups.map(esc).join('；') : ''}</p>`).join('') || '<p class="muted">尚无已核验并纳入选源的想看新番；加入个人列表并通过核验后自动比较。</p>';
     } catch(e) { $('#coverage-summary').textContent='暂时无法读取';$('#coverage').textContent=e.message; }
   }
-  App.ready.then(()=>Promise.all([load(),coverage()]));
+  boot().catch(()=>{}).then(()=>Promise.all([load(),coverage()]));
 })();

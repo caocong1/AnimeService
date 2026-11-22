@@ -178,7 +178,7 @@ B站 UGC标题搜索保留原查询，最多追加两次去版本/标点、去�
 
 已配对设备访问/login时直接返回首页。由其他网站链接进入时，Strict Cookie可能不随首个导航发送；登录页通过同源、no-store的GET /api/bootstrap重新核验已有Cookie，成功才进入首页，失败保留手动配对。不得把Cookie/配对码/会话token存入URL或localStorage；显式注销、撤销及过期仍生效。
 
-回归：tests/test_remote_ui.py验证同一临时数据库上的应用与浏览器重建、过期/撤销/错误Cookie拒绝；node --test tests/login-pairing.test.cjs验证自动恢复、服务不可用及手动配对异步竞争。旧浏览器网页仍持有重启前的防跨站token时需刷新页面获取新token，这不等于设备配对失效。
+回归：tests/test_remote_ui.py验证同一临时数据库上的应用与浏览器重建、过期/撤销/错误Cookie拒绝；node --test tests/login-pairing.test.cjs验证自动恢复、服务不可用及手动配对异步竞争。旧浏览器网页仍持有重启前的防跨站token时，写入被中间件以`reason:'token'`拒绝（任何处理器都未执行）；core.js的`post()`据此重新读取一次/api/bootstrap的token并原样重发一次，播放页的续租、进度与看完写入也走这条路径；网络错误、超时、5xx和其他403不重发。这不等于设备配对失效（tests/token-refresh.test.cjs）。
 
 ## 首集选源评测
 
