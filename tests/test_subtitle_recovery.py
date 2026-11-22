@@ -109,6 +109,7 @@ def test_chinese_journal_during_output_cooldown_preserves_both_budgets(delivery,
         record_attempt(db, protected, first['job_id'], 'find_chinese', 'failed', [evidence], now=2002)
 
 
+@pytest.mark.requires_lab  # completed_sources fingerprints media through the private core
 @pytest.mark.parametrize('outcome, primary_status', [('failed', 'retry_wait'), ('blocked', 'repair_blocked')])
 def test_independent_chinese_route_remains_next_action_and_monitored(
         delivery, tmp_path, monkeypatch, outcome, primary_status):
@@ -152,6 +153,7 @@ def test_independent_chinese_route_remains_next_action_and_monitored(
     assert primary['status'] == primary_status  # no gate or owner mutation
 
 
+@pytest.mark.requires_lab  # completed_sources fingerprints media through the private core
 def test_actionable_deadline_ignores_refresh_and_still_attempts_overdue(delivery, tmp_path):
     db, scheduler, _, _ = delivery
     media(db, tmp_path)
@@ -397,6 +399,7 @@ def test_manual_stop_protected_but_registered_runtime_failure_is_repairable(deli
     assert plan(db, rows)['next_action']['action'] == 'recover_owner'
 
 
+@pytest.mark.requires_lab  # completed_sources fingerprints media through the private core
 def test_read_only_recovery_does_not_import_the_web_application(delivery, tmp_path, monkeypatch):
     import sys
     db, scheduler, _, _ = delivery
@@ -472,6 +475,7 @@ def test_blocker_order_and_duplicates_do_not_reset_a_condition(delivery, tmp_pat
     assert plan(db, rows)['items'][0]['condition'] == first
 
 
+@pytest.mark.requires_lab  # completed_sources fingerprints media through the private core
 def test_evidence_content_dedupes_replay_but_cooldown_rejects_new_failure(delivery, tmp_path):
     db, scheduler, _, _ = delivery
     media(db, tmp_path)
