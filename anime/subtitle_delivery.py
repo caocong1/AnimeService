@@ -476,7 +476,11 @@ class SubtitleDelivery:
         reconcile_released_facts(self.db, self.clock())
         from .subtitle_enrollment import reconcile
         enrollment = reconcile(self.db)
-        snapshot = snapshot or queue_snapshot(self.db)
+        if not snapshot:
+            # A pure read, after enrollment has committed; writes stay on the live Store.
+            from .read_projection import read_projection
+            with read_projection(self.db.path) as snapshot_db:
+                snapshot = queue_snapshot(snapshot_db)
         changes = 0
         present = set()
         late_candidates = []
@@ -561,8 +565,10 @@ class SubtitleDelivery:
                     self.db.set(error_key, {'time': self.clock(), 'error': safe_error(error)})
         # Scope changes only block future claims; unknown/acknowledged dispatch stays protected.
         for row in self.db.rows("SELECT id,show_id,episode,state,dispatch_state FROM subtitle_delivery_jobs WHERE kind='episode'"):
+            if row['id'] in present or row['state'] in ('accepted', 'finished'):
+                continue
             blocker = _scope(self.db, row['show_id'], row['episode'])
-            if row['id'] not in present and blocker and row['state'] not in ('accepted', 'finished'):
+            if blocker:
                 with self.db.connect() as c:
                     c.execute('BEGIN IMMEDIATE')
                     old = c.execute('SELECT * FROM subtitle_delivery_jobs WHERE id=?', (row['id'],)).fetchone()

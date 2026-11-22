@@ -78,7 +78,26 @@ class SubtitleStudio:
             raise ValueError('已看集保持原字幕，不自动新增制作取样')
         if submission:require_submission_ready(self.db)
 
+    def _reader(self,snapshot_db):
+        reader=object.__new__(type(self));reader.db=snapshot_db;reader.engine=getattr(self,'engine',None)
+        return reader
+
+    def permitted(self,pairs):
+        """The (show, episode) pairs passing ensure(), read from one snapshot."""
+        if not hasattr(self.db,'con'):
+            from .read_projection import read_projection
+            with read_projection(self.db.path) as snapshot_db:return self._reader(snapshot_db).permitted(pairs)
+        out=set()
+        for sid,ep in pairs:
+            try:self.ensure(sid,ep);out.add((sid,ep))
+            except ValueError:pass
+        return out
+
     def candidates(self,sid):
+        # A pure selection: queue() re-checks every gate on the live Store.
+        if not hasattr(self.db,'con'):
+            from .read_projection import read_projection
+            with read_projection(self.db.path) as snapshot_db:return self._reader(snapshot_db).candidates(sid)
         out=[];mapping=self.db.mapping(sid)
         for c in self.db.rows('''SELECT c.* FROM candidates c JOIN sources s ON s.id=c.source_id
                WHERE c.show_id=? AND s.enabled=1 ORDER BY c.id''',(sid,)):
@@ -143,6 +162,8 @@ class SubtitleStudio:
 
     def discover(self,limit=4):
         if not self.db.get('subtitle_studio_enabled',False):return
+        from .read_projection import read_projection
+        from .subtitle_reference_intake import reference_only
         count=0;attempted=0
         health=self.db.get('qbit_health',{})
         can_submit=not (self.db.get('downloader_preference')=='qbit' and health.get('ok') is False and time.time()-health.get('time',0)<300)
@@ -152,8 +173,11 @@ class SubtitleStudio:
             except ValueError:continue
             watched={r['episode'] for r in self.db.rows('SELECT episode FROM watches WHERE show_id=? AND finished=1',(sid,))}
             subtitle_only=self.engine.source_review.policy(sid).get('mode')=='subtitle_only'
-            fresh=[c['id'] for c in sorted(self.engine.source_review.candidates(sid),key=acquisition_priority)
-                   if not clean_blocker(self.db,c) and not self.db.one('SELECT 1 FROM source_samples WHERE candidate_id=?',(c['id'],))]
+            reviewed=self.engine.source_review.candidates(sid)
+            # Pure per-candidate reads run on one snapshot; writes and queue() stay live.
+            with read_projection(self.db.path) as snapshot_db:
+                fresh=[c['id'] for c in sorted(reviewed,key=acquisition_priority)
+                       if not clean_blocker(snapshot_db,c) and not snapshot_db.one('SELECT 1 FROM source_samples WHERE candidate_id=?',(c['id'],))]
             if 1 in watched or subtitle_only:fresh=[]
             if split_enabled(self.db):fresh=fresh[:base_remaining(self.db,sid,1)]
             if fresh and can_submit and attempted<limit:
@@ -162,14 +186,16 @@ class SubtitleStudio:
                 except Exception as ex:self.db.set('subtitle_studio_premiere_'+str(sid),{'time':time.time(),'error':safe_error(ex)})
             # Premiere samples keep their current source-review history and protection.
             choices={}
-            current=[c for c in sorted(self.candidates(sid),key=acquisition_priority)
-                     if c['episode'] not in watched]
-            from .subtitle_reference_intake import reference_only
-            current=[c for c in current if not reference_only(c,self.db)]
+            with read_projection(self.db.path) as snapshot_db:
+                current=[c for c in sorted(self._reader(snapshot_db).candidates(sid),key=acquisition_priority)
+                         if c['episode'] not in watched]
+                current=[c for c in current if not reference_only(c,snapshot_db)]
+                # Neither refresh_job nor the archive writes any input of clean_blocker.
+                blocked=[bool(clean_blocker(snapshot_db,c)) for c in current]
             archive=archive_for(self.db)
-            seen_jobs=set()
-            for c in current:
-                key=archive.register(sid,self.db.mapping(sid).get('season',1),c['episode'])
+            seen_jobs=set();season=self.db.mapping(sid).get('season',1)
+            for c,clean_blocked in zip(current,blocked):
+                key=archive.register(sid,season,c['episode'])
                 record={'candidate_id':c['id'],'publisher':c['family']['group'],'platform':c['family']['provider'],
                         'episode':c['episode'],'title':c['title'],'published':c.get('published')}
                 value=lab_core().canonical(record);identity=lab_core().digest(value.encode())
@@ -185,7 +211,7 @@ class SubtitleStudio:
                         if self.db.get(key_error,{}).get('error')!=message:self.db.event('subtitle-studio',f'{sid} E{c["episode"]} {message}','warning')
                         self.db.set(key_error,{'time':time.time(),'error':message})
                 if c['episode']==1 and not subtitle_only:continue
-                if clean_blocker(self.db,c):continue
+                if clean_blocked:continue
                 choices.setdefault((c['episode'],c['family']['key']),c)
             for (ep,fam),c in sorted(choices.items()):
                 if not can_submit or attempted>=limit:continue
@@ -219,10 +245,10 @@ class SubtitleStudio:
                 AND s.state IN ('queued','analyzing','ready','analysis_error','error')"""):
                 rows.append({**row,'episode':row.get('episode',1),'_derived_purpose':purpose})
         out=[];seen={}
+        permitted=self.permitted(dict.fromkeys((row['show_id'],row['episode']) for row in rows))
         for row in rows:
             sid,ep=row['show_id'],row['episode']
-            try:self.ensure(sid,ep)
-            except ValueError:continue
+            if (sid,ep) not in permitted:continue
             task=self.db.one('SELECT * FROM tasks WHERE hash=?',(row['hash'],)) if row['hash'] else None
             candidate=self.db.one('SELECT title FROM candidates WHERE id=?',(row['candidate_id'],)) if row.get('candidate_id') else None
             title=task['title'] if task else candidate['title'] if candidate else ''
@@ -646,7 +672,9 @@ def register_subtitle_studio(app,engine):
     @app.post('/api/subtitle-studio/{sid}/{ep}/publish')
     def publish(sid:int,ep:int,p:dict):return studio.production_targets.publish(sid,ep,p)
     @app.get('/api/viewing-workflow')
-    def workflow():return queue_snapshot(studio.db)
+    def workflow():
+        from .read_projection import read_projection
+        with read_projection(studio.db.path) as snapshot_db:return queue_snapshot(snapshot_db)
     @app.post('/api/subtitle-studio/{sid}/{ep}/acquire')
     def acquire(sid:int,ep:int,p:dict):
         studio.ensure(sid,ep,True)

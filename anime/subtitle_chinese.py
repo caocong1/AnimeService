@@ -57,7 +57,8 @@ def archived_chinese_sources(db, sid, ep):
         return []
     from .subtitle_lab import lab_core
     core = lab_core()
-    key = core.episode_key(sid, db.mapping(sid).get('season', 1), ep)
+    season = db.mapping(sid).get('season', 1)
+    key = core.episode_key(sid, season, ep)
     result = []
     with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as con:
         con.row_factory = sqlite3.Row
@@ -69,7 +70,7 @@ def archived_chinese_sources(db, sid, ep):
                 source, raw = _private_file(root, {'path': meta['raw_file'], 'sha256': row['raw_hash']})
                 cue_count = archived_cue_count(core.parse_subtitles, raw, source.suffix.lstrip('.'))
                 estimated = bool(meta.get('timing_is_estimated'))
-                checkpoint = _correction_progress(root, meta, row['raw_hash'], sid, season=db.mapping(sid).get('season', 1), ep=ep)
+                checkpoint = _correction_progress(root, meta, row['raw_hash'], sid, season=season, ep=ep)
                 result.append({'kind': 'archived_draft', 'draft_id': row['id'], 'path': str(source),
                     'sha256': row['raw_hash'], 'text_hash': row['text_hash'], 'cue_count': cue_count,
                     'origin': meta.get('origin'), 'media_fingerprint': meta.get('media_fingerprint'),
@@ -169,6 +170,12 @@ def completed_sources(db, sid, ep):
     for task in db.rows("SELECT * FROM tasks WHERE show_id=? AND status IN ('complete','linked') ORDER BY hash", (sid,)):
         try:
             if task.get('purpose') not in ('episode', 'source_sample', 'subtitle_sample'):
+                continue
+            # Pure per-episode filter before the DB-backed gates, which only
+            # reject; a malformed selection keeps the original order below.
+            selection = json.loads(task['selection'])
+            chosen = selection.get('selected', {}) if isinstance(selection, dict) else None
+            if isinstance(chosen, dict) and not chosen.get(str(ep)):
                 continue
             if fidelity_blocker(db, task['title'], task['selection']):
                 continue
