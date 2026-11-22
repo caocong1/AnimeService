@@ -80,3 +80,96 @@ def test_unregistered_staging_file_is_kept_and_the_new_body_is_staged_beside_it(
     assert len(sibling) == 1 and b'1000 --> 2000' in sibling[0].read_bytes()
     assert archive_text_source(archive, fake_core(), 42, 1, 1, source, META) == ids and len(archive.drafts) == 3
     assert not [p for p in staged.iterdir() if p.name.endswith('.tmp')]
+
+
+class SyncThread:
+    def __init__(self, target, **kwargs):
+        self.target = target
+
+    def start(self):
+        self.target()
+
+
+@pytest.fixture
+def studio(setup, monkeypatch, tmp_path):
+    """A completed task whose bad Chinese sidecar is listed before a good Japanese one."""
+    db, q, e, c = setup
+    db.set('subtitle_studio_enabled', True)
+    root = tmp_path / 'library' / 'Example';root.mkdir(parents=True)
+    video = root / 'Example - 01.mkv';video.write_bytes(b'v' * 100)
+    bad = root / 'Example - 01.chs.srt';bad.write_bytes(b'1\n00:00:01,000 --> 00:00:01,000\nBROKEN\n')
+    good = root / 'Example - 01.jpn.srt';good.write_bytes(b'1\n00:00:01,000 --> 00:00:02,000\nmata\n')
+    files = [{'index': i, 'name': p.name, 'size': p.stat().st_size} for i, p in enumerate((bad, good, video))]
+    selection = {'files': files, 'ids': [0, 1, 2], 'selected': {'1': files[2]}}
+    db.execute("INSERT INTO tasks(hash,show_id,title,status,selection,save_path,created,updated) VALUES('h',42,'[Group] Example - 01','complete',?,?,0,0)",
+               (json.dumps(selection), str(root)))
+    archive = FakeArchive(tmp_path / 'archive');now = [1000.0]
+    s = e.subtitle_studio
+    monkeypatch.setattr(studio_module, 'lab_core', lambda: fake_core())
+    monkeypatch.setattr(studio_module, 'archive_for', lambda db: archive)
+    monkeypatch.setattr(studio_module, 'threading', SimpleNamespace(Thread=SyncThread))
+    monkeypatch.setattr(studio_module, 'time', SimpleNamespace(time=lambda: now[0]))
+    monkeypatch.setattr(s, 'ensure', lambda sid, ep: None)
+    monkeypatch.setattr(s, 'refresh_job', lambda *args, **kwargs: None)
+    monkeypatch.setattr(s.sub, 'tracks', lambda item: [])
+    item = {'show_id': 42, 'episode': 1, 'path': str(video), 'size': 100, 'hash': 'h',
+            'title': '[Group] Example - 01', 'fingerprint': 'fp-' + video.name, 'inventory_revision': 'r1'}
+    items = [item]
+    monkeypatch.setattr(s, 'media', lambda: [dict(i) for i in items])
+    return db, s, archive, items, bad, now
+
+
+def warnings(db):
+    return [r['message'] for r in db.rows("SELECT message FROM events WHERE scope='subtitle-studio' ORDER BY id")]
+
+
+def test_rejected_sidecar_is_recorded_once_and_retried_only_when_it_changes(studio):
+    db, s, archive, items, bad, now = studio
+    for _ in range(3):
+        s.tick();now[0] += 600
+    assert archive.calls == ['Example - 01.chs.srt', 'Example - 01.jpn.srt']  # the later good sidecar is archived
+    payload = json.loads(db.one('SELECT payload FROM subtitle_studio_media')['payload'])
+    assert payload['inventory_revision'] == 'r1' and len(payload['draft_ids']) == 1
+    assert payload['errors'] == ['sidecar 0 ValueError: empty subtitles or invalid timing']
+    assert warnings(db) == ['42 E1 字幕归档跳过 1 项输入，详见归档清单']
+    bad.write_bytes(bad.read_bytes().replace(b'BROKEN', b'fixed!'))  # same size, new sha -> new revision
+    items[0]['inventory_revision'] = 'r2'
+    s.tick();s.tick()
+    assert archive.calls[2:] == ['Example - 01.chs.srt', 'Example - 01.jpn.srt']
+    assert json.loads(db.one('SELECT payload FROM subtitle_studio_media')['payload'])['errors'] == []
+    assert len(warnings(db)) == 1
+
+
+def test_failing_media_backs_off_without_starving_later_media(studio, monkeypatch):
+    db, s, archive, items, bad, now = studio
+    videos = [Path(items[0]['path']).with_name(f'Example - 0{ep}.mkv') for ep in (1, 2, 3)]
+    for video in videos[1:]:
+        video.write_bytes(b'v' * 100)
+    items[:] = [{**items[0], 'path': str(video), 'fingerprint': fp, 'episode': ep}
+                for ep, fp, video in zip((1, 2, 3), ('f1', 'f2', 'f3'), videos)]
+    monkeypatch.setattr(studio_module, 'lab_core', lambda: SimpleNamespace(
+        **{**vars(fake_core()), 'fingerprint': lambda path, size=None: 'f' + Path(path).stem[-1]}))
+    attempts = [];collect = s.collect
+    def flaky(item):
+        attempts.append(item['fingerprint'])
+        if item['fingerprint'] != 'f3':
+            raise ValueError('immutable base changed')
+        return collect(item)
+    monkeypatch.setattr(s, 'collect', flaky)
+    s.tick();s.tick()
+    assert attempts == ['f1', 'f2', 'f3']  # failures wait out their backoff without taking slots
+    assert db.one("SELECT 1 FROM subtitle_studio_media WHERE fingerprint='f3'")
+    events = warnings(db)
+    assert len(events) == 2 and all('网络' not in m for m in events)
+    assert events[0].startswith('42 E1 ValueError：字幕归档拒绝（subtitle_studio.')
+    assert events[1].startswith('42 E2 ValueError：字幕归档拒绝（subtitle_studio.')
+    failure = db.get('subtitle_studio_collect_error_f1')
+    assert failure['count'] == 1 and failure['revision'] == 'r1' and failure['next'] == 1300
+    for _ in range(4):
+        now[0] = db.get('subtitle_studio_collect_error_f1')['next'];s.tick()
+    assert db.get('subtitle_studio_collect_error_f1')['count'] == 5
+    assert [m for m in warnings(db) if m.startswith('42 E1')] == [events[0], events[0]]  # marks 1 and 5 only
+    monkeypatch.setattr(s, 'collect', collect)
+    now[0] = db.get('subtitle_studio_collect_error_f1')['next'];s.tick()
+    assert db.get('subtitle_studio_collect_error_f1') is None
+    assert db.one("SELECT 1 FROM subtitle_studio_media WHERE fingerprint='f1'")
