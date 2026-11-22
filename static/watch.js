@@ -1215,15 +1215,17 @@
 
   (async () => {
     try {
-      await boot();
-      try {
-        const capabilities = await web('/alignment-capabilities');
-        if (Array.isArray(capabilities.sites)) alignmentSites = capabilities.sites.filter(site => ['bilibili','bahamut'].includes(site));
-      } catch (_) { /* An older worker can keep protecting active playback. */ }
-      try { releases = await FinishedReleases.load({verifyMedia:true}); }
-      catch (e) { if (releaseId) throw e; tracking(e.message); }
-      try { media = await web('/media/' + id); }
-      catch (e) {
+      // Independent read-only GETs start together; their outcomes are applied in the old order.
+      const [ready, capabilities, loaded, item] = await Promise.allSettled([
+        boot(), web('/alignment-capabilities'), FinishedReleases.load({verifyMedia:true}), web('/media/' + id)]);
+      if (ready.status === 'rejected') throw ready.reason;
+      // An older worker can keep protecting active playback.
+      if (capabilities.status === 'fulfilled' && Array.isArray(capabilities.value?.sites)) alignmentSites = capabilities.value.sites.filter(site => ['bilibili','bahamut'].includes(site));
+      if (loaded.status === 'fulfilled') releases = loaded.value;
+      else if (releaseId) throw loaded.reason; else tracking(loaded.reason.message);
+      if (item.status === 'fulfilled') media = item.value;
+      else {
+        const e = item.reason;
         if (!releaseId || e.status !== 404) throw e;
         // Static UI can update while the previous worker protects an active movie.
         // The established delivery API already validates current ownership and SHA.
