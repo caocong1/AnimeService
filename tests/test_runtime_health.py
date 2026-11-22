@@ -93,3 +93,25 @@ def test_health_problems_follow_the_status_rules_and_events_are_pruned(setup):
     db.set('events_keep_days','bad');db.execute('INSERT INTO events(time,level,scope,message) VALUES(?,?,?,?)',(now-2*86400,'info','older','y'))
     assert db.prune_events(now=now)==0  # an invalid keep-days setting falls back to 30 days
     db.set('events_keep_days',1);assert db.prune_events(now=now)==0 and db.rows("SELECT * FROM events WHERE scope='older'")  # still within the newest 2000
+
+
+def test_health_reports_the_data_volume_and_recent_sqlite_storage_failures(tmp_path,monkeypatch):
+    import sqlite3
+    from types import SimpleNamespace
+    from anime import db as store_module, runtime
+    db=Store(tmp_path/'data/test.db');seen=[]
+    for key,value in (('count',0),('time',None),('code',None)):monkeypatch.setitem(store_module.DB_ERRORS,key,value)
+    monkeypatch.setattr(runtime.shutil,'disk_usage',lambda path:seen.append(path) or SimpleNamespace(free=8*2**30))
+    h=runtime.health(db)
+    assert seen==[db.path.parent] and h['download_storage'] is None
+    assert h['data_storage']=={'free_gib':8.0,'reserve_gib':10,'below_reserve':True}
+    assert h['db_errors']=={'count':0,'time':None,'code':None}
+    db.set('minimum_free_gb',5)
+    assert runtime.health(db)['data_storage']['below_reserve'] is False
+    error=sqlite3.OperationalError('disk I/O error');error.sqlite_errorname='SQLITE_IOERR_WRITE'
+    store_module.note_db_error(error);store_module.note_db_error(sqlite3.OperationalError('no such table'))
+    errors=runtime.health(db)['db_errors']
+    assert errors['count']==1 and errors['code']=='SQLITE_IOERR_WRITE' and errors['time']>0
+    def unavailable(path):raise OSError('volume gone')
+    monkeypatch.setattr(runtime.shutil,'disk_usage',unavailable)
+    assert runtime.health(db)['data_storage'] is None

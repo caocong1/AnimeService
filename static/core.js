@@ -190,6 +190,10 @@ function healthSummary(h, now = Date.now() / 1000) {
     const {free_gib, reserve_gib} = h.download_storage;
     return {state:'warn', text:'下载盘空间不足', title:`剩余 ${free_gib} GiB，新增下载需保留 ${reserve_gib} GiB`};
   }
+  if (alive && h.data_storage?.below_reserve) {
+    const {free_gib, reserve_gib} = h.data_storage;
+    return {state:'warn', text:'数据盘空间不足', title:`数据库所在盘剩余 ${free_gib} GiB，低于保留 ${reserve_gib} GiB，写入可能失败`};
+  }
   const state = !alive ? 'down' : p.blocker || p.error || p.reviews ? 'warn' : 'ok';
   const text = !alive ? '后台未响应' : p.blocker ? '下载受阻' : p.error ? '服务暂时异常' : p.reviews ? '正在确认下载' : '后台正常';
   return { state, text, title: alive ? '心跳 ' + ago(now - h.heartbeat.age) : '' };

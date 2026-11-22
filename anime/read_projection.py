@@ -3,15 +3,20 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from .db import Store
+from .db import Store, open_connection
+
+
+def _prepare(con):
+    # The schema read opens the WAL index, so a transient storage error surfaces here and can be retried.
+    con.row_factory = sqlite3.Row
+    con.execute('PRAGMA query_only=ON')
+    con.execute('PRAGMA schema_version').fetchone()
 
 
 class ProjectionStore(Store):
     def __init__(self, path):
         self.path = Path(path)
-        self.con = sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True)
-        self.con.row_factory = sqlite3.Row
-        self.con.execute('PRAGMA query_only=ON')
+        self.con = open_connection(self.path.resolve().as_uri() + '?mode=ro', 5.0, _prepare, uri=True)
         self.con.execute('BEGIN')
         self._shows = {}
         self._values = {}
