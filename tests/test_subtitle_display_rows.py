@@ -75,8 +75,10 @@ def test_valid_pairs_use_visible_text_fonts_in_tag_order(tmp_path, text):
 
 
 def test_encoding_rejects_before_output_directory_or_worker(tmp_path, monkeypatch):
-    from scripts.finish_subtitle_episode import build
+    from scripts import finish_subtitle_episode
     from anime import subtitle_coverage
+    monkeypatch.setattr(finish_subtitle_episode, 'PROJECT', tmp_path)  # never the project's real DB
+    build = finish_subtitle_episode.build
     monkeypatch.setattr(subtitle_coverage, 'validate', lambda *args: None)
     ass = subtitle(tmp_path, r'第一行\N第二行')
     output = tmp_path / 'new-release'
