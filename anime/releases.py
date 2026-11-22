@@ -7,7 +7,8 @@ _chinese=OpenCC('t2s')
 
 VIDEO={'.mkv','.mp4','.avi','.m4v','.ts','.webm'}
 SUB={'.ass','.ssa','.srt','.sup'}
-class Rejected(ValueError):pass
+class Rejected(ValueError):
+    safe_message=True  # project-authored reasons, never request URLs or bodies
 @lru_cache(maxsize=32768)
 def norm(s):return re.sub(r'[^\w\u3040-\u30ff\u3400-\u9fff]+','',_chinese.convert(unicodedata.normalize('NFKC',s)).casefold())
 def season_of(title):
